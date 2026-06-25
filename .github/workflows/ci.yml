@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ----------------------------------------------------------------- lint
+  lint:
+    name: lint (fmt / clippy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain (pinned)
+        uses: dtolnay/rust-toolchain@1.96.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      # PyO3 extension-module crates need an interpreter on the host for the
+      # `cargo` (clippy/test) link path.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: rustfmt
+        run: cargo fmt --all --check
+      - name: clippy (-D warnings)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  # ----------------------------------------------------------------- test
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+      # PyO3 extension-module crates need an interpreter to link against on the
+      # plain `cargo test` path. The OCR tests run against the git-dep ocrspine's
+      # compile-time `CARGO_MANIFEST_DIR/models` weights, fetched by cargo.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: cargo test --workspace --all-features
+        run: cargo test --workspace --all-features
+
+  # ----------------------------------------------------------------- pytest
+  pytest:
+    name: pytest (py${{ matrix.python }} / ${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.11", "3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install maturin + test deps
+        run: pip install "maturin>=1.12,<2" pytest
+      # Editable install builds the extension WITH OCR compiled in (ppt-ocr is a
+      # non-optional workspace member) and ships the in-repo `pptspine/_models`
+      # weights, so the OCR test recognizes the bundled fixture offline.
+      - name: Build + install (editable; pip 走 maturin PEP 660)
+        run: pip install -e .
+      - name: pytest
+        run: pytest
+
+  # ----------------------------------------------------------------- wheels
+  wheels:
+    name: wheels (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.96.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build abi3 wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --out dist --strip
+      # Install the just-built wheel into a clean env and run a real PP-OCRv5
+      # recognition on the bundled models — the same gate the release uses, so CI
+      # catches a model-bundling regression before a tag is ever pushed.
+      - name: Wheel OCR smoke (install + real recognition)
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --no-index --find-links dist pptspine
+          python -c "import pptspine; print('pptspine', pptspine.__version__)"
+          python scripts/ocr_smoke.py python/tests/fixtures/ocr_sample.png
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}
+          path: dist/*.whl

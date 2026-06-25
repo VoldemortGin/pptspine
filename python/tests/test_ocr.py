@@ -1,9 +1,10 @@
 """图片 OCR 桥的验收测试 —— 把已知图片喂给 ``pptspine.ocr_image`` 断言识别结果。
 
-OCR 走姊妹 crate ``ocrspine``(PP-OCRv5 / tract-onnx,本地、离线、确定性)。模型由扩展
-在编译期烘进的 ``CARGO_MANIFEST_DIR/models``(即 ``../ocrspine/models``)解析,或由
-``OCRSPINE_MODELS`` 环境变量覆盖,所以默认离线即可跑。复用 ocrspine 自带、已验证的
-``ocr_sample.png`` fixture(含 "pdfspine OCR test 2026" 等参考行),不另落二进制。
+OCR 走姊妹 crate ``ocrspine``(PP-OCRv5 / tract-onnx,本地、离线、确定性)。``ocr_image``
+是顶层 Python 包装,委托 Rust ``_core`` 前先把引擎指向 wheel 内自带的 ``pptspine/_models``
+权重(或由 ``PPTSPINE_OCR_MODELS`` / ``OCRSPINE_MODELS`` 环境变量覆盖,或源码 checkout 里
+回退到 ocrspine 编译期烘进的 ``CARGO_MANIFEST_DIR/models``),所以默认离线即可跑。复用
+本仓自带、已验证的 ``ocr_sample.png`` fixture(含 "pdfspine OCR test 2026" 等参考行)。
 """
 
 from __future__ import annotations
@@ -14,11 +15,9 @@ import pytest
 
 import pptspine
 
-# ocrspine 是 pptspine 的姊妹包,布局为 spine/ocrspine 与 spine/pptspine 平级。
-# 从本测试文件往上回到 spine/,再进 ocrspine 的 fixture。
-_OCR_SAMPLE = (
-    Path(__file__).resolve().parents[3] / "ocrspine" / "tests" / "fixtures" / "ocr_sample.png"
-)
+# OCR 样张随仓 vendored 在 python/tests/fixtures/(与 ocrspine 的字节一致),使测试不依赖
+# 姊妹 ocrspine clone 即可跑。
+_OCR_SAMPLE = Path(__file__).resolve().parent / "fixtures" / "ocr_sample.png"
 
 
 @pytest.fixture(scope="session")
