@@ -23,7 +23,7 @@ ppt-ocr = { path = "crates/ppt-ocr", version = "0.0.1" }
 
 # --- sibling family crate: domain-neutral OCR (single source of truth for the
 # path; ppt-ocr uses `ocrspine.workspace = true` so no per-crate path math). ---
-ocrspine = { path = "../ocrspine" }
+ocrspine = { git = "https://github.com/VoldemortGin/ocrspine", rev = "732975f0233cd6500edfbbb82bc06c2332369871" }
 
 # --- shared third-party deps (pinned to resolve on toolchain 1.96) ---
 thiserror = "2"
