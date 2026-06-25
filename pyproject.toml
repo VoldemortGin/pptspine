@@ -31,6 +31,12 @@ classifiers = [
     "Topic :: Office/Business :: Office Suites",
 ]
 
+# The PP-OCRv5 ONNX model weights ship in the shared `ocrspine-models` data
+# package (one published copy for the whole spine family), resolved at runtime via
+# `ocrspine_models.models_dir()`. Hard (base) dependency so a plain
+# `pip install pptspine` is full-OCR-capable offline — no extra, no download.
+dependencies = ["ocrspine-models>=0.0.1,<0.1"]
+
 [project.urls]
 Homepage = "https://github.com/VoldemortGin/pptspine"
 Repository = "https://github.com/VoldemortGin/pptspine"
@@ -38,19 +44,19 @@ Issues = "https://github.com/VoldemortGin/pptspine/issues"
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
-# OCR 已**全功能内建**。只有一个发布的 `pptspine` wheel,它既**编进**了纯 Rust 的
-# PaddleOCR 引擎(`ppt-ocr` 是非可选的 workspace 成员,经 py-bindings 无条件链入),
-# 又把 ~28 MB 的 PP-OCRv5 ONNX 权重**打进**了包内(位于 `pptspine/_models`,见下方
-# `[tool.maturin] include`)。所以裸 `pip install pptspine` 即全功能 OCR、离线可跑、
-# 无额外 extra、无独立数据包。此 `[ocr]` extra 故为空,仅保留名字以向后兼容。
+# OCR 已**全功能内建**。只有一个发布的 `pptspine` wheel,它**编进**了纯 Rust 的
+# PaddleOCR 引擎(`ppt-ocr` 是非可选的 workspace 成员,经 py-bindings 无条件链入);
+# ~28 MB 的 PP-OCRv5 ONNX 权重来自共享数据包 `ocrspine-models`(见上方 base
+# `dependencies`)。所以裸 `pip install pptspine` 即全功能 OCR、离线可跑、无需额外
+# extra。此 `[ocr]` extra 故为空,仅保留名字以向后兼容。
 #
 # 运行期模型解析顺序(见 `python/pptspine/__init__.py` 的 `_ensure_ocr_models_env`,
 # 它把目录同时导出为 `PPTSPINE_OCR_MODELS` 与引擎读取的 `OCRSPINE_MODELS`):
 #   1. `PPTSPINE_OCR_MODELS` 已设置(用户显式覆盖);
-#   2. 否则 wheel 内自带的 `pptspine/_models` 目录(已装 wheel 的默认);
+#   2. 否则已安装的共享数据包 `ocrspine_models`(已装 wheel 的默认);
 #   3. 否则引擎回退到编译期烘进的 `ocrspine/models` 开发目录(源码 checkout);
 #   4. 否则抛出清晰的 `PptOcrError` / `PptUnsupportedError`。
-ocr = []  # 模型已打进 wheel;此 extra 为向后兼容的 no-op。
+ocr = []  # 模型来自 base `ocrspine-models` 依赖;此 extra 为向后兼容的 no-op。
 
 [tool.maturin]
 # The Rust crate that builds the extension module.
@@ -64,9 +70,9 @@ python-source = "python"
 # OCR 是**非可选**的:`ppt-ocr` 是 workspace 成员,py-bindings 无条件依赖它(它再依赖
 # 姊妹 crate `ocrspine` 的纯 Rust PaddleOCR 引擎)。因此 `cargo build` / `maturin
 # build` 都把 OCR 代码编进扩展,不需要任何额外 feature 开关。~28 MB 的 PP-OCRv5 ONNX
-# 权重不嵌进二进制(那会撑大非 OCR 用户的内存),而是作为数据文件 SHIP 在 wheel 里
-# (位于 `pptspine/_models`,见下方 `include`),运行期从磁盘加载(见上方 `[ocr]`
-# extra 里的模型解析顺序)。净效果:裸 `pip install pptspine` 同时带 OCR 代码与模型。
+# 权重不嵌进二进制、也不打进本 wheel,而是来自共享数据包 `ocrspine-models`(见上方
+# base `dependencies`),运行期从磁盘加载(见上方 `[ocr]` extra 里的模型解析顺序)。
+# 净效果:裸 `pip install pptspine` 同时拉来 OCR 代码(本 wheel)与模型(数据包)。
 features = ["pyo3/abi3-py311"]
 # Ship PEP 561 type information (.pyi stubs + py.typed markers) in sdist + wheel.
 # 根 LICENSE / NOTICE 也显式纳入:元数据声明 License-File,PyPI 要求它实际存在于分发
@@ -76,14 +82,6 @@ include = [
     "NOTICE",
     "python/pptspine/py.typed",
     "python/pptspine/*.pyi",
-    # 把 PP-OCRv5 ONNX 权重打进包内(装后位于 site-packages/pptspine/_models/),使
-    # `pip install pptspine` 直接全功能 OCR、离线可跑、无需独立数据包。这些是 ~28MB
-    # 的二进制 .onnx + 字典,maturin 默认不打非 .py 文件,故显式列出,确保进入
-    # sdist + wheel。识别字典与 PROVENANCE 一并纳入(字典虽由 Rust `include_str!`
-    # 编进二进制,这里随附以保持目录自洽与许可可追溯)。
-    "python/pptspine/_models/*.onnx",
-    "python/pptspine/_models/ppocr_keys_v5.txt",
-    "python/pptspine/_models/PROVENANCE.md",
 ]
 
 [tool.pytest.ini_options]
