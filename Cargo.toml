@@ -1,0 +1,39 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/ppt-core",
+    "crates/ppt-parse",
+    "crates/ppt-ocr",
+    "crates/py-bindings",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/VoldemortGin/pptspine"
+authors = ["pptspine contributors"]
+rust-version = "1.96"
+
+[workspace.dependencies]
+# --- shared first-party crates ---
+ppt-core = { path = "crates/ppt-core", version = "0.0.1" }
+ppt-parse = { path = "crates/ppt-parse", version = "0.0.1" }
+ppt-ocr = { path = "crates/ppt-ocr", version = "0.0.1" }
+
+# --- sibling family crate: domain-neutral OCR (single source of truth for the
+# path; ppt-ocr uses `ocrspine.workspace = true` so no per-crate path math). ---
+ocrspine = { path = "../ocrspine" }
+
+# --- shared third-party deps (pinned to resolve on toolchain 1.96) ---
+thiserror = "2"
+pyo3 = "0.29"
+# Read-only zip for .pptx (OOXML = zip + XML). Pure-Rust DEFLATE backend so the
+# build stays self-contained / cross-platform; no system zlib.
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# Pull-based, low-allocation XML reader for the OOXML parts. Pure-Rust.
+quick-xml = "0.36"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

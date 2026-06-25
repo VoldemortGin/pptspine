@@ -1,0 +1,16 @@
+[package]
+name = "ppt-ocr"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "pptspine image-OCR bridge: applies ocrspine (PaddleOcr) to embedded pictures."
+
+[dependencies]
+ppt-core = { workspace = true }
+# Single source of truth for the path lives in [workspace.dependencies]
+# (`ocrspine = { path = "../ocrspine" }`); use it here without per-crate path math.
+ocrspine = { workspace = true }

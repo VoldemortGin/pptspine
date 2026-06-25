@@ -1,0 +1,65 @@
+[build-system]
+requires = ["maturin>=1.12,<2"]
+build-backend = "maturin"
+
+[project]
+name = "pptspine"
+# The version is taken from the Rust workspace (Cargo.toml [workspace.package])
+# at build time via maturin's `dynamic` metadata — that crate version is the
+# single source of truth.
+dynamic = ["version"]
+description = "Pure-Rust PowerPoint (.pptx / OOXML) structural parser with local image OCR, via PyO3."
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+authors = [{ name = "pptspine contributors" }]
+keywords = ["pptx", "powerpoint", "ooxml", "office", "rust", "ocr"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Office/Business :: Office Suites",
+]
+
+[project.urls]
+Homepage = "https://github.com/VoldemortGin/pptspine"
+Repository = "https://github.com/VoldemortGin/pptspine"
+Issues = "https://github.com/VoldemortGin/pptspine/issues"
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[tool.maturin]
+# The Rust crate that builds the extension module.
+manifest-path = "crates/py-bindings/Cargo.toml"
+# Place the compiled `_core` inside the `pptspine` package.
+module-name = "pptspine._core"
+# Pure-Python sources live here.
+python-source = "python"
+# abi3 wheel covering CPython >= 3.11.
+features = ["pyo3/abi3-py311"]
+# Ship PEP 561 type information (.pyi stubs + py.typed markers) in sdist + wheel.
+include = [
+    "LICENSE",
+    "python/pptspine/py.typed",
+    "python/pptspine/*.pyi",
+]
+# OCR models: the OCR engine (ocrspine) resolves its own ONNX models at runtime
+# via the `OCRSPINE_MODELS` env var, falling back to its compile-time
+# `CARGO_MANIFEST_DIR/models` (i.e. ../ocrspine/models for a dev checkout). So
+# `maturin develop` works offline with NO model bundling needed in this package.
+# Bundling the ~28 MB PP-OCRv5 weights into the wheel for distribution is a
+# deferred CI task (see README "Deferred").
+
+[tool.pytest.ini_options]
+testpaths = ["python/tests"]
