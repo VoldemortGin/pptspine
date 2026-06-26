@@ -221,9 +221,5 @@ jobs:
         if: github.event_name == 'push' || github.event.inputs.publish_target == 'pypi'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          # API-token auth for the first publish (same path pdfspine used for its
-          # first release). Once a pending publisher is configured on PyPI for
-          # `pptspine`, drop this `with:` to use tokenless OIDC Trusted Publishing.
-          password: ${{ secrets.PYPI_API_TOKEN }}
           # 跳过已存在的文件:让 tag 重跑只补传缺的平台 wheel,不因重复文件而整批失败。
           skip-existing: true
