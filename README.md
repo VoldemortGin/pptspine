@@ -1,5 +1,7 @@
 # pptspine
 
+[![PyPI](https://img.shields.io/pypi/v/pptspine.svg)](https://pypi.org/project/pptspine/)
+
 A pure-Rust PowerPoint (`.pptx`) parser with Python bindings (PyO3 / maturin,
 abi3-py311). A `.pptx` file is OOXML — a zip archive of XML parts — and pptspine
 walks that XML directly to produce a structured, information-preserving model:
@@ -27,6 +29,17 @@ offline, and deterministically via the sibling [`ocrspine`](../ocrspine) crate
 
 Parsing is tolerant: unknown elements are skipped, missing attributes become
 `None`, and malformed input yields a typed `PptError` rather than a panic.
+
+## Install
+
+```bash
+pip install pptspine
+```
+
+pptspine is **on PyPI**. OCR works out of the box: the PP-OCRv5 weights ship in
+the shared [`ocrspine-models`](https://pypi.org/project/ocrspine-models/) data
+package — a runtime dependency `pip` pulls in automatically — so the wheel itself
+ships no models. To build from source instead, see below.
 
 ## Build (from the package root)
 
@@ -79,6 +92,5 @@ crates/
 - Image-table geometry reconstruction from OCR boxes
   (`ppt_ocr::reconstruct_table_from_image`, currently a typed `Unsupported`
   stub).
-- Bundling the PP-OCRv5 ONNX weights into the published wheel (a CI task).
 - Richer color models (theme/scheme colors, gradients), hyperlinks, charts,
   SmartArt, notes/comments.
