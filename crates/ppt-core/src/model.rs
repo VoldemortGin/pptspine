@@ -25,6 +25,8 @@ pub struct Slide {
     pub layout_name: Option<String>,
     /// 关联的母版名(best-effort)。
     pub master_name: Option<String>,
+    /// 演讲者备注文本(`ppt/notesSlides/notesSlideN.xml` 的 body 占位符);无备注为 `None`。
+    pub notes: Option<String>,
 }
 
 /// 形状树里的一个节点。

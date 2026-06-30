@@ -5,10 +5,12 @@
 //! `py-bindings` 暴露。保持 domain-neutral、稳定、可测。
 
 pub mod error;
+pub mod export;
 pub mod geom;
 pub mod model;
 
 pub use error::{PptError, Result};
+pub use export::{presentation_markdown, presentation_text, slide_text};
 pub use geom::{emu_to_points, Emu, Point, Rect, EMU_PER_INCH, EMU_PER_POINT};
 pub use model::{
     AutoShape, Cell, Color, Paragraph, Picture, Presentation, Row, Shape, Slide, Table, TextFrame,

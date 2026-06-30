@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import zipfile
+from pathlib import Path
 
 import pytest
 
@@ -146,3 +147,211 @@ def minimal_pptx_path(minimal_pptx_bytes: bytes, tmp_path) -> str:
 def slide_canvas() -> tuple[int, int]:
     """合成 deck 的画布尺寸 ``(cx, cy)``(EMU),供断言复用。"""
     return (_SLIDE_CX, _SLIDE_CY)
+
+
+# --- 进阶合成 fixture:内嵌图片 / 演讲者备注 / 合并单元格表格 ---------------------
+
+_FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
+
+# 复用本仓已 vendored、已验证的 OCR 样张,作为内嵌图片字节(含已知参考行)。
+_OCR_SAMPLE_PNG = _FIXTURES_DIR / "ocr_sample.png"
+
+
+def _zip_pptx(parts: dict[str, bytes | str]) -> bytes:
+    """把一组部件(路径 -> 文本/字节)打成内存里的 ``.pptx`` zip 字节串。"""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, data in parts.items():
+            z.writestr(name, data)
+    return buf.getvalue()
+
+
+# 一张内嵌图片的 slide(``p:pic`` 经 rels 关联到 ``ppt/media/image1.png``)。
+_CONTENT_TYPES_IMAGE = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="png" ContentType="image/png"/>
+  <Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
+  <Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
+</Types>"""
+
+_SLIDE_IMAGE = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+       xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+       xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:pic>
+        <p:nvPicPr>
+          <p:cNvPr id="2" name="Picture 1"/>
+          <p:cNvPicPr/>
+          <p:nvPr/>
+        </p:nvPicPr>
+        <p:blipFill><a:blip r:embed="rId1"/></p:blipFill>
+        <p:spPr>
+          <a:xfrm><a:off x="838200" y="365125"/><a:ext cx="2743200" cy="1143000"/></a:xfrm>
+          <a:prstGeom prst="rect"/>
+        </p:spPr>
+      </p:pic>
+    </p:spTree>
+  </p:cSld>
+</p:sld>"""
+
+_SLIDE_IMAGE_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/>
+</Relationships>"""
+
+
+@pytest.fixture(scope="session")
+def image_pptx() -> tuple[bytes, str, bytes]:
+    """一张含内嵌图片的合成 ``.pptx``。返回 ``(pptx_bytes, media_name, png_bytes)``。"""
+    png = _OCR_SAMPLE_PNG.read_bytes()
+    pptx = _zip_pptx(
+        {
+            "[Content_Types].xml": _CONTENT_TYPES_IMAGE,
+            "_rels/.rels": _ROOT_RELS,
+            "ppt/presentation.xml": _PRESENTATION,
+            "ppt/_rels/presentation.xml.rels": _PRESENTATION_RELS,
+            "ppt/slides/slide1.xml": _SLIDE_IMAGE,
+            "ppt/slides/_rels/slide1.xml.rels": _SLIDE_IMAGE_RELS,
+            "ppt/media/image1.png": png,
+        }
+    )
+    return pptx, "image1.png", png
+
+
+# 一张带演讲者备注的 slide(经 rels 关联到 ``ppt/notesSlides/notesSlide1.xml``)。
+_NOTES_TEXT = "Remember to smile\nSecond note line"
+
+_CONTENT_TYPES_NOTES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
+  <Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
+  <Override PartName="/ppt/notesSlides/notesSlide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml"/>
+</Types>"""
+
+_SLIDE_NOTES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+       xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+       xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:sp>
+        <p:txBody>
+          <a:p><a:r><a:t>Slide with notes</a:t></a:r></a:p>
+        </p:txBody>
+      </p:sp>
+    </p:spTree>
+  </p:cSld>
+</p:sld>"""
+
+_SLIDE_NOTES_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notesSlide1.xml"/>
+</Relationships>"""
+
+# 备注页:body 占位符里两段备注 + 一个非 body 占位符(应被忽略)。
+_NOTES_SLIDE = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:notes xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+         xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+         xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:sp>
+        <p:nvSpPr>
+          <p:cNvPr id="2" name="Slide Image Placeholder 1"/>
+          <p:cNvSpPr/>
+          <p:nvPr><p:ph type="sldImg"/></p:nvPr>
+        </p:nvSpPr>
+        <p:txBody><a:p><a:r><a:t>NOT THE NOTES</a:t></a:r></a:p></p:txBody>
+      </p:sp>
+      <p:sp>
+        <p:nvSpPr>
+          <p:cNvPr id="3" name="Notes Placeholder 2"/>
+          <p:cNvSpPr/>
+          <p:nvPr><p:ph type="body" idx="1"/></p:nvPr>
+        </p:nvSpPr>
+        <p:txBody>
+          <a:p><a:r><a:t>Remember to smile</a:t></a:r></a:p>
+          <a:p><a:r><a:t>Second note line</a:t></a:r></a:p>
+        </p:txBody>
+      </p:sp>
+    </p:spTree>
+  </p:cSld>
+</p:notes>"""
+
+
+@pytest.fixture(scope="session")
+def notes_pptx() -> tuple[bytes, str]:
+    """一张带演讲者备注的合成 ``.pptx``。返回 ``(pptx_bytes, expected_notes_text)``。"""
+    pptx = _zip_pptx(
+        {
+            "[Content_Types].xml": _CONTENT_TYPES_NOTES,
+            "_rels/.rels": _ROOT_RELS,
+            "ppt/presentation.xml": _PRESENTATION,
+            "ppt/_rels/presentation.xml.rels": _PRESENTATION_RELS,
+            "ppt/slides/slide1.xml": _SLIDE_NOTES,
+            "ppt/slides/_rels/slide1.xml.rels": _SLIDE_NOTES_RELS,
+            "ppt/notesSlides/notesSlide1.xml": _NOTES_SLIDE,
+        }
+    )
+    return pptx, _NOTES_TEXT
+
+
+# 一张含合并单元格(gridSpan)的表格 slide,用于 to_markdown 的 HTML <table> 保真。
+_SLIDE_MERGED = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+       xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+       xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:sp>
+        <p:txBody><a:p><a:r><a:t>Merged Demo</a:t></a:r></a:p></p:txBody>
+      </p:sp>
+      <p:graphicFrame>
+        <p:xfrm><a:off x="838200" y="2000250"/><a:ext cx="7772400" cy="2000250"/></p:xfrm>
+        <a:graphic>
+          <a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table">
+            <a:tbl>
+              <a:tr h="370840">
+                <a:tc gridSpan="2">
+                  <a:txBody><a:p><a:r><a:t>Header</a:t></a:r></a:p></a:txBody>
+                </a:tc>
+                <a:tc hMerge="1">
+                  <a:txBody><a:p/></a:txBody>
+                </a:tc>
+              </a:tr>
+              <a:tr h="370840">
+                <a:tc>
+                  <a:txBody><a:p><a:r><a:t>A2</a:t></a:r></a:p></a:txBody>
+                </a:tc>
+                <a:tc>
+                  <a:txBody><a:p><a:r><a:t>B2</a:t></a:r></a:p></a:txBody>
+                </a:tc>
+              </a:tr>
+            </a:tbl>
+          </a:graphicData>
+        </a:graphic>
+      </p:graphicFrame>
+    </p:spTree>
+  </p:cSld>
+</p:sld>"""
+
+
+@pytest.fixture(scope="session")
+def merged_table_pptx_bytes() -> bytes:
+    """一张含 gridSpan 合并单元格表格的合成 ``.pptx`` 字节串。"""
+    return _zip_pptx(
+        {
+            "[Content_Types].xml": _CONTENT_TYPES,
+            "_rels/.rels": _ROOT_RELS,
+            "ppt/presentation.xml": _PRESENTATION,
+            "ppt/_rels/presentation.xml.rels": _PRESENTATION_RELS,
+            "ppt/slides/slide1.xml": _SLIDE_MERGED,
+            "ppt/slides/_rels/slide1.xml.rels": _ROOT_RELS_EMPTY,
+        }
+    )

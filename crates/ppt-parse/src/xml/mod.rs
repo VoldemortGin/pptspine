@@ -5,6 +5,7 @@
 //! 本模块根放**关系(`.rels`)解析**这类被多处复用的小工具。所有 walker 都遵循家族约定:
 //! 未知元素跳过、缺失属性 → `None`、**绝不 panic**。
 
+pub mod notes;
 pub mod presentation;
 pub mod slide;
 

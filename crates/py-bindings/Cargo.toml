@@ -14,6 +14,11 @@ name = "_core"
 # cdylib for the Python extension module; rlib so it can be unit-tested.
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# OCR 代码无条件编入(`ppt-ocr` 是非可选依赖)。此 `ocr` feature 为 no-op,仅保留名字
+# 以兼容 `maturin develop --features ocr` 这类显式调用,不改变默认编译行为。
+ocr = []
+
 [dependencies]
 ppt-core = { workspace = true }
 ppt-parse = { workspace = true }

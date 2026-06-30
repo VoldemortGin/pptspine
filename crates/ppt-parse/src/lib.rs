@@ -64,11 +64,19 @@ pub fn parse_bytes(bytes: &[u8]) -> Result<ParsedPptx> {
             .as_deref()
             .and_then(|ln| pkg.master_name_for_layout(ln));
 
+        // 演讲者备注:经 slide 的 .rels 找到 notesSlide 部件,提取其 body 占位符文字。
+        let notes = rels_xml
+            .as_deref()
+            .and_then(|r| xml::first_rel_target_with(r, "notesSlide"))
+            .and_then(|t| pkg.part_str(&t))
+            .and_then(|nx| xml::notes::parse(&nx));
+
         slides.push(Slide {
             index,
             shapes,
             layout_name,
             master_name,
+            notes,
         });
     }
 

@@ -21,9 +21,11 @@ offline, and deterministically via the sibling [`ocrspine`](../ocrspine) crate
 | Tables: rows, cells, cell text | parsed |
 | Table merges: `gridSpan` / `rowSpan` / `hMerge` / `vMerge` | parsed |
 | Cell solid-fill color | parsed |
-| Pictures: `r:embed` rel → media name + raw bytes | parsed |
+| Pictures: `r:embed` rel → media name; raw bytes via `Presentation.image_bytes()` | parsed |
 | Autoshapes: geometry name, fill, stroke, optional text | parsed (best-effort) |
 | Groups (`p:grpSp`): recursive | parsed |
+| Speaker notes (`notesSlide` → `Slide.notes`) | parsed |
+| Structured export: `to_text()` / `to_markdown()` (GFM + HTML tables for merges) | working |
 | Image OCR (embedded pictures → words + boxes) | working (`ocr_image`) |
 | Image-table geometry reconstruction from OCR boxes | **deferred** (stub) |
 
@@ -72,9 +74,22 @@ for slide in pres.slides():
         elif shape["kind"] == "picture":
             print("image:", shape["media"])
 
+# Structured export + speaker notes:
+print(pres.to_text())          # slides joined by "--- slide N ---"
+print(pres.to_markdown())      # one section per slide; GFM / HTML tables
+print(pres.slides()[0].text)   # all text on a slide (convenience)
+print(pres.slides()[0].notes)  # speaker notes, or None
+
 # Run OCR on raw image bytes (PNG/JPEG), offline:
 items = pptspine.ocr_image(open("scan.png", "rb").read())
 print(" ".join(i["text"] for i in items))
+
+# End-to-end: pull an embedded image's bytes and OCR them, offline:
+for shape in pres.slides()[0].shapes():
+    if shape["kind"] == "picture" and shape["media"]:
+        data = pres.image_bytes(shape["media"])   # bytes | None
+        if data:
+            print([i["text"] for i in pptspine.ocr_image(data)])
 ```
 
 ## Rust workspace
@@ -93,4 +108,4 @@ crates/
   (`ppt_ocr::reconstruct_table_from_image`, currently a typed `Unsupported`
   stub).
 - Richer color models (theme/scheme colors, gradients), hyperlinks, charts,
-  SmartArt, notes/comments.
+  SmartArt, comments.

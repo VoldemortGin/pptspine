@@ -12,21 +12,23 @@
 //! 绝不持有 Rust 借用。重活(解析 / OCR)在 [`Python::detach`] 下释放 GIL 运行。错误折成
 //! 以 `_core.PptError` 为根的类型化异常层级。
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
+use ppt_core::export::{presentation_markdown, presentation_text, slide_text};
 use ppt_core::geom::emu_to_points;
 use ppt_core::model::{
     AutoShape, Cell, Color, Paragraph, Picture, Presentation as CorePresentation, Row, Shape,
     Slide as CoreSlide, Table, TextFrame, TextRun,
 };
 use ppt_core::PptError;
-use ppt_ocr::{ocr_image_bytes, OcrItem};
+use ppt_ocr::{OcrItem, PptOcr};
 use ppt_parse::{parse_bytes, parse_path};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyFileNotFoundError, PyIndexError, PyOSError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList};
 
 /// 包版本(镜像 Rust workspace 版本)。
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -254,6 +256,8 @@ fn shape_dict<'py>(py: Python<'py>, shape: &Shape) -> PyResult<Bound<'py, PyDict
 #[pyclass(name = "Presentation", module = "pptspine._core", frozen)]
 struct PyPresentation {
     inner: Arc<CorePresentation>,
+    /// 内嵌图片字节(键为裸文件名,如 `image1.png`),供 `image_bytes` 取用喂给 OCR。
+    media: Arc<BTreeMap<String, Vec<u8>>>,
 }
 
 #[pymethods]
@@ -305,6 +309,26 @@ impl PyPresentation {
         self.inner.slides.len()
     }
 
+    /// 内嵌图片的裸文件名列表(media map 的键,确定性有序)。
+    fn media_names(&self) -> Vec<String> {
+        self.media.keys().cloned().collect()
+    }
+
+    /// 取某张内嵌图片的原始字节;不存在返回 `None`。把字节交给 `ocr_image` 即可端到端 OCR。
+    fn image_bytes<'py>(&self, py: Python<'py>, media_name: &str) -> Option<Bound<'py, PyBytes>> {
+        self.media.get(media_name).map(|b| PyBytes::new(py, b))
+    }
+
+    /// 整份演示文稿的纯文本(各 slide 以 `--- slide N ---` 分隔,含演讲者备注)。
+    fn to_text(&self) -> String {
+        presentation_text(&self.inner)
+    }
+
+    /// 整份演示文稿的 Markdown(每页一节;表格用 GFM,含合并单元格时退回 HTML `<table>`)。
+    fn to_markdown(&self) -> String {
+        presentation_markdown(&self.inner)
+    }
+
     fn __repr__(&self) -> String {
         let (cx, cy) = self.inner.slide_size;
         format!(
@@ -348,6 +372,18 @@ impl PySlide {
         self.core().master_name.clone()
     }
 
+    /// 该 slide 所有文字拼接(便利属性;不含演讲者备注)。
+    #[getter]
+    fn text(&self) -> String {
+        slide_text(self.core())
+    }
+
+    /// 演讲者备注文本(无备注则 `None`)。
+    #[getter]
+    fn notes(&self) -> Option<String> {
+        self.core().notes.clone()
+    }
+
     /// 顶层形状,作为 `list[dict]`。
     fn shapes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let list = PyList::empty(py);
@@ -374,6 +410,7 @@ fn open(py: Python<'_>, path: PathBuf) -> PyResult<PyPresentation> {
     let parsed = py.detach(|| parse_path(&path)).map_err(map_err)?;
     Ok(PyPresentation {
         inner: Arc::new(parsed.presentation),
+        media: Arc::new(parsed.media),
     })
 }
 
@@ -384,6 +421,7 @@ fn open_bytes(py: Python<'_>, data: &[u8]) -> PyResult<PyPresentation> {
     let parsed = py.detach(|| parse_bytes(&owned)).map_err(map_err)?;
     Ok(PyPresentation {
         inner: Arc::new(parsed.presentation),
+        media: Arc::new(parsed.media),
     })
 }
 
@@ -396,12 +434,33 @@ fn ocr_item_dict<'py>(py: Python<'py>, it: &OcrItem) -> PyResult<Bound<'py, PyDi
     Ok(d)
 }
 
+/// 进程级惰性单例:缓存一个 [`PptOcr`] 引擎,避免每次 OCR 都重建并重载 ~28MB 模型。
+///
+/// 用 `OnceLock<Mutex<Option<PptOcr>>>`:`OnceLock` 只负责**无错地**建出 `Mutex`;引擎本身
+/// 惰性构造(首次使用时由 `ocrspine` 读 `OCRSPINE_MODELS` 解析模型路径),构造失败则保持
+/// `None` 以容许后续重试。`PptOcr` 内部对模型缓存是线程安全的,这里再以 `Mutex` 串行复用。
+static OCR_ENGINE: OnceLock<Mutex<Option<PptOcr>>> = OnceLock::new();
+
+/// 取(必要时惰性构造)缓存的 OCR 引擎,在其上执行 `f`。线程安全;在释放 GIL 下调用。
+fn with_ocr_engine<T>(f: impl FnOnce(&PptOcr) -> ppt_core::Result<T>) -> ppt_core::Result<T> {
+    let cell = OCR_ENGINE.get_or_init(|| Mutex::new(None));
+    // Mutex 中毒时取回内部值继续(OCR 是只读推理,无被破坏的共享可变状态)。
+    let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.is_none() {
+        *guard = Some(PptOcr::new()?);
+    }
+    let engine = guard.as_ref().expect("engine just initialized");
+    f(engine)
+}
+
 /// 对一张图片的编码字节(PNG / JPEG / TIFF / BMP)做本地 OCR,返回 `list[dict]`,每项含
-/// `text` / `bbox` / `confidence`。推理在释放 GIL 下进行(本地、离线、确定性)。
+/// `text` / `bbox` / `confidence`。复用进程级缓存引擎,推理在释放 GIL 下进行(本地、离线、确定性)。
 #[pyfunction]
 fn ocr_image<'py>(py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyList>> {
     let owned = data.to_vec();
-    let items = py.detach(|| ocr_image_bytes(&owned)).map_err(map_err)?;
+    let items = py
+        .detach(|| with_ocr_engine(|engine| engine.ocr(&owned)))
+        .map_err(map_err)?;
     let list = PyList::empty(py);
     for it in &items {
         list.append(ocr_item_dict(py, it)?)?;
