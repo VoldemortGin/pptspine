@@ -80,6 +80,9 @@ features = ["pyo3/abi3-py311"]
 include = [
     "LICENSE",
     "NOTICE",
+    # Third-party permissive-license attribution (MIT/Apache/BSD/Zlib/…) for the
+    # bundled Rust deps — required to satisfy their attribution terms on redistribution.
+    "THIRD-PARTY-NOTICES.md",
     "python/pptspine/py.typed",
     "python/pptspine/*.pyi",
 ]
