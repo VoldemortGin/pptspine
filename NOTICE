@@ -6,33 +6,18 @@ You may obtain a copy of the License in the accompanying LICENSE file or at
 http://www.apache.org/licenses/LICENSE-2.0.
 
 ------------------------------------------------------------------------------
-THIRD-PARTY BUNDLED DATA ATTRIBUTIONS
+THIRD-PARTY ATTRIBUTIONS
 ------------------------------------------------------------------------------
 
-The published `pptspine` wheel bundles the PaddleOCR PP-OCRv5 ONNX model weights
-(inside the package at `pptspine/_models`) so that a bare `pip install pptspine`
-is full-OCR-capable offline, with no separate data package and no network. The
-OCR inference runs in the sibling family crate `ocrspine`; the authoritative,
-per-file provenance and conversion record are retained in
-`pptspine/_models/PROVENANCE.md`.
+OCR (optional). When the `ocr` feature is compiled in, image text recognition
+runs on the PaddleOCR PP-OCRv5 ONNX models via the sibling family crate
+`ocrspine`. The model weights are distributed through the separate
+`ocrspine-models` package (a runtime dependency declared in pyproject), which
+carries its own LICENSE / NOTICE with the PaddlePaddle Authors' Apache-2.0
+attribution and per-file provenance. No model weights are bundled in this wheel.
 
-* PaddleOCR PP-OCR models and recognition dictionary
-  (`pptspine/_models/ppocrv5_det.onnx`,
-   `pptspine/_models/ppocrv5_rec.onnx`,
-   `pptspine/_models/ppocrv5_cls.onnx`,
-   `pptspine/_models/ppocr_keys_v5.txt`)
-  Copyright (c) PaddlePaddle Authors.
-  Licensed under the Apache License, Version 2.0.
-  The bundled files are the PP-OCRv5 mobile text-detection and text-recognition
-  models, the PP-LCNet text-line-orientation classification model, and the
-  PP-OCRv5 recognition character dictionary, converted to ONNX (via Paddle2ONNX)
-  from the upstream PaddlePaddle weights, then post-processed by a deterministic
-  ONNX dim-name/shape-hint cleanup so the pure-Rust `tract` runtime can parse
-  them (no weight changes).
-  Source: https://github.com/PaddlePaddle/PaddleOCR
-  Per-file provenance and the conversion record are retained in
-  `pptspine/_models/PROVENANCE.md`.
-
-Third-party Rust dependencies are distributed under their own permissive
-licenses (MIT, Apache-2.0, BSD, Zlib, ISC, Unicode, and similar). Apache-2.0 is
-compatible with each.
+Third-party Rust dependencies are distributed under their own permissive licenses
+(MIT, Apache-2.0, BSD-2-Clause, BSD-3-Clause, Zlib, 0BSD, Unlicense, Unicode-3.0,
+BlueOak-1.0.0, and similar) — the full per-component list with license texts is
+in the bundled THIRD-PARTY-NOTICES.md. Apache-2.0 is compatible with each, and no
+copyleft (GPL / AGPL / LGPL / MPL) components are included.
