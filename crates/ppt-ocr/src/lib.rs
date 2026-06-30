@@ -9,8 +9,8 @@
 //! 本轮**逐图 OCR 真正可用**;基于 OCR 框做表格行列几何重建是后续工作,见
 //! [`reconstruct_table_from_image`](fn@reconstruct_table_from_image) 的 stub。
 
-use ppt_core::{PptError, Result};
 use ocrspine::{OcrEngine, OcrError, OcrImage, OcrWord, PaddleOcr};
+use ppt_core::{PptError, Result};
 
 /// 一条 OCR 结果:文字 + 轴对齐外框 + 置信度。坐标原点在图片左上角,y 向下。
 #[derive(Debug, Clone, PartialEq)]

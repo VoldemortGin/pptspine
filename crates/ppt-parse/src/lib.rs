@@ -4,8 +4,8 @@
 //! 把一个 `.pptx`(zip + XML)解析成 [`ParsedPptx`]:一个 [`Presentation`] 结构化模型,
 //! 外加一份 `media` 字节表(`裸文件名 -> 原始图片字节`)。解析全程容错,失败收敛成 [`PptError`]。
 
-mod zip_pkg;
 mod xml;
+mod zip_pkg;
 
 use std::collections::BTreeMap;
 use std::path::Path;

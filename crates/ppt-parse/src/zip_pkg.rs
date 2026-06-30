@@ -41,6 +41,7 @@ impl Package {
     }
 
     /// 取一个部件的字节(只读引用)。
+    #[allow(dead_code)] // 保留为完整包访问 API,暂未被内部消费
     pub fn part(&self, name: &str) -> Option<&[u8]> {
         self.parts.get(name).map(|v| v.as_slice())
     }
@@ -67,9 +68,7 @@ impl Package {
             .parts
             .keys()
             .filter(|k| {
-                k.starts_with("ppt/slides/slide")
-                    && k.ends_with(".xml")
-                    && !k.contains("/_rels/")
+                k.starts_with("ppt/slides/slide") && k.ends_with(".xml") && !k.contains("/_rels/")
             })
             .cloned()
             .collect();
@@ -91,6 +90,7 @@ impl Package {
     }
 
     /// 取一张 media 图片的原始字节(`target` 形如 `ppt/media/image1.png`)。
+    #[allow(dead_code)] // 保留为完整 media 访问 API,暂未被内部消费
     pub fn media_bytes(&self, target: &str) -> Option<&[u8]> {
         self.part(target)
     }

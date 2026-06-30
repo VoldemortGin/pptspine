@@ -150,7 +150,10 @@ fn parses_textbox_runs_and_styling() {
 
     // 几何:EMU 矩形原样保留。
     let rect = tf.rect.expect("rect");
-    assert_eq!((rect.x, rect.y, rect.w, rect.h), (838200, 365125, 7772400, 1325563));
+    assert_eq!(
+        (rect.x, rect.y, rect.w, rect.h),
+        (838200, 365125, 7772400, 1325563)
+    );
 }
 
 #[test]

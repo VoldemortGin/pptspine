@@ -31,7 +31,10 @@ pub fn parse(
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
     let mut buf = Vec::new();
-    let ctx = Ctx { rels: &rels, media_index };
+    let ctx = Ctx {
+        rels: &rels,
+        media_index,
+    };
 
     // 先定位到 spTree,再解析其直接子形状。
     loop {
@@ -58,10 +61,7 @@ struct Ctx<'a> {
 
 /// 解析一个形状容器(`p:spTree` 或 `p:grpSp`)的直接子形状,直到容器结束标签。
 /// 假定 reader 已经消费了容器的起始标签。
-fn parse_shape_container<R: std::io::BufRead>(
-    reader: &mut Reader<R>,
-    ctx: &Ctx,
-) -> Vec<Shape> {
+fn parse_shape_container<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Vec<Shape> {
     let mut shapes = Vec::new();
     let mut buf = Vec::new();
     loop {

@@ -16,6 +16,7 @@ use quick_xml::Reader;
 /// 一个 OOXML 关系条目(`<Relationship Id="rIdN" Type="..." Target="..."/>`)。
 #[derive(Debug, Clone)]
 pub struct Relationship {
+    #[allow(dead_code)] // 关系 Id(rIdN)——保留为完整 API,暂未被内部消费
     pub id: String,
     pub rel_type: String,
     pub target: String,
@@ -43,7 +44,14 @@ pub fn parse_rels(xml: &str) -> BTreeMap<String, Relationship> {
                         }
                     }
                     if !id.is_empty() {
-                        map.insert(id.clone(), Relationship { id, rel_type, target });
+                        map.insert(
+                            id.clone(),
+                            Relationship {
+                                id,
+                                rel_type,
+                                target,
+                            },
+                        );
                     }
                 }
             }
