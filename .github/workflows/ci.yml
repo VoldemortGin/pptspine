@@ -49,14 +49,18 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.96.0
       - uses: Swatinem/rust-cache@v2
-      # PyO3 extension-module crates need an interpreter to link against on the
-      # plain `cargo test` path. The OCR tests run against the git-dep ocrspine's
-      # compile-time `CARGO_MANIFEST_DIR/models` weights, fetched by cargo.
+      # The OCR tests run against the git-dep ocrspine's compile-time
+      # `CARGO_MANIFEST_DIR/models` weights, fetched by cargo.
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # Exclude `py-bindings`: it's a PyO3 `extension-module` cdylib that has no
+      # `#[test]`s and cannot link a test binary without an interpreter (macOS's
+      # linker rejects the undefined `Py*` symbols; Linux tolerates them). It's
+      # validated by the `pytest` job below (maturin develop + Python tests), so
+      # excluding it here loses no coverage and makes `cargo test` pass on macOS.
       - name: cargo test --workspace --all-features
-        run: cargo test --workspace --all-features
+        run: cargo test --workspace --exclude py-bindings --all-features
 
   # ----------------------------------------------------------------- pytest
   pytest:
