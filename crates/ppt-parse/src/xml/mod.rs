@@ -8,10 +8,12 @@
 pub mod notes;
 pub mod presentation;
 pub mod slide;
+pub mod text_style;
+pub mod theme;
 
 use std::collections::BTreeMap;
 
-use quick_xml::events::Event;
+use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 
 /// 一个 OOXML 关系条目(`<Relationship Id="rIdN" Type="..." Target="..."/>`)。
@@ -102,4 +104,70 @@ pub fn attr_string(attr: &quick_xml::events::attributes::Attribute) -> String {
     attr.unescape_value()
         .map(|c| c.into_owned())
         .unwrap_or_default()
+}
+
+/// 取元素的某个属性值(按本地名匹配,忽略命名空间前缀)。
+pub fn attr_of(e: &BytesStart, key: &[u8]) -> Option<String> {
+    for attr in e.attributes().flatten() {
+        if local_name(attr.key.as_ref()) == key {
+            return Some(attr_string(&attr));
+        }
+    }
+    None
+}
+
+/// 读取一个 OOXML 布尔属性。OOXML 里 `b="1"` / `b="true"` 为真;缺失为假。
+pub fn bool_attr(e: &BytesStart, key: &[u8]) -> bool {
+    attr_of(e, key).map(ooxml_bool).unwrap_or(false)
+}
+
+/// OOXML 布尔字面量(`"1"` / `"true"` / `"on"` 为真)。
+pub fn ooxml_bool(v: String) -> bool {
+    v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("on")
+}
+
+/// 读取当前已打开元素的纯文本内容,直到其结束标签。已消费该元素的起始标签。
+pub fn read_text<R: std::io::BufRead>(reader: &mut Reader<R>) -> String {
+    let mut out = String::new();
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Text(t)) => {
+                if let Ok(s) = t.unescape() {
+                    out.push_str(&s);
+                }
+            }
+            Ok(Event::CData(c)) => {
+                out.push_str(&String::from_utf8_lossy(&c));
+            }
+            Ok(Event::End(_)) => break,
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    out
+}
+
+/// 跳过当前已打开元素的全部内容,直到其匹配的结束标签。已消费该元素的起始标签。
+/// 通过深度计数处理同名嵌套。
+pub fn skip_element<R: std::io::BufRead>(reader: &mut Reader<R>, _name: &[u8]) {
+    let mut depth = 1usize;
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(_)) => depth += 1,
+            Ok(Event::End(_)) => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
 }

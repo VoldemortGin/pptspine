@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use ppt_core::color::ColorSpec;
 use ppt_core::export::{presentation_markdown, presentation_text, slide_text};
 use ppt_core::geom::emu_to_points;
 use ppt_core::model::{
@@ -70,6 +71,13 @@ fn color_hex(c: &Color) -> String {
     format!("{:02X}{:02X}{:02X}", c.rgb[0], c.rgb[1], c.rgb[2])
 }
 
+/// 把一个 [`ColorSpec`] 转成 `"RRGGBB"`:仅显式 srgb 基色(忽略修饰变换);
+/// scheme 引用无终端值 → `None`。与历史 dict 输出保持兼容(继承链的终端色走
+/// Rust 侧 `ppt_parse::resolve`,由 ppt-render 消费)。
+fn spec_hex(spec: &ColorSpec) -> Option<String> {
+    spec.base_srgb().map(|c| color_hex(&c))
+}
+
 /// 把一个可选 [`ppt_core::geom::Rect`] 转成 `(x, y, w, h)` 磅(point)四元组的 dict
 /// 字段,缺失时为 `None`。返回 `(emu_tuple, points_tuple)`。
 fn rect_to_py(
@@ -110,11 +118,12 @@ fn run_dict<'py>(py: Python<'py>, run: &TextRun) -> PyResult<Bound<'py, PyDict>>
     d.set_item("ea_font", run.ea_font.as_deref())?;
     d.set_item("cs_font", run.cs_font.as_deref())?;
     d.set_item("size_pt", run.size_pt)?;
-    d.set_item("bold", run.bold)?;
-    d.set_item("italic", run.italic)?;
-    d.set_item("underline", run.underline)?;
-    d.set_item("strike", run.strike)?;
-    d.set_item("color", run.color.as_ref().map(color_hex))?;
+    // 三态样式折回布尔(缺失 = 未开启),与历史 dict 输出兼容。
+    d.set_item("bold", run.bold.unwrap_or(false))?;
+    d.set_item("italic", run.italic.unwrap_or(false))?;
+    d.set_item("underline", run.underline.unwrap_or(false))?;
+    d.set_item("strike", run.strike.unwrap_or(false))?;
+    d.set_item("color", run.color.as_ref().and_then(spec_hex))?;
     Ok(d)
 }
 
@@ -169,7 +178,7 @@ fn cell_dict<'py>(py: Python<'py>, cell: &Cell) -> PyResult<Bound<'py, PyDict>> 
     d.set_item("text", text)?;
     d.set_item("col_span", cell.col_span)?;
     d.set_item("row_span", cell.row_span)?;
-    d.set_item("fill", cell.fill.as_ref().map(color_hex))?;
+    d.set_item("fill", cell.fill.as_ref().and_then(spec_hex))?;
     d.set_item("merged", cell.merged)?;
     Ok(d)
 }
@@ -224,7 +233,7 @@ fn picture_dict<'py>(py: Python<'py>, pic: &Picture) -> PyResult<Bound<'py, PyDi
 fn set_stroke_items(d: &Bound<'_, PyDict>, stroke: Option<&Stroke>) -> PyResult<()> {
     d.set_item(
         "stroke",
-        stroke.and_then(|s| s.color.as_ref()).map(color_hex),
+        stroke.and_then(|s| s.color.as_ref()).and_then(spec_hex),
     )?;
     d.set_item("stroke_width_emu", stroke.and_then(|s| s.width_emu))?;
     d.set_item("stroke_dash", stroke.and_then(|s| s.dash.as_deref()))?;
@@ -239,7 +248,7 @@ fn autoshape_dict<'py>(py: Python<'py>, sh: &AutoShape) -> PyResult<Bound<'py, P
     d.set_item("rect", rect_emu)?;
     d.set_item("rect_points", rect_pts)?;
     d.set_item("geometry", sh.geometry.as_deref())?;
-    d.set_item("fill", sh.fill.as_ref().map(color_hex))?;
+    d.set_item("fill", sh.fill.as_ref().and_then(spec_hex))?;
     set_stroke_items(&d, sh.stroke.as_ref())?;
     match &sh.text {
         Some(tf) => {
@@ -263,7 +272,7 @@ fn connector_dict<'py>(py: Python<'py>, c: &Connector) -> PyResult<Bound<'py, Py
     d.set_item("rect", rect_emu)?;
     d.set_item("rect_points", rect_pts)?;
     d.set_item("geometry", c.geometry.as_deref())?;
-    d.set_item("fill", c.fill.as_ref().map(color_hex))?;
+    d.set_item("fill", c.fill.as_ref().and_then(spec_hex))?;
     set_stroke_items(&d, c.stroke.as_ref())?;
     Ok(d)
 }

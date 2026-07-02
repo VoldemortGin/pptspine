@@ -125,6 +125,29 @@ impl Package {
         let target = crate::xml::first_rel_target_with(&rels, "slideMaster")?;
         Some(basename(&target))
     }
+
+    /// 一个母版关联的主题名(best-effort,经母版 rels 的 `theme` 关系)。
+    pub fn theme_name_for_master(&self, master_name: &str) -> Option<String> {
+        let master_part = format!("ppt/slideMasters/{master_name}");
+        let rels = self.part_str(&rels_path_for(&master_part))?;
+        let target = crate::xml::first_rel_target_with(&rels, "theme")?;
+        Some(basename(&target))
+    }
+
+    /// 版式部件文本(`layout_name` 是裸名如 `slideLayout1.xml`)。
+    pub fn layout_part_str(&self, layout_name: &str) -> Option<String> {
+        self.part_str(&format!("ppt/slideLayouts/{layout_name}"))
+    }
+
+    /// 母版部件文本(裸名如 `slideMaster1.xml`)。
+    pub fn master_part_str(&self, master_name: &str) -> Option<String> {
+        self.part_str(&format!("ppt/slideMasters/{master_name}"))
+    }
+
+    /// 主题部件文本(裸名如 `theme1.xml`)。
+    pub fn theme_part_str(&self, theme_name: &str) -> Option<String> {
+        self.part_str(&format!("ppt/theme/{theme_name}"))
+    }
 }
 
 /// 从 `ppt/slides/slideN.xml` 抽出数字 N。

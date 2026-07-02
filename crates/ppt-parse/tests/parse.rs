@@ -169,10 +169,16 @@ fn parses_textbox_runs_and_styling() {
     assert_eq!(para.align.as_deref(), Some("ctr"));
     let run = &para.runs[0];
     assert_eq!(run.text, "Hello pptspine");
-    assert!(run.bold);
+    assert_eq!(run.bold, Some(true));
     assert_eq!(run.size_pt, Some(44.0));
     assert_eq!(run.font.as_deref(), Some("Calibri"));
-    assert_eq!(run.color.map(|c| c.rgb), Some([0x1F, 0x4E, 0x79]));
+    assert_eq!(
+        run.color
+            .as_ref()
+            .and_then(|c| c.base_srgb())
+            .map(|c| c.rgb),
+        Some([0x1F, 0x4E, 0x79])
+    );
 
     // 几何:EMU 矩形原样保留。
     let rect = tf.rect.expect("rect");
@@ -210,7 +216,10 @@ fn parses_table_cells_merges_and_fill() {
     assert_eq!(a1.col_span, 1);
     assert_eq!(a1.row_span, 1);
     assert!(!a1.merged);
-    assert_eq!(a1.fill.map(|c| c.rgb), Some([0xFF, 0xCC, 0x00]));
+    assert_eq!(
+        a1.fill.as_ref().and_then(|c| c.base_srgb()).map(|c| c.rgb),
+        Some([0xFF, 0xCC, 0x00])
+    );
 
     // B1 无填充。
     assert!(table.rows[0].cells[1].fill.is_none());
@@ -302,7 +311,7 @@ fn fld_becomes_field_run_with_cached_text() {
         }
     );
     assert_eq!(run.text, "7");
-    assert!(run.bold);
+    assert_eq!(run.bold, Some(true));
 }
 
 /// §3.u:`mc:AlternateContent` 不再整块跳过——按锁定策略降入 `mc:Fallback`,
@@ -349,7 +358,14 @@ fn cxn_sp_parses_as_connector() {
     assert_eq!((rect.x, rect.y, rect.w, rect.h), (100, 200, 300, 400));
     assert_eq!(c.geometry.as_deref(), Some("straightConnector1"));
     let stroke = c.stroke.as_ref().expect("connector stroke");
-    assert_eq!(stroke.color.map(|c| c.rgb), Some([0xFF, 0x00, 0x00]));
+    assert_eq!(
+        stroke
+            .color
+            .as_ref()
+            .and_then(|c| c.base_srgb())
+            .map(|c| c.rgb),
+        Some([0xFF, 0x00, 0x00])
+    );
     assert_eq!(stroke.width_emu, Some(19050));
     assert_eq!(stroke.dash.as_deref(), Some("dash"));
 }
@@ -402,15 +418,16 @@ fn ea_cs_fonts_and_underline_strike() {
         panic!("expected a text box");
     };
     let styled = &tf.paragraphs[0].runs[0];
-    assert!(styled.underline);
-    assert!(styled.strike);
+    assert_eq!(styled.underline, Some(true));
+    assert_eq!(styled.strike, Some(true));
     assert_eq!(styled.font.as_deref(), Some("Calibri"));
     assert_eq!(styled.ea_font.as_deref(), Some("SimSun"));
     assert_eq!(styled.cs_font.as_deref(), Some("Arial"));
 
+    // 显式关闭值(`u="none"` / `strike="noStrike"`)→ 三态 `Some(false)`。
     let plain = &tf.paragraphs[0].runs[1];
-    assert!(!plain.underline);
-    assert!(!plain.strike);
+    assert_eq!(plain.underline, Some(false));
+    assert_eq!(plain.strike, Some(false));
     assert_eq!(plain.ea_font, None);
 }
 
@@ -439,7 +456,7 @@ fn ln_width_and_dash_on_autoshape() {
     assert_eq!(
         auto.stroke,
         Some(Stroke {
-            color: ppt_core::model::Color::from_hex("00FF00"),
+            color: Some(ppt_core::ColorSpec::srgb([0x00, 0xFF, 0x00])),
             width_emu: Some(25400),
             dash: Some("sysDot".to_string()),
         })

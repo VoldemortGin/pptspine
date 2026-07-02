@@ -3,7 +3,10 @@
 //! 目标是**信息无损**:把 OOXML 里的幻灯片 / 文本 / 表格 / 图片 / 自选图形原样搬进
 //! 这些朴素的 `struct` / `enum`。本轮不要求 serde,只派生 `Debug`/`Clone`/`PartialEq`。
 
+use crate::color::ColorSpec;
 use crate::geom::{Emu, Rect};
+use crate::style::{PlaceholderRef, ShapeStyle, TextLevelStyle, TextStyleLevels};
+use crate::theme::ClrMap;
 
 /// 一份解析好的演示文稿。
 #[derive(Debug, Clone, PartialEq)]
@@ -27,6 +30,9 @@ pub struct Slide {
     pub master_name: Option<String>,
     /// 演讲者备注文本(`ppt/notesSlides/notesSlideN.xml` 的 body 占位符);无备注为 `None`。
     pub notes: Option<String>,
+    /// 颜色映射覆盖(`p:clrMapOvr > a:overrideClrMapping`);
+    /// `None` = 沿用 layout / master 的映射(`a:masterClrMapping` 或缺失)。
+    pub clr_map_ovr: Option<ClrMap>,
 }
 
 /// 形状树里的一个节点。
@@ -49,21 +55,30 @@ pub enum Shape {
     Placeholder(GraphicPlaceholder),
 }
 
-/// 一个文本框体:可选位置 + 段落序列。
-#[derive(Debug, Clone, PartialEq)]
+/// 一个文本框体:可选位置 + 段落序列(+ 继承链所需的占位符 / 列表样式 / 形状样式引用)。
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct TextFrame {
     pub rect: Option<Rect>,
     pub paragraphs: Vec<Paragraph>,
+    /// 占位符标识(`p:nvSpPr > p:nvPr > p:ph`);非占位符为 `None`。
+    pub placeholder: Option<PlaceholderRef>,
+    /// 本形状 `txBody` 自带的 `a:lstStyle`(继承链一环);缺失为 `None`。
+    pub list_style: Option<TextStyleLevels>,
+    /// 形状样式引用(`p:style`,主题索引式格式)。
+    pub style: Option<ShapeStyle>,
 }
 
 /// 一个段落(`a:p`)。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Paragraph {
     pub runs: Vec<TextRun>,
     /// 缩进/列表层级(`a:pPr@lvl`),缺省 0。
     pub level: u8,
-    /// 对齐方式(`a:pPr@algn`,如 `"ctr"`/`"l"`/`"r"`),原样保留。
+    /// 对齐方式(`a:pPr@algn`,如 `"ctr"`/`"l"`/`"r"`),原样保留(镜像 `props.align`)。
     pub align: Option<String>,
+    /// 段落直接格式化的完整 `a:pPr`(对齐 / 列表缩进 / 项目符号 / `defRPr`),
+    /// 继承链的最近段落级来源。
+    pub props: TextLevelStyle,
 }
 
 /// run 的种类:普通文本 / 段内硬换行 / 字段。
@@ -96,14 +111,15 @@ pub struct TextRun {
     pub cs_font: Option<String>,
     /// 字号(磅;OOXML 以百分之磅存储,解析时已除以 100)。
     pub size_pt: Option<f32>,
-    pub bold: bool,
-    pub italic: bool,
-    /// 下划线(`a:rPr@u` 存在且不为 `"none"`)。
-    pub underline: bool,
-    /// 删除线(`a:rPr@strike` 存在且不为 `"noStrike"`)。
-    pub strike: bool,
-    /// 纯色填充 RGB(`a:solidFill` > `a:srgbClr`)。
-    pub color: Option<Color>,
+    /// 三态:`None` = 属性缺失(继承),`Some(v)` = 显式开 / 关。以下同。
+    pub bold: Option<bool>,
+    pub italic: Option<bool>,
+    /// 下划线(`a:rPr@u`;`Some(false)` 即显式 `u="none"`)。
+    pub underline: Option<bool>,
+    /// 删除线(`a:rPr@strike`;`Some(false)` 即显式 `strike="noStrike"`)。
+    pub strike: Option<bool>,
+    /// 纯色填充(`a:solidFill`;srgb / scheme + 变换,见 [`ColorSpec`])。
+    pub color: Option<ColorSpec>,
 }
 
 /// 一张表格(`a:tbl`)。
@@ -131,8 +147,8 @@ pub struct Cell {
     pub col_span: u32,
     /// 纵向跨行数(`a:tc@rowSpan`),缺省 1。
     pub row_span: u32,
-    /// 单元格纯色填充(`a:tcPr` > `a:solidFill` > `a:srgbClr`)。
-    pub fill: Option<Color>,
+    /// 单元格纯色填充(`a:tcPr` > `a:solidFill`)。
+    pub fill: Option<ColorSpec>,
     /// 是否是被合并掉的延续格(`a:tc@hMerge` / `a:tc@vMerge`)。
     pub merged: bool,
 }
@@ -147,32 +163,41 @@ pub struct Picture {
     pub media_name: Option<String>,
     /// 图片字节长度(便利字段;字节本身在 media map 里)。
     pub image_bytes_len: usize,
+    /// 占位符标识(`p:nvPicPr > p:nvPr > p:ph`,图片占位符几何可继承)。
+    pub placeholder: Option<PlaceholderRef>,
 }
 
 /// 几何自选图形(`p:sp` 带 `a:prstGeom`)。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct AutoShape {
     pub rect: Option<Rect>,
     /// 预设几何名(`a:prstGeom@prst`,如 `"rect"`/`"ellipse"`)。
     pub geometry: Option<String>,
-    /// 填充色(`spPr` > `a:solidFill` > `a:srgbClr`)。
-    pub fill: Option<Color>,
+    /// 填充色(`spPr` > `a:solidFill`)。
+    pub fill: Option<ColorSpec>,
     /// 描边(`spPr` > `a:ln`)。
     pub stroke: Option<Stroke>,
-    /// 形状内的文字(若有 `p:txBody`)。
-    pub text: Option<TextFrame>,
+    /// 形状内的文字(若有 `p:txBody`)。装箱以控制 `Shape` 枚举体积
+    /// (clippy `large_enum_variant`)。
+    pub text: Option<Box<TextFrame>>,
+    /// 占位符标识(`p:nvSpPr > p:nvPr > p:ph`)。
+    pub placeholder: Option<PlaceholderRef>,
+    /// 形状样式引用(`p:style`)。
+    pub style: Option<ShapeStyle>,
 }
 
 /// 连接线(`p:cxnSp`)—— 形同自选图形,但没有文字体。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Connector {
     pub rect: Option<Rect>,
     /// 预设几何名(如 `"line"`/`"straightConnector1"`/`"bentConnector3"`)。
     pub geometry: Option<String>,
-    /// 填充色(`spPr` > `a:solidFill` > `a:srgbClr`)。
-    pub fill: Option<Color>,
+    /// 填充色(`spPr` > `a:solidFill`)。
+    pub fill: Option<ColorSpec>,
     /// 描边(`spPr` > `a:ln`)。
     pub stroke: Option<Stroke>,
+    /// 形状样式引用(`p:style`,连接线常经 `lnRef` 取主题线色)。
+    pub style: Option<ShapeStyle>,
 }
 
 /// 非表格 `p:graphicFrame`(图表 / SmartArt / OLE 等)的占位信息。
@@ -187,8 +212,8 @@ pub struct GraphicPlaceholder {
 /// 描边属性(`a:ln`):颜色 + 线宽 + 虚线预设。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Stroke {
-    /// 描边色(`a:ln` > `a:solidFill` > `a:srgbClr`)。
-    pub color: Option<Color>,
+    /// 描边色(`a:ln` > `a:solidFill`)。
+    pub color: Option<ColorSpec>,
     /// 线宽(EMU,`a:ln@w`);缺省 `None`。
     pub width_emu: Option<Emu>,
     /// 虚线预设名(`a:prstDash@val`,如 `"dash"`/`"sysDot"`);实线通常缺省为 `None`。

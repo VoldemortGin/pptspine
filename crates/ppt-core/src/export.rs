@@ -290,7 +290,7 @@ mod tests {
         Paragraph {
             runs: vec![run(text)],
             level,
-            align: None,
+            ..Paragraph::default()
         }
     }
 
@@ -315,6 +315,7 @@ mod tests {
             layout_name: None,
             master_name: None,
             notes: notes.map(|s| s.to_string()),
+            clr_map_ovr: None,
         }
     }
 
@@ -369,8 +370,8 @@ mod tests {
     #[test]
     fn text_and_markdown_with_notes() {
         let title = Shape::TextBox(TextFrame {
-            rect: None,
             paragraphs: vec![para("Deck Title", 0), para("bullet", 1)],
+            ..TextFrame::default()
         });
         let slide = slide_with(vec![title], Some("remember this"));
         let pres = Presentation {
