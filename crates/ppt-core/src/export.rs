@@ -59,7 +59,7 @@ fn collect_shape_text(shape: &Shape, out: &mut Vec<String>) {
                 out.push(s);
             }
         }
-        Shape::Picture(_) => {}
+        Shape::Picture(_) | Shape::Connector(_) | Shape::Placeholder(_) => {}
         Shape::Group(children) => {
             for c in children {
                 collect_shape_text(c, out);
@@ -159,7 +159,7 @@ fn collect_shape_markdown(shape: &Shape, title_done: &mut bool, out: &mut Vec<St
                 out.push(md);
             }
         }
-        Shape::Picture(_) => {}
+        Shape::Picture(_) | Shape::Connector(_) | Shape::Placeholder(_) => {}
         Shape::Group(children) => {
             for c in children {
                 collect_shape_markdown(c, title_done, out);
@@ -219,7 +219,11 @@ fn table_gfm(t: &Table) -> String {
     }
     let mut lines: Vec<String> = Vec::new();
     for (i, row) in t.rows.iter().enumerate() {
-        let mut cells: Vec<String> = row.cells.iter().map(|c| escape_pipe(&cell_text(c))).collect();
+        let mut cells: Vec<String> = row
+            .cells
+            .iter()
+            .map(|c| escape_pipe(&cell_text(c)))
+            .collect();
         while cells.len() < cols {
             cells.push(String::new());
         }
@@ -247,7 +251,10 @@ fn table_html(t: &Table) -> String {
             if c.row_span > 1 {
                 attrs.push_str(&format!(" rowspan=\"{}\"", c.row_span));
             }
-            s.push_str(&format!("\n    <td{attrs}>{}</td>", escape_html(&cell_text(c))));
+            s.push_str(&format!(
+                "\n    <td{attrs}>{}</td>",
+                escape_html(&cell_text(c))
+            ));
         }
         s.push_str("\n  </tr>");
     }
@@ -275,11 +282,7 @@ mod tests {
     fn run(text: &str) -> TextRun {
         TextRun {
             text: text.to_string(),
-            font: None,
-            size_pt: None,
-            bold: false,
-            italic: false,
-            color: None,
+            ..TextRun::default()
         }
     }
 
@@ -319,6 +322,7 @@ mod tests {
     fn gfm_table_for_unmerged() {
         let table = Table {
             rect: None,
+            col_widths: Vec::new(),
             rows: vec![
                 Row {
                     cells: vec![cell("A1", 1, 1, false), cell("B1", 1, 1, false)],
@@ -341,6 +345,7 @@ mod tests {
     fn html_table_for_merged() {
         let table = Table {
             rect: None,
+            col_widths: Vec::new(),
             rows: vec![
                 Row {
                     // gridSpan=2 表头 + 一个 hMerge 延续格
@@ -389,6 +394,7 @@ mod tests {
     fn escapes_html_in_html_table() {
         let table = Table {
             rect: None,
+            col_widths: Vec::new(),
             rows: vec![Row {
                 cells: vec![cell("a<b>&c", 2, 1, false), cell("", 1, 1, true)],
                 height: None,

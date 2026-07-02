@@ -48,3 +48,14 @@ def test_to_markdown_merged_table_uses_html(merged_table_pptx_bytes):
     assert "<td>B2</td>" in md
     # 被合并掉的延续格不应单独输出(三个 <td>)。
     assert md.count("<td") == 3
+
+
+def test_b3_to_text_recovers_lost_text(b3_pptx_bytes):
+    """B-3 止损后 ``to_text`` 找回此前默默丢掉的文字:``a:br`` 后的第二行、
+    ``a:fld`` 缓存文本、``mc:Fallback`` 里的形状文字;Choice 分支不混入。"""
+    pres = pptspine.open_bytes(b3_pptx_bytes)
+    out = pres.to_text()
+    assert "Line one\nLine two" in out
+    assert "Fallback shape" in out
+    assert "NEWER CHOICE" not in out
+    assert "A1 | B1" in out

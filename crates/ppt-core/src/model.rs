@@ -42,6 +42,11 @@ pub enum Shape {
     Group(Vec<Shape>),
     /// 几何自选图形(`p:sp` 带 `a:prstGeom`)。
     Auto(AutoShape),
+    /// 连接线(`p:cxnSp`)。
+    Connector(Connector),
+    /// 非表格 `p:graphicFrame` 内容(图表 / SmartArt / OLE 等)的占位:内容本身不解析,
+    /// 但保留外框矩形与内容种类,供导出侧画占位框 + 告警。
+    Placeholder(GraphicPlaceholder),
 }
 
 /// 一个文本框体:可选位置 + 段落序列。
@@ -61,16 +66,42 @@ pub struct Paragraph {
     pub align: Option<String>,
 }
 
-/// 一段带样式的文字(`a:r`)。
-#[derive(Debug, Clone, PartialEq)]
+/// run 的种类:普通文本 / 段内硬换行 / 字段。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum RunKind {
+    /// 普通文本 run(`a:r`)。
+    #[default]
+    Text,
+    /// 段内硬换行(`a:br`);对应 run 的 `text` 固定为 `"\n"`。
+    Break,
+    /// 字段 run(`a:fld`,如页码 `slidenum`、日期 `datetime*`);对应 run 的 `text` 是
+    /// 文档里缓存的已渲染文本,`field_type` 原样保留 `a:fld@type`。
+    Field {
+        /// `a:fld@type`(缺失为 `None`)。
+        field_type: Option<String>,
+    },
+}
+
+/// 一段带样式的文字(`a:r` / `a:br` / `a:fld`,由 [`RunKind`] 区分)。
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct TextRun {
     pub text: String,
-    /// 字体名(`a:rPr` > `a:latin@typeface`)。
+    /// run 种类(文本 / 换行 / 字段),缺省普通文本。
+    pub kind: RunKind,
+    /// 拉丁字体名(`a:rPr` > `a:latin@typeface`)。
     pub font: Option<String>,
+    /// 东亚字体名(`a:rPr` > `a:ea@typeface`,CJK 关键)。
+    pub ea_font: Option<String>,
+    /// 复杂文种字体名(`a:rPr` > `a:cs@typeface`)。
+    pub cs_font: Option<String>,
     /// 字号(磅;OOXML 以百分之磅存储,解析时已除以 100)。
     pub size_pt: Option<f32>,
     pub bold: bool,
     pub italic: bool,
+    /// 下划线(`a:rPr@u` 存在且不为 `"none"`)。
+    pub underline: bool,
+    /// 删除线(`a:rPr@strike` 存在且不为 `"noStrike"`)。
+    pub strike: bool,
     /// 纯色填充 RGB(`a:solidFill` > `a:srgbClr`)。
     pub color: Option<Color>,
 }
@@ -79,6 +110,8 @@ pub struct TextRun {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Table {
     pub rect: Option<Rect>,
+    /// 各列宽(EMU,`a:tblGrid` > `a:gridCol@w`,按文档顺序);无 `tblGrid` 时为空。
+    pub col_widths: Vec<Emu>,
     pub rows: Vec<Row>,
 }
 
@@ -124,10 +157,42 @@ pub struct AutoShape {
     pub geometry: Option<String>,
     /// 填充色(`spPr` > `a:solidFill` > `a:srgbClr`)。
     pub fill: Option<Color>,
-    /// 描边色(`spPr` > `a:ln` > `a:solidFill` > `a:srgbClr`)。
-    pub stroke: Option<Color>,
+    /// 描边(`spPr` > `a:ln`)。
+    pub stroke: Option<Stroke>,
     /// 形状内的文字(若有 `p:txBody`)。
     pub text: Option<TextFrame>,
+}
+
+/// 连接线(`p:cxnSp`)—— 形同自选图形,但没有文字体。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Connector {
+    pub rect: Option<Rect>,
+    /// 预设几何名(如 `"line"`/`"straightConnector1"`/`"bentConnector3"`)。
+    pub geometry: Option<String>,
+    /// 填充色(`spPr` > `a:solidFill` > `a:srgbClr`)。
+    pub fill: Option<Color>,
+    /// 描边(`spPr` > `a:ln`)。
+    pub stroke: Option<Stroke>,
+}
+
+/// 非表格 `p:graphicFrame`(图表 / SmartArt / OLE 等)的占位信息。
+#[derive(Debug, Clone, PartialEq)]
+pub struct GraphicPlaceholder {
+    /// 外框矩形(`p:graphicFrame` > `p:xfrm`)。
+    pub rect: Option<Rect>,
+    /// 内容种类:`a:graphicData@uri` 原样(如 `…/chart`、`…/diagram`);缺失为 `None`。
+    pub kind: Option<String>,
+}
+
+/// 描边属性(`a:ln`):颜色 + 线宽 + 虚线预设。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Stroke {
+    /// 描边色(`a:ln` > `a:solidFill` > `a:srgbClr`)。
+    pub color: Option<Color>,
+    /// 线宽(EMU,`a:ln@w`);缺省 `None`。
+    pub width_emu: Option<Emu>,
+    /// 虚线预设名(`a:prstDash@val`,如 `"dash"`/`"sysDot"`);实线通常缺省为 `None`。
+    pub dash: Option<String>,
 }
 
 /// 一个 RGB 颜色(来自 `a:srgbClr@val` 的十六进制)。

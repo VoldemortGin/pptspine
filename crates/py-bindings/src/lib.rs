@@ -19,8 +19,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 use ppt_core::export::{presentation_markdown, presentation_text, slide_text};
 use ppt_core::geom::emu_to_points;
 use ppt_core::model::{
-    AutoShape, Cell, Color, Paragraph, Picture, Presentation as CorePresentation, Row, Shape,
-    Slide as CoreSlide, Table, TextFrame, TextRun,
+    AutoShape, Cell, Color, Connector, GraphicPlaceholder, Paragraph, Picture,
+    Presentation as CorePresentation, Row, RunKind, Shape, Slide as CoreSlide, Stroke, Table,
+    TextFrame, TextRun,
 };
 use ppt_core::PptError;
 use ppt_ocr::{OcrItem, PptOcr};
@@ -97,11 +98,22 @@ fn rect_to_py(
 /// 一个 [`TextRun`] -> dict。
 fn run_dict<'py>(py: Python<'py>, run: &TextRun) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
+    let (kind, field_type): (&str, Option<&str>) = match &run.kind {
+        RunKind::Text => ("text", None),
+        RunKind::Break => ("break", None),
+        RunKind::Field { field_type } => ("field", field_type.as_deref()),
+    };
     d.set_item("text", &run.text)?;
+    d.set_item("kind", kind)?;
+    d.set_item("field_type", field_type)?;
     d.set_item("font", run.font.as_deref())?;
+    d.set_item("ea_font", run.ea_font.as_deref())?;
+    d.set_item("cs_font", run.cs_font.as_deref())?;
     d.set_item("size_pt", run.size_pt)?;
     d.set_item("bold", run.bold)?;
     d.set_item("italic", run.italic)?;
+    d.set_item("underline", run.underline)?;
+    d.set_item("strike", run.strike)?;
     d.set_item("color", run.color.as_ref().map(color_hex))?;
     Ok(d)
 }
@@ -189,6 +201,7 @@ fn table_dict<'py>(py: Python<'py>, table: &Table) -> PyResult<Bound<'py, PyDict
     d.set_item("kind", "table")?;
     d.set_item("rect", rect_emu)?;
     d.set_item("rect_points", rect_pts)?;
+    d.set_item("col_widths", &table.col_widths)?;
     d.set_item("rows", rows)?;
     Ok(d)
 }
@@ -206,6 +219,18 @@ fn picture_dict<'py>(py: Python<'py>, pic: &Picture) -> PyResult<Bound<'py, PyDi
     Ok(d)
 }
 
+/// 把一个可选 [`Stroke`] 摊平进 dict:`stroke`(颜色 hex,兼容旧键)+
+/// `stroke_width_emu` + `stroke_dash`。
+fn set_stroke_items(d: &Bound<'_, PyDict>, stroke: Option<&Stroke>) -> PyResult<()> {
+    d.set_item(
+        "stroke",
+        stroke.and_then(|s| s.color.as_ref()).map(color_hex),
+    )?;
+    d.set_item("stroke_width_emu", stroke.and_then(|s| s.width_emu))?;
+    d.set_item("stroke_dash", stroke.and_then(|s| s.dash.as_deref()))?;
+    Ok(())
+}
+
 /// 一个 [`AutoShape`] -> dict。
 fn autoshape_dict<'py>(py: Python<'py>, sh: &AutoShape) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
@@ -215,7 +240,7 @@ fn autoshape_dict<'py>(py: Python<'py>, sh: &AutoShape) -> PyResult<Bound<'py, P
     d.set_item("rect_points", rect_pts)?;
     d.set_item("geometry", sh.geometry.as_deref())?;
     d.set_item("fill", sh.fill.as_ref().map(color_hex))?;
-    d.set_item("stroke", sh.stroke.as_ref().map(color_hex))?;
+    set_stroke_items(&d, sh.stroke.as_ref())?;
     match &sh.text {
         Some(tf) => {
             let (paras, text) = paragraphs_py(py, &tf.paragraphs)?;
@@ -230,6 +255,30 @@ fn autoshape_dict<'py>(py: Python<'py>, sh: &AutoShape) -> PyResult<Bound<'py, P
     Ok(d)
 }
 
+/// 一条连接线 [`Connector`] -> dict。
+fn connector_dict<'py>(py: Python<'py>, c: &Connector) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    let (rect_emu, rect_pts) = rect_to_py(py, c.rect);
+    d.set_item("kind", "connector")?;
+    d.set_item("rect", rect_emu)?;
+    d.set_item("rect_points", rect_pts)?;
+    d.set_item("geometry", c.geometry.as_deref())?;
+    d.set_item("fill", c.fill.as_ref().map(color_hex))?;
+    set_stroke_items(&d, c.stroke.as_ref())?;
+    Ok(d)
+}
+
+/// 一个非表格 graphicFrame 占位 [`GraphicPlaceholder`] -> dict。
+fn placeholder_dict<'py>(py: Python<'py>, p: &GraphicPlaceholder) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    let (rect_emu, rect_pts) = rect_to_py(py, p.rect);
+    d.set_item("kind", "placeholder")?;
+    d.set_item("rect", rect_emu)?;
+    d.set_item("rect_points", rect_pts)?;
+    d.set_item("uri", p.kind.as_deref())?;
+    Ok(d)
+}
+
 /// 一个 [`Shape`] -> dict(组合递归到 `children`)。
 fn shape_dict<'py>(py: Python<'py>, shape: &Shape) -> PyResult<Bound<'py, PyDict>> {
     match shape {
@@ -237,6 +286,8 @@ fn shape_dict<'py>(py: Python<'py>, shape: &Shape) -> PyResult<Bound<'py, PyDict
         Shape::Table(t) => table_dict(py, t),
         Shape::Picture(p) => picture_dict(py, p),
         Shape::Auto(a) => autoshape_dict(py, a),
+        Shape::Connector(c) => connector_dict(py, c),
+        Shape::Placeholder(p) => placeholder_dict(py, p),
         Shape::Group(children) => {
             let d = PyDict::new(py);
             let kids = PyList::empty(py);

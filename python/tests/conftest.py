@@ -355,3 +355,102 @@ def merged_table_pptx_bytes() -> bytes:
             "ppt/slides/_rels/slide1.xml.rels": _ROOT_RELS_EMPTY,
         }
     )
+
+
+# --- B-3 解析止损批 fixture(PRD-PDF-EXPORT §3.h/i/l/p/s/t/u)---------------------
+#
+# 一张覆盖全部止损点的 slide:段内换行 ``a:br`` + 字段 ``a:fld``(此前默默丢文本)、
+# ``mc:AlternateContent``(此前整块跳过,现降入 Fallback)、连接线 ``p:cxnSp``(此前
+# 被丢)、非表格 ``p:graphicFrame``(图表——此前连矩形一起消失,现保占位)、
+# ``a:tblGrid`` 列宽、``a:ea``/``a:cs`` 字体 + 下划线/删除线。
+
+_SLIDE_B3 = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+       xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+       xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+       xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:sp>
+        <p:txBody>
+          <a:p>
+            <a:r><a:t>Line one</a:t></a:r>
+            <a:br/>
+            <a:r>
+              <a:rPr u="sng" strike="sngStrike">
+                <a:latin typeface="Calibri"/>
+                <a:ea typeface="SimSun"/>
+                <a:cs typeface="Arial"/>
+              </a:rPr>
+              <a:t>Line two</a:t>
+            </a:r>
+          </a:p>
+          <a:p>
+            <a:fld id="{93A18523-9C96-4A83-A5F6-000000000000}" type="slidenum">
+              <a:t>1</a:t>
+            </a:fld>
+          </a:p>
+        </p:txBody>
+      </p:sp>
+      <mc:AlternateContent>
+        <mc:Choice Requires="cx1">
+          <p:sp><p:txBody><a:p><a:r><a:t>NEWER CHOICE</a:t></a:r></a:p></p:txBody></p:sp>
+        </mc:Choice>
+        <mc:Fallback>
+          <p:sp><p:txBody><a:p><a:r><a:t>Fallback shape</a:t></a:r></a:p></p:txBody></p:sp>
+        </mc:Fallback>
+      </mc:AlternateContent>
+      <p:cxnSp>
+        <p:nvCxnSpPr><p:cNvPr id="4" name="Connector 3"/><p:cNvCxnSpPr/><p:nvPr/></p:nvCxnSpPr>
+        <p:spPr>
+          <a:xfrm><a:off x="100" y="200"/><a:ext cx="300" cy="400"/></a:xfrm>
+          <a:prstGeom prst="straightConnector1"/>
+          <a:ln w="19050">
+            <a:solidFill><a:srgbClr val="FF0000"/></a:solidFill>
+            <a:prstDash val="dash"/>
+          </a:ln>
+        </p:spPr>
+      </p:cxnSp>
+      <p:graphicFrame>
+        <p:xfrm><a:off x="1000" y="2000"/><a:ext cx="3000" cy="4000"/></p:xfrm>
+        <a:graphic>
+          <a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">
+            <c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rId9"/>
+          </a:graphicData>
+        </a:graphic>
+      </p:graphicFrame>
+      <p:graphicFrame>
+        <p:xfrm><a:off x="838200" y="2000250"/><a:ext cx="5120767" cy="741680"/></p:xfrm>
+        <a:graphic>
+          <a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table">
+            <a:tbl>
+              <a:tblGrid>
+                <a:gridCol w="3886200"/>
+                <a:gridCol w="1234567"/>
+              </a:tblGrid>
+              <a:tr h="370840">
+                <a:tc><a:txBody><a:p><a:r><a:t>A1</a:t></a:r></a:p></a:txBody></a:tc>
+                <a:tc><a:txBody><a:p><a:r><a:t>B1</a:t></a:r></a:p></a:txBody></a:tc>
+              </a:tr>
+            </a:tbl>
+          </a:graphicData>
+        </a:graphic>
+      </p:graphicFrame>
+    </p:spTree>
+  </p:cSld>
+</p:sld>"""
+
+
+@pytest.fixture(scope="session")
+def b3_pptx_bytes() -> bytes:
+    """覆盖 B-3 全部解析止损点的合成 ``.pptx`` 字节串(单 slide)。"""
+    return _zip_pptx(
+        {
+            "[Content_Types].xml": _CONTENT_TYPES,
+            "_rels/.rels": _ROOT_RELS,
+            "ppt/presentation.xml": _PRESENTATION,
+            "ppt/_rels/presentation.xml.rels": _PRESENTATION_RELS,
+            "ppt/slides/slide1.xml": _SLIDE_B3,
+            "ppt/slides/_rels/slide1.xml.rels": _ROOT_RELS_EMPTY,
+        }
+    )

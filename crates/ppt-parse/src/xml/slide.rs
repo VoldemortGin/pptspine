@@ -1,10 +1,12 @@
 //! 解析单张幻灯片 XML(`ppt/slides/slideN.xml`)-> `Vec<Shape>`。
 //!
-//! 走 `p:cSld` > `p:spTree`,识别四类节点:
+//! 走 `p:cSld` > `p:spTree`,识别这些节点:
 //! - `p:sp`   —— 文本框 / 自选图形(看有没有 `a:prstGeom`)
-//! - `p:graphicFrame` > `a:tbl` —— 表格
+//! - `p:graphicFrame` > `a:tbl` —— 表格;非表格内容(图表 / SmartArt / OLE)降级为占位
 //! - `p:pic`  —— 图片
 //! - `p:grpSp` —— 组合(递归)
+//! - `p:cxnSp` —— 连接线
+//! - `mc:AlternateContent` —— 按锁定策略降入 `mc:Fallback`(跳过 `mc:Choice`)
 //!
 //! 实现是一个**递归下降**的 quick-xml 事件遍历:每个 `parse_*` 子函数在收到对应起始标签后,
 //! 一路消费到其匹配的结束标签为止,期间填充模型。容错:未知元素跳过、缺失属性 → 缺省、绝不 panic。
@@ -13,7 +15,8 @@ use std::collections::BTreeMap;
 
 use ppt_core::geom::{Emu, Rect};
 use ppt_core::model::{
-    AutoShape, Cell, Color, Paragraph, Picture, Row, Shape, Table, TextFrame, TextRun,
+    AutoShape, Cell, Color, Connector, GraphicPlaceholder, Paragraph, Picture, Row, RunKind, Shape,
+    Stroke, Table, TextFrame, TextRun,
 };
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
@@ -63,6 +66,13 @@ struct Ctx<'a> {
 /// 假定 reader 已经消费了容器的起始标签。
 fn parse_shape_container<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Vec<Shape> {
     let mut shapes = Vec::new();
+    parse_shapes_into(reader, ctx, &mut shapes);
+    shapes
+}
+
+/// 把一个容器的直接子形状解析后追加到 `out`,直到容器结束标签。
+/// `p:spTree` / `p:grpSp` / `mc:Fallback` 共用这一份分发逻辑。
+fn parse_shapes_into<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx, out: &mut Vec<Shape>) {
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
@@ -71,23 +81,25 @@ fn parse_shape_container<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx)
                 match name.as_slice() {
                     b"sp" => {
                         if let Some(s) = parse_sp(reader) {
-                            shapes.push(s);
+                            out.push(s);
                         }
                     }
                     b"graphicFrame" => {
                         if let Some(s) = parse_graphic_frame(reader) {
-                            shapes.push(s);
+                            out.push(s);
                         }
                     }
                     b"pic" => {
                         if let Some(s) = parse_pic(reader, ctx) {
-                            shapes.push(s);
+                            out.push(s);
                         }
                     }
+                    b"cxnSp" => out.push(parse_cxn_sp(reader)),
                     b"grpSp" => {
                         let children = parse_shape_container(reader, ctx);
-                        shapes.push(Shape::Group(children));
+                        out.push(Shape::Group(children));
                     }
+                    b"AlternateContent" => parse_alternate_content(reader, ctx, out),
                     // 其它直接子元素(grpSpPr / nvGrpSpPr 等)整体跳过。
                     _ => skip_element(reader, &name),
                 }
@@ -99,7 +111,33 @@ fn parse_shape_container<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx)
         }
         buf.clear();
     }
-    shapes
+}
+
+/// 解析 `mc:AlternateContent`:按锁定策略降入 `mc:Fallback`(兼容表示),把其中的形状
+/// 追加到 `out`;所有 `mc:Choice`(及其它子元素)整体跳过。已消费起始标签。
+fn parse_alternate_content<R: std::io::BufRead>(
+    reader: &mut Reader<R>,
+    ctx: &Ctx,
+    out: &mut Vec<Shape>,
+) {
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                let name = local_name(e.name().as_ref()).to_vec();
+                if name.as_slice() == b"Fallback" {
+                    parse_shapes_into(reader, ctx, out);
+                } else {
+                    skip_element(reader, &name);
+                }
+            }
+            Ok(Event::End(_)) => break,
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
 }
 
 /// 解析一个 `p:sp`(文本框或自选图形)。已消费 `<p:sp>` 起始标签。
@@ -107,7 +145,7 @@ fn parse_sp<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Shape> {
     let mut rect: Option<Rect> = None;
     let mut geometry: Option<String> = None;
     let mut fill: Option<Color> = None;
-    let mut stroke: Option<Color> = None;
+    let mut stroke: Option<Stroke> = None;
     let mut paragraphs: Vec<Paragraph> = Vec::new();
     let mut has_txbody = false;
 
@@ -159,13 +197,47 @@ fn parse_sp<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Shape> {
     }
 }
 
+/// 解析一个 `p:cxnSp`(连接线):只有 `spPr`(几何 / 填充 / 描边),没有文字体。
+/// 已消费 `<p:cxnSp>` 起始标签。即使属性齐缺也保留形状(信息无损、绝不静默丢弃)。
+fn parse_cxn_sp<R: std::io::BufRead>(reader: &mut Reader<R>) -> Shape {
+    let mut pr = SpPr::default();
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                let name = local_name(e.name().as_ref()).to_vec();
+                if name.as_slice() == b"spPr" {
+                    let got = parse_sppr(reader);
+                    pr.rect = got.rect.or(pr.rect);
+                    pr.geometry = got.geometry.or(pr.geometry);
+                    pr.fill = got.fill.or(pr.fill);
+                    pr.stroke = got.stroke.or(pr.stroke);
+                } else {
+                    skip_element(reader, &name);
+                }
+            }
+            Ok(Event::End(_)) => break,
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    Shape::Connector(Connector {
+        rect: pr.rect,
+        geometry: pr.geometry,
+        fill: pr.fill,
+        stroke: pr.stroke,
+    })
+}
+
 /// `spPr`(形状属性)的解析结果。
 #[derive(Default)]
 struct SpPr {
     rect: Option<Rect>,
     geometry: Option<String>,
     fill: Option<Color>,
-    stroke: Option<Color>,
+    stroke: Option<Stroke>,
 }
 
 /// 解析 `a:spPr`:`a:xfrm`(位置尺寸)、`a:prstGeom`(几何名)、`a:solidFill`(填充)、
@@ -184,15 +256,17 @@ fn parse_sppr<R: std::io::BufRead>(reader: &mut Reader<R>) -> SpPr {
                         skip_element(reader, &name);
                     }
                     b"solidFill" => pr.fill = parse_solid_fill(reader).or(pr.fill),
-                    b"ln" => pr.stroke = parse_line_color(reader).or(pr.stroke),
+                    b"ln" => pr.stroke = parse_ln(reader, &e).or(pr.stroke),
                     _ => skip_element(reader, &name),
                 }
             }
             Ok(Event::Empty(e)) => {
-                // `<a:prstGeom prst="rect"/>` 也可能是自闭合。
+                // `<a:prstGeom prst="rect"/>` / `<a:ln w="…"/>` 也可能是自闭合。
                 let name = local_name(e.name().as_ref()).to_vec();
-                if name.as_slice() == b"prstGeom" {
-                    pr.geometry = attr_of(&e, b"prst");
+                match name.as_slice() {
+                    b"prstGeom" => pr.geometry = attr_of(&e, b"prst"),
+                    b"ln" => pr.stroke = stroke_if_any(None, ln_width(&e), None).or(pr.stroke),
+                    _ => {}
                 }
             }
             Ok(Event::End(_)) => break,
@@ -275,21 +349,33 @@ fn parse_solid_fill<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Color
     color
 }
 
-/// 解析 `a:ln`(描边),取其内 `a:solidFill` 颜色。已消费 `<a:ln>` 起始标签。
-fn parse_line_color<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Color> {
+/// 解析 `a:ln`(描边):自身 `@w` 线宽 + 其内 `a:solidFill` 颜色 + `a:prstDash@val`
+/// 虚线预设。已消费 `<a:ln>` 起始标签;`start` 是该起始标签(读取 `w`)。
+/// 颜色 / 线宽 / 虚线全缺时返回 `None`(与旧行为一致:空 `a:ln` 不产生描边)。
+fn parse_ln<R: std::io::BufRead>(reader: &mut Reader<R>, start: &BytesStart) -> Option<Stroke> {
+    let width_emu = ln_width(start);
     let mut color = None;
+    let mut dash = None;
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
-                if name.as_slice() == b"solidFill" {
-                    color = parse_solid_fill(reader).or(color);
-                } else {
-                    skip_element(reader, &name);
+                match name.as_slice() {
+                    b"solidFill" => color = parse_solid_fill(reader).or(color),
+                    b"prstDash" => {
+                        dash = attr_of(&e, b"val").or(dash);
+                        skip_element(reader, &name);
+                    }
+                    _ => skip_element(reader, &name),
                 }
             }
-            Ok(Event::Empty(_)) => {}
+            Ok(Event::Empty(e)) => {
+                // `<a:prstDash val="dash"/>` 通常是自闭合。
+                if local_name(e.name().as_ref()) == b"prstDash" {
+                    dash = attr_of(&e, b"val").or(dash);
+                }
+            }
             Ok(Event::End(_)) => break,
             Ok(Event::Eof) => break,
             Err(_) => break,
@@ -297,7 +383,28 @@ fn parse_line_color<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Color
         }
         buf.clear();
     }
-    color
+    stroke_if_any(color, width_emu, dash)
+}
+
+/// `a:ln@w`(EMU 线宽)。
+fn ln_width(e: &BytesStart) -> Option<Emu> {
+    attr_of(e, b"w").and_then(|s| s.parse().ok())
+}
+
+/// 颜色 / 线宽 / 虚线至少有一项时建 [`Stroke`],否则 `None`。
+fn stroke_if_any(
+    color: Option<Color>,
+    width_emu: Option<Emu>,
+    dash: Option<String>,
+) -> Option<Stroke> {
+    if color.is_none() && width_emu.is_none() && dash.is_none() {
+        return None;
+    }
+    Some(Stroke {
+        color,
+        width_emu,
+        dash,
+    })
 }
 
 /// 解析 `p:txBody` -> 段落序列。已消费 `<p:txBody>` 起始标签。
@@ -324,7 +431,8 @@ fn parse_txbody<R: std::io::BufRead>(reader: &mut Reader<R>) -> Vec<Paragraph> {
     paras
 }
 
-/// 解析 `a:p`(段落):`a:pPr`(lvl/algn)、`a:r`(run)。已消费 `<a:p>` 起始标签。
+/// 解析 `a:p`(段落):`a:pPr`(lvl/algn)、`a:r`(run)、`a:br`(段内硬换行)、
+/// `a:fld`(字段,如页码/日期)。已消费 `<a:p>` 起始标签。
 fn parse_paragraph<R: std::io::BufRead>(reader: &mut Reader<R>) -> Paragraph {
     let mut runs = Vec::new();
     let mut level: u8 = 0;
@@ -342,21 +450,39 @@ fn parse_paragraph<R: std::io::BufRead>(reader: &mut Reader<R>) -> Paragraph {
                         align = attr_of(&e, b"algn");
                         skip_element(reader, &name);
                     }
-                    b"r" => {
-                        if let Some(run) = parse_run(reader) {
-                            runs.push(run);
-                        }
+                    b"r" => runs.push(parse_run_like(reader, RunKind::Text)),
+                    b"br" => {
+                        // `<a:br>` 可带 `a:rPr` 子元素,整体消费掉;换行本身无文字样式语义。
+                        skip_element(reader, &name);
+                        runs.push(break_run());
+                    }
+                    b"fld" => {
+                        let field_type = attr_of(&e, b"type");
+                        runs.push(parse_run_like(reader, RunKind::Field { field_type }));
                     }
                     _ => skip_element(reader, &name),
                 }
             }
             Ok(Event::Empty(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
-                if name.as_slice() == b"pPr" {
-                    level = attr_of(&e, b"lvl")
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0);
-                    align = attr_of(&e, b"algn");
+                match name.as_slice() {
+                    b"pPr" => {
+                        level = attr_of(&e, b"lvl")
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(0);
+                        align = attr_of(&e, b"algn");
+                    }
+                    b"br" => runs.push(break_run()),
+                    b"fld" => {
+                        // 自闭合字段:无缓存文本,仍保留字段类型(信息无损)。
+                        runs.push(TextRun {
+                            kind: RunKind::Field {
+                                field_type: attr_of(&e, b"type"),
+                            },
+                            ..TextRun::default()
+                        });
+                    }
+                    _ => {}
                 }
             }
             Ok(Event::End(_)) => break,
@@ -369,13 +495,46 @@ fn parse_paragraph<R: std::io::BufRead>(reader: &mut Reader<R>) -> Paragraph {
     Paragraph { runs, level, align }
 }
 
-/// 解析 `a:r`(文本 run):`a:rPr`(字体/字号/粗斜/颜色)+ `a:t`(文字)。已消费 `<a:r>` 起始标签。
-fn parse_run<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<TextRun> {
+/// 一个段内硬换行 run(`a:br`):`text` 固定 `"\n"`,使拼接文字自然还原换行。
+fn break_run() -> TextRun {
+    TextRun {
+        text: "\n".to_string(),
+        kind: RunKind::Break,
+        ..TextRun::default()
+    }
+}
+
+/// `a:rPr` 属性上的 run 样式:sz(百分之磅)/ b / i / u / strike。
+#[derive(Default)]
+struct RunAttrs {
+    size_pt: Option<f32>,
+    bold: bool,
+    italic: bool,
+    underline: bool,
+    strike: bool,
+}
+
+impl RunAttrs {
+    fn from(e: &BytesStart) -> Self {
+        RunAttrs {
+            size_pt: attr_of(e, b"sz")
+                .and_then(|s| s.parse::<f32>().ok())
+                .map(|v| v / 100.0),
+            bold: bool_attr(e, b"b"),
+            italic: bool_attr(e, b"i"),
+            // `u="none"` / `strike="noStrike"` 是显式关闭,不算开启。
+            underline: attr_of(e, b"u").is_some_and(|v| v != "none"),
+            strike: attr_of(e, b"strike").is_some_and(|v| v != "noStrike"),
+        }
+    }
+}
+
+/// 解析一个 run 形态的元素(`a:r` 或 `a:fld`):`a:rPr`(样式)+ `a:t`(文字)。
+/// 已消费其起始标签;`kind` 标记 run 种类(`a:fld` 的 `text` 是文档缓存的已渲染文本)。
+fn parse_run_like<R: std::io::BufRead>(reader: &mut Reader<R>, kind: RunKind) -> TextRun {
     let mut text = String::new();
-    let mut font: Option<String> = None;
-    let mut size_pt: Option<f32> = None;
-    let mut bold = false;
-    let mut italic = false;
+    let mut attrs = RunAttrs::default();
+    let mut fonts = RunFonts::default();
     let mut color: Option<Color> = None;
     let mut buf = Vec::new();
     loop {
@@ -384,15 +543,10 @@ fn parse_run<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<TextRun> {
                 let name = local_name(e.name().as_ref()).to_vec();
                 match name.as_slice() {
                     b"rPr" => {
-                        // 属性:sz(百分之磅)、b、i。
-                        size_pt = attr_of(&e, b"sz")
-                            .and_then(|s| s.parse::<f32>().ok())
-                            .map(|v| v / 100.0);
-                        bold = bool_attr(&e, b"b");
-                        italic = bool_attr(&e, b"i");
-                        let pr = parse_rpr_children(reader);
-                        font = pr.0.or(font);
-                        color = pr.1.or(color);
+                        attrs = RunAttrs::from(&e);
+                        let (f, c) = parse_rpr_children(reader);
+                        fonts = f;
+                        color = c.or(color);
                     }
                     b"t" => {
                         text.push_str(&read_text(reader));
@@ -403,11 +557,7 @@ fn parse_run<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<TextRun> {
             Ok(Event::Empty(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
                 if name.as_slice() == b"rPr" {
-                    size_pt = attr_of(&e, b"sz")
-                        .and_then(|s| s.parse::<f32>().ok())
-                        .map(|v| v / 100.0);
-                    bold = bool_attr(&e, b"b");
-                    italic = bool_attr(&e, b"i");
+                    attrs = RunAttrs::from(&e);
                 }
             }
             Ok(Event::End(_)) => break,
@@ -417,22 +567,33 @@ fn parse_run<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<TextRun> {
         }
         buf.clear();
     }
-    Some(TextRun {
+    TextRun {
         text,
-        font,
-        size_pt,
-        bold,
-        italic,
+        kind,
+        font: fonts.latin,
+        ea_font: fonts.ea,
+        cs_font: fonts.cs,
+        size_pt: attrs.size_pt,
+        bold: attrs.bold,
+        italic: attrs.italic,
+        underline: attrs.underline,
+        strike: attrs.strike,
         color,
-    })
+    }
 }
 
-/// 解析 `a:rPr` 的子元素:`a:latin@typeface`(字体)、`a:solidFill`(颜色)。
-/// 已消费 `<a:rPr>` 起始标签(非自闭合形式)。返回 `(font, color)`。
-fn parse_rpr_children<R: std::io::BufRead>(
-    reader: &mut Reader<R>,
-) -> (Option<String>, Option<Color>) {
-    let mut font = None;
+/// `a:rPr` 子元素里的三路字体名:latin / ea(东亚,CJK 关键)/ cs(复杂文种)。
+#[derive(Default)]
+struct RunFonts {
+    latin: Option<String>,
+    ea: Option<String>,
+    cs: Option<String>,
+}
+
+/// 解析 `a:rPr` 的子元素:`a:latin`/`a:ea`/`a:cs` 的 `@typeface`(字体)、
+/// `a:solidFill`(颜色)。已消费 `<a:rPr>` 起始标签(非自闭合形式)。
+fn parse_rpr_children<R: std::io::BufRead>(reader: &mut Reader<R>) -> (RunFonts, Option<Color>) {
+    let mut fonts = RunFonts::default();
     let mut color = None;
     let mut buf = Vec::new();
     loop {
@@ -440,8 +601,8 @@ fn parse_rpr_children<R: std::io::BufRead>(
             Ok(Event::Start(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
                 match name.as_slice() {
-                    b"latin" => {
-                        font = attr_of(&e, b"typeface").or(font);
+                    b"latin" | b"ea" | b"cs" => {
+                        set_typeface(&mut fonts, &name, &e);
                         skip_element(reader, &name);
                     }
                     b"solidFill" => color = parse_solid_fill(reader).or(color),
@@ -450,8 +611,8 @@ fn parse_rpr_children<R: std::io::BufRead>(
             }
             Ok(Event::Empty(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
-                if name.as_slice() == b"latin" {
-                    font = attr_of(&e, b"typeface").or(font);
+                if matches!(name.as_slice(), b"latin" | b"ea" | b"cs") {
+                    set_typeface(&mut fonts, &name, &e);
                 }
             }
             Ok(Event::End(_)) => break,
@@ -461,26 +622,98 @@ fn parse_rpr_children<R: std::io::BufRead>(
         }
         buf.clear();
     }
-    (font, color)
+    (fonts, color)
 }
 
-/// 解析 `p:graphicFrame`:其内 `a:graphic` > `a:graphicData` > `a:tbl` -> 表格。
-/// 已消费 `<p:graphicFrame>` 起始标签。同时尝试抓取 frame 的 `p:xfrm`。
+/// 把 `a:latin`/`a:ea`/`a:cs` 的 `@typeface` 填进对应槽位(已有值不覆盖)。
+fn set_typeface(fonts: &mut RunFonts, name: &[u8], e: &BytesStart) {
+    let slot = match name {
+        b"latin" => &mut fonts.latin,
+        b"ea" => &mut fonts.ea,
+        _ => &mut fonts.cs,
+    };
+    if slot.is_none() {
+        *slot = attr_of(e, b"typeface");
+    }
+}
+
+/// 解析 `p:graphicFrame`:其内 `a:graphic` > `a:graphicData` > `a:tbl` -> 表格;
+/// 非表格内容(图表 / SmartArt / OLE 等)降级为 [`Shape::Placeholder`],至少保住外框
+/// 矩形与 `graphicData@uri`(渲染侧据此画占位框 + 告警)。已消费起始标签。
 fn parse_graphic_frame<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Shape> {
     let mut rect: Option<Rect> = None;
     let mut table: Option<Table> = None;
+    let mut uri: Option<String> = None;
+    // graphic / graphicData 是要"穿透"的容器:降入时计深,End 时消深,直到
+    // `</p:graphicFrame>` 本身(depth 归零)才结束。此前不计深、见 End 就 break,
+    // 会把 `</a:graphic>`/`</p:graphicFrame>` 留给上层容器误吞,静默丢掉 frame
+    // 之后的所有同级形状。
+    let mut depth = 1usize;
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
                 match name.as_slice() {
+                    // 这些分支各自消费到自己的结束标签,不影响 depth。
                     b"xfrm" => rect = parse_xfrm(reader).or(rect),
                     b"tbl" => {
                         table = Some(parse_table(reader, rect));
                     }
                     // graphic / graphicData 只是容器:不要 skip,继续往里走。
-                    b"graphic" | b"graphicData" => {}
+                    b"graphic" => depth += 1,
+                    b"graphicData" => {
+                        uri = attr_of(&e, b"uri").or(uri);
+                        depth += 1;
+                    }
+                    _ => skip_element(reader, &name),
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                if local_name(e.name().as_ref()) == b"graphicData" {
+                    uri = attr_of(&e, b"uri").or(uri);
+                }
+            }
+            Ok(Event::End(_)) => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    match table {
+        Some(mut t) => {
+            // rect 可能在 tbl 之后才出现极少见;若 table 已建好但 rect 后到,这里补一下。
+            if t.rect.is_none() {
+                t.rect = rect;
+            }
+            Some(Shape::Table(t))
+        }
+        None => Some(Shape::Placeholder(GraphicPlaceholder { rect, kind: uri })),
+    }
+}
+
+/// 解析 `a:tbl` -> `Table`(`a:tblGrid` 列宽 + `a:tr` 行)。已消费 `<a:tbl>` 起始标签。
+fn parse_table<R: std::io::BufRead>(reader: &mut Reader<R>, rect: Option<Rect>) -> Table {
+    let mut col_widths = Vec::new();
+    let mut rows = Vec::new();
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                let name = local_name(e.name().as_ref()).to_vec();
+                match name.as_slice() {
+                    b"tblGrid" => col_widths = parse_tbl_grid(reader),
+                    b"tr" => {
+                        let height = attr_of(&e, b"h").and_then(|s| s.parse().ok());
+                        let cells = parse_table_row(reader);
+                        rows.push(Row { cells, height });
+                    }
                     _ => skip_element(reader, &name),
                 }
             }
@@ -491,30 +724,32 @@ fn parse_graphic_frame<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Sh
         }
         buf.clear();
     }
-    // rect 可能在 tbl 之后才出现极少见;若 table 已建好但 rect 后到,这里补一下。
-    table.map(|mut t| {
-        if t.rect.is_none() {
-            t.rect = rect;
-        }
-        Shape::Table(t)
-    })
+    Table {
+        rect,
+        col_widths,
+        rows,
+    }
 }
 
-/// 解析 `a:tbl` -> `Table`。已消费 `<a:tbl>` 起始标签。
-fn parse_table<R: std::io::BufRead>(reader: &mut Reader<R>, rect: Option<Rect>) -> Table {
-    let mut rows = Vec::new();
+/// 解析 `a:tblGrid` -> 各列宽(EMU,`a:gridCol@w`,按文档顺序)。已消费起始标签。
+/// 缺失 / 非法的 `w` 记 0,保持列数与文档一致(绝对定位由渲染侧容错)。
+fn parse_tbl_grid<R: std::io::BufRead>(reader: &mut Reader<R>) -> Vec<Emu> {
+    let mut widths = Vec::new();
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
+            Ok(Event::Empty(e)) => {
+                if local_name(e.name().as_ref()) == b"gridCol" {
+                    widths.push(grid_col_width(&e));
+                }
+            }
             Ok(Event::Start(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
-                if name.as_slice() == b"tr" {
-                    let height = attr_of(&e, b"h").and_then(|s| s.parse().ok());
-                    let cells = parse_table_row(reader);
-                    rows.push(Row { cells, height });
-                } else {
-                    skip_element(reader, &name);
+                if name.as_slice() == b"gridCol" {
+                    widths.push(grid_col_width(&e));
                 }
+                // gridCol 可带 extLst 子元素;其余未知元素同样整体跳过。
+                skip_element(reader, &name);
             }
             Ok(Event::End(_)) => break,
             Ok(Event::Eof) => break,
@@ -523,7 +758,12 @@ fn parse_table<R: std::io::BufRead>(reader: &mut Reader<R>, rect: Option<Rect>) 
         }
         buf.clear();
     }
-    Table { rect, rows }
+    widths
+}
+
+/// `a:gridCol@w`(EMU 列宽);缺失 / 非法记 0。
+fn grid_col_width(e: &BytesStart) -> Emu {
+    attr_of(e, b"w").and_then(|s| s.parse().ok()).unwrap_or(0)
 }
 
 /// 解析 `a:tr`(表格行)-> 单元格序列。已消费 `<a:tr>` 起始标签。

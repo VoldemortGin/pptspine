@@ -114,3 +114,84 @@ def test_malformed_input_raises_typed_error():
 def test_open_missing_file_raises():
     with pytest.raises((FileNotFoundError, OSError)):
         pptspine.open("/no/such/deck-12345.pptx")
+
+
+# --- B-3 解析止损批(PRD-PDF-EXPORT §3.h/i/l/p/s/t/u)-------------------------------
+
+
+def _b3_shapes(b3_pptx_bytes):
+    return pptspine.open_bytes(b3_pptx_bytes).slides()[0].shapes()
+
+
+def test_b3_br_and_fld_runs(b3_pptx_bytes):
+    """段内换行 ``a:br`` 与字段 ``a:fld`` 不再丢文本,run 上带 kind 标记。"""
+    tf = [s for s in _b3_shapes(b3_pptx_bytes) if s["kind"] == "text"][0]
+
+    para0 = tf["paragraphs"][0]
+    kinds = [r["kind"] for r in para0["runs"]]
+    assert kinds == ["text", "break", "text"]
+    assert para0["text"] == "Line one\nLine two"
+
+    fld = tf["paragraphs"][1]["runs"][0]
+    assert fld["kind"] == "field"
+    assert fld["field_type"] == "slidenum"
+    assert fld["text"] == "1"
+
+
+def test_b3_run_fonts_and_decorations(b3_pptx_bytes):
+    """``a:ea``/``a:cs`` 字体与 ``@u``/``@strike`` 落进 run dict。"""
+    tf = [s for s in _b3_shapes(b3_pptx_bytes) if s["kind"] == "text"][0]
+    styled = tf["paragraphs"][0]["runs"][2]
+    assert styled["font"] == "Calibri"
+    assert styled["ea_font"] == "SimSun"
+    assert styled["cs_font"] == "Arial"
+    assert styled["underline"] is True
+    assert styled["strike"] is True
+    # 普通 run 缺省全为关闭 / None。
+    plain = tf["paragraphs"][0]["runs"][0]
+    assert plain["underline"] is False
+    assert plain["strike"] is False
+    assert plain["ea_font"] is None
+
+
+def test_b3_alternate_content_takes_fallback(b3_pptx_bytes):
+    """``mc:AlternateContent`` 降入 Fallback:形状不再整块消失,Choice 被跳过。"""
+    texts = [s["text"] for s in _b3_shapes(b3_pptx_bytes) if s["kind"] == "text"]
+    assert any("Fallback shape" in t for t in texts)
+    assert not any("NEWER CHOICE" in t for t in texts)
+
+
+def test_b3_connector_shape(b3_pptx_bytes):
+    """连接线 ``p:cxnSp`` 以 kind="connector" 呈现,带几何 / 矩形 / 描边三件套。"""
+    conns = [s for s in _b3_shapes(b3_pptx_bytes) if s["kind"] == "connector"]
+    assert len(conns) == 1
+    c = conns[0]
+    assert c["geometry"] == "straightConnector1"
+    assert c["rect"] == (100, 200, 300, 400)
+    assert c["stroke"] == "FF0000"
+    assert c["stroke_width_emu"] == 19050
+    assert c["stroke_dash"] == "dash"
+
+
+def test_b3_chart_placeholder_keeps_rect(b3_pptx_bytes):
+    """非表格 graphicFrame(图表)降级为 kind="placeholder",外框矩形保住。"""
+    phs = [s for s in _b3_shapes(b3_pptx_bytes) if s["kind"] == "placeholder"]
+    assert len(phs) == 1
+    ph = phs[0]
+    assert ph["rect"] == (1000, 2000, 3000, 4000)
+    assert ph["uri"].endswith("/chart")
+
+
+def test_b3_table_col_widths(b3_pptx_bytes):
+    """``a:tblGrid`` 列宽(EMU)落进 table dict 的 ``col_widths``。"""
+    table = [s for s in _b3_shapes(b3_pptx_bytes) if s["kind"] == "table"][0]
+    assert table["col_widths"] == [3886200, 1234567]
+    # 既有表格路径不受影响。
+    assert table["rows"][0]["text"] == ["A1", "B1"]
+
+
+def test_b3_legacy_table_has_empty_col_widths(minimal_pptx_bytes):
+    """无 ``tblGrid`` 的表格 ``col_widths`` 为空列表(而非缺键)。"""
+    pres = pptspine.open_bytes(minimal_pptx_bytes)
+    table = [s for s in pres.slides()[0].shapes() if s["kind"] == "table"][0]
+    assert table["col_widths"] == []
