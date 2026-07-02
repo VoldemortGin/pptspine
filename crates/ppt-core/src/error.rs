@@ -27,6 +27,10 @@ pub enum PptError {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
+    /// PDF 渲染 / 序列化失败(由 `ppt-render` 把引擎错误映射过来)。
+    #[error("render error: {0}")]
+    Render(String),
+
     /// 图片 OCR 失败(由 `ppt-ocr` 把 `ocrspine::OcrError` 映射过来)。
     #[error("ocr error: {0}")]
     Ocr(String),
@@ -41,6 +45,7 @@ impl PptError {
             PptError::Unsupported(_) => "unsupported",
             PptError::InvalidArgument(_) => "invalid-argument",
             PptError::Io(_) => "io",
+            PptError::Render(_) => "render",
             PptError::Ocr(_) => "ocr",
         }
     }

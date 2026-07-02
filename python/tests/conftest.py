@@ -454,3 +454,385 @@ def b3_pptx_bytes() -> bytes:
             "ppt/slides/_rels/slide1.xml.rels": _ROOT_RELS_EMPTY,
         }
     )
+
+
+# --- PDF 导出 fixture(PRD-PDF-EXPORT §8 B-1 / B-2 绿条)---------------------------
+#
+# B-1:16:9 双 slide 空文本框 deck(页数 / 页面尺寸门);B-2:显式几何单文本框 deck
+# (今日五 run 属性:text / font / size_pt / bold / italic / color)。
+# B-2 字号刻意 ≤ 20 pt 且用 Arial(替换 → Liberation Sans,hhea lineGap 67/2048):
+# 首行文字顶 = 内容顶 + lineGap×size,20 pt 时 ≈ 0.65 pt,落在 1 pt 门限内。
+
+# 16:9 画布(12192000×6858000 EMU = 960×540 pt)。
+_SLIDE_CX_169 = 12_192_000
+_SLIDE_CY_169 = 6_858_000
+
+_PRESENTATION_169 = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+                xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:sldIdLst>
+    <p:sldId id="256" r:id="rId1"/>
+    <p:sldId id="257" r:id="rId2"/>
+  </p:sldIdLst>
+  <p:sldSz cx="{_SLIDE_CX_169}" cy="{_SLIDE_CY_169}" type="screen16x9"/>
+</p:presentation>"""
+
+_PRESENTATION_RELS_169 = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide2.xml"/>
+</Relationships>"""
+
+_CONTENT_TYPES_169 = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
+  <Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
+  <Override PartName="/ppt/slides/slide2.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
+</Types>"""
+
+
+def _simple_text_slide(text: str) -> str:
+    return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+       xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+       xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:sp>
+        <p:spPr>
+          <a:xfrm><a:off x="914400" y="914400"/><a:ext cx="4572000" cy="914400"/></a:xfrm>
+        </p:spPr>
+        <p:txBody>
+          <a:p><a:r><a:rPr sz="2000"><a:latin typeface="Arial"/></a:rPr><a:t>{text}</a:t></a:r></a:p>
+        </p:txBody>
+      </p:sp>
+    </p:spTree>
+  </p:cSld>
+</p:sld>"""
+
+
+@pytest.fixture(scope="session")
+def widescreen_pptx_bytes() -> bytes:
+    """16:9(960×540 pt)双 slide 的合成 ``.pptx``(B-1 页数 / 页面尺寸门)。"""
+    return _zip_pptx(
+        {
+            "[Content_Types].xml": _CONTENT_TYPES_169,
+            "_rels/.rels": _ROOT_RELS,
+            "ppt/presentation.xml": _PRESENTATION_169,
+            "ppt/_rels/presentation.xml.rels": _PRESENTATION_RELS_169,
+            "ppt/slides/slide1.xml": _simple_text_slide("First slide"),
+            "ppt/slides/slide2.xml": _simple_text_slide("Second slide"),
+            "ppt/slides/_rels/slide1.xml.rels": _ROOT_RELS_EMPTY,
+            "ppt/slides/_rels/slide2.xml.rels": _ROOT_RELS_EMPTY,
+        }
+    )
+
+
+# B-2 单文本框:显式矩形 off(914400,914400)=72,72 pt、ext(4572000,1828800)=360,144 pt。
+_B2_RECT_EMU = (914_400, 914_400, 4_572_000, 1_828_800)
+
+_SLIDE_B2 = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+       xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+       xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:sp>
+        <p:spPr>
+          <a:xfrm><a:off x="914400" y="914400"/><a:ext cx="4572000" cy="1828800"/></a:xfrm>
+        </p:spPr>
+        <p:txBody>
+          <a:p>
+            <a:r>
+              <a:rPr sz="2000" b="1" i="0">
+                <a:solidFill><a:srgbClr val="1F4E79"/></a:solidFill>
+                <a:latin typeface="Arial"/>
+              </a:rPr>
+              <a:t>Alpha beta gamma</a:t>
+            </a:r>
+          </a:p>
+          <a:p>
+            <a:r>
+              <a:rPr sz="1800" i="1">
+                <a:solidFill><a:srgbClr val="FF0000"/></a:solidFill>
+                <a:latin typeface="Arial"/>
+              </a:rPr>
+              <a:t>delta epsilon</a:t>
+            </a:r>
+          </a:p>
+        </p:txBody>
+      </p:sp>
+    </p:spTree>
+  </p:cSld>
+</p:sld>"""
+
+
+@pytest.fixture(scope="session")
+def b2_textbox_pptx() -> tuple[bytes, tuple[int, int, int, int]]:
+    """B-2 单文本框 deck。返回 ``(pptx_bytes, rect_emu)``(4:3 画布)。"""
+    pptx = _zip_pptx(
+        {
+            "[Content_Types].xml": _CONTENT_TYPES,
+            "_rels/.rels": _ROOT_RELS,
+            "ppt/presentation.xml": _PRESENTATION,
+            "ppt/_rels/presentation.xml.rels": _PRESENTATION_RELS,
+            "ppt/slides/slide1.xml": _SLIDE_B2,
+            "ppt/slides/_rels/slide1.xml.rels": _ROOT_RELS_EMPTY,
+        }
+    )
+    return pptx, _B2_RECT_EMU
+
+
+# 两个子集外预设(cloud / heart)——告警**逐种类**上浮一次的门(PRD §6)。
+_SLIDE_UNKNOWN_PRESETS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+       xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+       xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:sp>
+        <p:spPr>
+          <a:xfrm><a:off x="914400" y="914400"/><a:ext cx="1828800" cy="914400"/></a:xfrm>
+          <a:prstGeom prst="cloud"/>
+          <a:solidFill><a:srgbClr val="FFCC00"/></a:solidFill>
+        </p:spPr>
+      </p:sp>
+      <p:sp>
+        <p:spPr>
+          <a:xfrm><a:off x="3657600" y="914400"/><a:ext cx="1828800" cy="914400"/></a:xfrm>
+          <a:prstGeom prst="heart"/>
+          <a:solidFill><a:srgbClr val="FF0000"/></a:solidFill>
+        </p:spPr>
+      </p:sp>
+    </p:spTree>
+  </p:cSld>
+</p:sld>"""
+
+
+@pytest.fixture(scope="session")
+def unknown_presets_pptx_bytes() -> bytes:
+    """两个 v1 子集外预设形状的合成 ``.pptx``(告警逐种类上浮门)。"""
+    return _zip_pptx(
+        {
+            "[Content_Types].xml": _CONTENT_TYPES,
+            "_rels/.rels": _ROOT_RELS,
+            "ppt/presentation.xml": _PRESENTATION,
+            "ppt/_rels/presentation.xml.rels": _PRESENTATION_RELS,
+            "ppt/slides/slide1.xml": _SLIDE_UNKNOWN_PRESETS,
+            "ppt/slides/_rels/slide1.xml.rels": _ROOT_RELS_EMPTY,
+        }
+    )
+
+
+# --- 端到端综合 deck:完整继承链(layout/master/theme)+ 标题占位符 + 正文列表
+# --- + 预设形状 + 图片(镜像 crates/ppt-parse/tests/resolve.rs 的链 fixture)。
+
+_E2E_THEME = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Office">
+  <a:themeElements>
+    <a:clrScheme name="Office">
+      <a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1>
+      <a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1>
+      <a:dk2><a:srgbClr val="44546A"/></a:dk2>
+      <a:lt2><a:srgbClr val="E7E6E6"/></a:lt2>
+      <a:accent1><a:srgbClr val="4472C4"/></a:accent1>
+      <a:accent2><a:srgbClr val="ED7D31"/></a:accent2>
+      <a:accent3><a:srgbClr val="A5A5A5"/></a:accent3>
+      <a:accent4><a:srgbClr val="FFC000"/></a:accent4>
+      <a:accent5><a:srgbClr val="5B9BD5"/></a:accent5>
+      <a:accent6><a:srgbClr val="70AD47"/></a:accent6>
+      <a:hlink><a:srgbClr val="0563C1"/></a:hlink>
+      <a:folHlink><a:srgbClr val="954F72"/></a:folHlink>
+    </a:clrScheme>
+    <a:fontScheme name="Office">
+      <a:majorFont><a:latin typeface="Arial"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont>
+      <a:minorFont><a:latin typeface="Arial"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont>
+    </a:fontScheme>
+    <a:fmtScheme name="Office">
+      <a:fillStyleLst>
+        <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+        <a:solidFill><a:schemeClr val="phClr"><a:tint val="40000"/></a:schemeClr></a:solidFill>
+        <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+      </a:fillStyleLst>
+      <a:lnStyleLst>
+        <a:ln w="6350"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln>
+        <a:ln w="12700"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln>
+        <a:ln w="19050"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln>
+      </a:lnStyleLst>
+      <a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst>
+      <a:bgFillStyleLst>
+        <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+        <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+        <a:solidFill><a:schemeClr val="phClr"/></a:solidFill>
+      </a:bgFillStyleLst>
+    </a:fmtScheme>
+  </a:themeElements>
+</a:theme>"""
+
+_E2E_MASTER = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+             xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+             xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:sp>
+        <p:nvSpPr><p:cNvPr id="2" name="Title Placeholder 1"/><p:cNvSpPr/>
+          <p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
+        <p:spPr><a:xfrm><a:off x="838200" y="365125"/><a:ext cx="7772400" cy="1325563"/></a:xfrm></p:spPr>
+        <p:txBody><a:bodyPr/><a:lstStyle/>
+          <a:p><a:r><a:t>Click to edit Master title style</a:t></a:r></a:p></p:txBody>
+      </p:sp>
+      <p:sp>
+        <p:nvSpPr><p:cNvPr id="3" name="Body Placeholder 2"/><p:cNvSpPr/>
+          <p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr>
+        <p:spPr><a:xfrm><a:off x="838200" y="1825625"/><a:ext cx="7772400" cy="3000000"/></a:xfrm></p:spPr>
+        <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>master body prompt</a:t></a:r></a:p></p:txBody>
+      </p:sp>
+    </p:spTree>
+  </p:cSld>
+  <p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2"
+            accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6"
+            hlink="hlink" folHlink="folHlink"/>
+  <p:txStyles>
+    <p:titleStyle>
+      <a:lvl1pPr algn="ctr"><a:buNone/>
+        <a:defRPr sz="3600"><a:solidFill><a:schemeClr val="tx2"/></a:solidFill><a:latin typeface="+mj-lt"/></a:defRPr>
+      </a:lvl1pPr>
+    </p:titleStyle>
+    <p:bodyStyle>
+      <a:lvl1pPr marL="342900" indent="-342900"><a:buFont typeface="Arial"/><a:buChar char="&#8226;"/>
+        <a:defRPr sz="2000"><a:latin typeface="+mn-lt"/></a:defRPr></a:lvl1pPr>
+      <a:lvl2pPr marL="742950" indent="-285750"><a:buFont typeface="Arial"/><a:buChar char="&#8211;"/>
+        <a:defRPr sz="1800"><a:latin typeface="+mn-lt"/></a:defRPr></a:lvl2pPr>
+    </p:bodyStyle>
+    <p:otherStyle>
+      <a:lvl1pPr><a:defRPr sz="1800"/></a:lvl1pPr>
+    </p:otherStyle>
+  </p:txStyles>
+</p:sldMaster>"""
+
+_E2E_LAYOUT = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldLayout xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+             xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+             xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:sp>
+        <p:nvSpPr><p:cNvPr id="2" name="Title 1"/><p:cNvSpPr/>
+          <p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
+        <p:spPr/>
+        <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>layout title prompt</a:t></a:r></a:p></p:txBody>
+      </p:sp>
+      <p:sp>
+        <p:nvSpPr><p:cNvPr id="3" name="Content 2"/><p:cNvSpPr/>
+          <p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr>
+        <p:spPr/>
+        <p:txBody><a:bodyPr/><a:lstStyle/><a:p/></p:txBody>
+      </p:sp>
+    </p:spTree>
+  </p:cSld>
+  <p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>
+</p:sldLayout>"""
+
+# slide:标题占位符(无 xfrm / 无 rPr,几何与样式全走链)+ 正文列表(lvl 0/0/1)
+# + roundRect 预设形状(accent1 填充 + 文字)+ 图片。
+_E2E_SLIDE = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+       xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+       xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>
+    <p:spTree>
+      <p:sp>
+        <p:nvSpPr><p:cNvPr id="2" name="Title 1"/><p:cNvSpPr/>
+          <p:nvPr><p:ph type="ctrTitle"/></p:nvPr></p:nvSpPr>
+        <p:spPr/>
+        <p:txBody><a:bodyPr/><a:p><a:r><a:t>Quarterly Review</a:t></a:r></a:p></p:txBody>
+      </p:sp>
+      <p:sp>
+        <p:nvSpPr><p:cNvPr id="3" name="Content 2"/><p:cNvSpPr/>
+          <p:nvPr><p:ph idx="1"/></p:nvPr></p:nvSpPr>
+        <p:spPr/>
+        <p:txBody><a:bodyPr/>
+          <a:p><a:r><a:t>Revenue up strongly</a:t></a:r></a:p>
+          <a:p><a:r><a:t>Costs held flat</a:t></a:r></a:p>
+          <a:p><a:pPr lvl="1"/><a:r><a:t>Cloud spend detail</a:t></a:r></a:p>
+        </p:txBody>
+      </p:sp>
+      <p:sp>
+        <p:spPr>
+          <a:xfrm><a:off x="838200" y="5100000"/><a:ext cx="2400000" cy="1000000"/></a:xfrm>
+          <a:prstGeom prst="roundRect"/>
+          <a:solidFill><a:schemeClr val="accent1"/></a:solidFill>
+          <a:ln w="19050"><a:solidFill><a:srgbClr val="2F5597"/></a:solidFill></a:ln>
+        </p:spPr>
+        <p:txBody>
+          <a:p><a:pPr algn="ctr"/>
+            <a:r><a:rPr sz="1800" b="1"><a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill>
+              <a:latin typeface="Arial"/></a:rPr><a:t>GO TEAM</a:t></a:r>
+          </a:p>
+        </p:txBody>
+      </p:sp>
+      <p:pic>
+        <p:nvPicPr><p:cNvPr id="5" name="Picture 4"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+        <p:blipFill><a:blip r:embed="rId2"/></p:blipFill>
+        <p:spPr>
+          <a:xfrm><a:off x="5486400" y="5100000"/><a:ext cx="2743200" cy="1143000"/></a:xfrm>
+          <a:prstGeom prst="rect"/>
+        </p:spPr>
+      </p:pic>
+    </p:spTree>
+  </p:cSld>
+</p:sld>"""
+
+_E2E_CONTENT_TYPES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="png" ContentType="image/png"/>
+</Types>"""
+
+_E2E_SLIDE_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/>
+</Relationships>"""
+
+_E2E_LAYOUT_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/>
+</Relationships>"""
+
+_E2E_MASTER_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="../theme/theme1.xml"/>
+</Relationships>"""
+
+
+@pytest.fixture(scope="session")
+def e2e_pptx_bytes() -> bytes:
+    """端到端综合 deck:完整继承链 + 标题占位符 + 正文列表 + 预设形状 + 图片。"""
+    return build_e2e_pptx()
+
+
+def build_e2e_pptx() -> bytes:
+    """构造端到端综合 deck 字节(独立函数,供脚本 / 光栅目检复用)。"""
+    png = _OCR_SAMPLE_PNG.read_bytes()
+    return _zip_pptx(
+        {
+            "[Content_Types].xml": _E2E_CONTENT_TYPES,
+            "_rels/.rels": _ROOT_RELS,
+            "ppt/presentation.xml": _PRESENTATION,
+            "ppt/_rels/presentation.xml.rels": _PRESENTATION_RELS,
+            "ppt/slides/slide1.xml": _E2E_SLIDE,
+            "ppt/slides/_rels/slide1.xml.rels": _E2E_SLIDE_RELS,
+            "ppt/slideLayouts/slideLayout1.xml": _E2E_LAYOUT,
+            "ppt/slideLayouts/_rels/slideLayout1.xml.rels": _E2E_LAYOUT_RELS,
+            "ppt/slideMasters/slideMaster1.xml": _E2E_MASTER,
+            "ppt/slideMasters/_rels/slideMaster1.xml.rels": _E2E_MASTER_RELS,
+            "ppt/theme/theme1.xml": _E2E_THEME,
+            "ppt/media/image1.png": png,
+        }
+    )

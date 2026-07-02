@@ -18,7 +18,7 @@ use ppt_core::{PptError, Result};
 
 use zip_pkg::Package;
 
-pub use resolve::resolve;
+pub use resolve::{resolve, resolve_parts};
 
 /// 解析输出:结构化演示文稿 + media 字节(键为裸文件名,如 `image1.png`)
 /// + 继承链部件(layout / master / theme,供 [`resolve`] 消费)。

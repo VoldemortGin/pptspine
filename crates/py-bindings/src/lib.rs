@@ -12,7 +12,7 @@
 //! 绝不持有 Rust 借用。重活(解析 / OCR)在 [`Python::detach`] 下释放 GIL 运行。错误折成
 //! 以 `_core.PptError` 为根的类型化异常层级。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -26,7 +26,8 @@ use ppt_core::model::{
 };
 use ppt_core::PptError;
 use ppt_ocr::{OcrItem, PptOcr};
-use ppt_parse::{parse_bytes, parse_path};
+use ppt_parse::{parse_bytes, parse_path, resolve_parts, InheritanceParts};
+use ppt_render::{render_pdf, ExportResult, ExportWarning, RenderOptions};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyFileNotFoundError, PyIndexError, PyOSError, PyValueError};
 use pyo3::prelude::*;
@@ -318,6 +319,45 @@ struct PyPresentation {
     inner: Arc<CorePresentation>,
     /// 内嵌图片字节(键为裸文件名,如 `image1.png`),供 `image_bytes` 取用喂给 OCR。
     media: Arc<BTreeMap<String, Vec<u8>>>,
+    /// 继承链部件(layout / master / theme),供 `to_pdf` 走 `resolve_parts`。
+    inherit: Arc<InheritanceParts>,
+}
+
+impl PyPresentation {
+    /// 继承链解析 + PDF 渲染(重活,释放 GIL 跑;错误折成类型化异常)。
+    fn render_pdf_result(
+        &self,
+        py: Python<'_>,
+        font_map: Option<BTreeMap<String, String>>,
+    ) -> PyResult<ExportResult> {
+        let inner = Arc::clone(&self.inner);
+        let media = Arc::clone(&self.media);
+        let inherit = Arc::clone(&self.inherit);
+        let opts = RenderOptions {
+            font_map: font_map.unwrap_or_default(),
+        };
+        py.detach(move || {
+            let resolved = resolve_parts(&inner, &inherit);
+            render_pdf(&resolved, &media, &opts)
+        })
+        .map_err(map_err)
+    }
+}
+
+/// 把导出降级经 Python `warnings.warn` 上浮:每个 [`ExportWarning`] **种类**只
+/// 上浮首个实例(PRD §6 锁定:逐种类、不逐形状)。
+fn surface_warnings(py: Python<'_>, warnings: &[ExportWarning]) -> PyResult<()> {
+    if warnings.is_empty() {
+        return Ok(());
+    }
+    let module = py.import("warnings")?;
+    let mut seen = HashSet::new();
+    for w in warnings {
+        if seen.insert(std::mem::discriminant(w)) {
+            module.call_method1("warn", (format!("pptspine PDF export: {w}"),))?;
+        }
+    }
+    Ok(())
 }
 
 #[pymethods]
@@ -387,6 +427,34 @@ impl PyPresentation {
     /// 整份演示文稿的 Markdown(每页一节;表格用 GFM,含合并单元格时退回 HTML `<table>`)。
     fn to_markdown(&self) -> String {
         presentation_markdown(&self.inner)
+    }
+
+    /// 导出忠实 PDF 字节:每 slide 一页、页面尺寸 = 画布尺寸(EMU → pt)、形状
+    /// 绝对定位(PRD-PDF-EXPORT §6 锁定 API)。`font_map` 把请求字体族映射到字体
+    /// 文件路径或替代族名,叠加在内置替换表之上。降级(字体替换 / 预设退化 / 图片
+    /// 丢弃等)以 `warnings.warn` 逐种类上浮一次。
+    #[pyo3(signature = (*, font_map=None))]
+    fn to_pdf<'py>(
+        &self,
+        py: Python<'py>,
+        font_map: Option<BTreeMap<String, String>>,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let result = self.render_pdf_result(py, font_map)?;
+        surface_warnings(py, &result.warnings)?;
+        Ok(PyBytes::new(py, &result.pdf))
+    }
+
+    /// 导出 PDF 并写到 `path`(`to_pdf` 的落盘便捷;签名同 §6 锁定 API)。
+    #[pyo3(signature = (path, *, font_map=None))]
+    fn save_pdf(
+        &self,
+        py: Python<'_>,
+        path: PathBuf,
+        font_map: Option<BTreeMap<String, String>>,
+    ) -> PyResult<()> {
+        let result = self.render_pdf_result(py, font_map)?;
+        surface_warnings(py, &result.warnings)?;
+        std::fs::write(&path, &result.pdf).map_err(|e| map_err(PptError::Io(e)))
     }
 
     fn __repr__(&self) -> String {
@@ -471,6 +539,7 @@ fn open(py: Python<'_>, path: PathBuf) -> PyResult<PyPresentation> {
     Ok(PyPresentation {
         inner: Arc::new(parsed.presentation),
         media: Arc::new(parsed.media),
+        inherit: Arc::new(parsed.inherit),
     })
 }
 
@@ -482,6 +551,7 @@ fn open_bytes(py: Python<'_>, data: &[u8]) -> PyResult<PyPresentation> {
     Ok(PyPresentation {
         inner: Arc::new(parsed.presentation),
         media: Arc::new(parsed.media),
+        inherit: Arc::new(parsed.inherit),
     })
 }
 

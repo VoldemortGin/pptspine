@@ -1,0 +1,315 @@
+//! 文本框映射(B-2):[`ResolvedTextFrame`] 的段落 / run → `pdf-typeset` 的
+//! TS-5 绝对定位文本框输入([`TextBoxSpec`])。
+//!
+//! 本批语义(与 PRD §8 B-2 绿条对齐):
+//! - 矩形按 OOXML `bodyPr` 缺省内边距收缩(左右 91440 EMU = 7.2 pt、
+//!   上下 45720 EMU = 3.6 pt);真实 `bodyPr`(锚定 / wrap / autofit)属 B-6。
+//! - 顶部锚定、自动换行、不裁剪(裁剪与 `normAutofit` 一并在 B-6 接线,避免在
+//!   bodyPr 未合并前裁掉 PowerPoint 本会自适应的文字)。
+//! - 旋转属 B-4(xfrm `rot` 尚未进 IR),恒 0。
+//! - 项目符号:`buChar` 直接作标签;`buAutoNum` 以逐层计数器格式化(常见 scheme
+//!   子集,未知 scheme 退化为 `N.`)。标签字号/字体继承首 run(引擎 `ListLabel`
+//!   的语义;`buSzPct`/`buFont` 的独立应用属 B-6)。
+
+use ppt_core::color::ResolvedColor;
+use ppt_core::geom::{emu_to_points, Rect as EmuRect};
+use ppt_core::resolved::{ResolvedBullet, ResolvedParagraph, ResolvedRun};
+
+use pdf_typeset::{Align, Block, ListLabel, ParaProps, Rect, Rgb, Run, RunStyle, TextBoxSpec};
+
+/// OOXML `bodyPr` 缺省左右内边距(91440 EMU)。
+const INSET_LR_PT: f64 = 7.2;
+/// OOXML `bodyPr` 缺省上下内边距(45720 EMU)。
+const INSET_TB_PT: f64 = 3.6;
+/// 项目符号标签右缘到正文起点的间距(pt;引擎 `ListLabel::gutter`)。
+const BULLET_GUTTER_PT: f64 = 6.0;
+/// 继承链全缺 `marL` 时带符号段落的兜底左缩进(228600 EMU = 0.25 in)。
+const BULLET_FALLBACK_MARL_PT: f64 = 18.0;
+/// 继承链全无字体名时的兜底拉丁字体(Office 缺省主题 minor latin)。
+const DEFAULT_LATIN: &str = "Calibri";
+
+/// 把一个文本体折成 TS-5 文本框输入;无矩形(链上也没有)则无从定位,返回 `None`。
+pub(crate) fn text_box_spec(
+    rect: Option<EmuRect>,
+    paragraphs: &[ResolvedParagraph],
+) -> Option<TextBoxSpec> {
+    let r = rect?;
+    let (x, y, w, h) = r.to_points();
+    // 缺省内边距;盒子过小时放弃该向内边距(引擎对 0 宽高再兜底)。
+    let (ix, iw) = if w > 2.0 * INSET_LR_PT {
+        (x + INSET_LR_PT, w - 2.0 * INSET_LR_PT)
+    } else {
+        (x, w)
+    };
+    let (iy, ih) = if h > 2.0 * INSET_TB_PT {
+        (y + INSET_TB_PT, h - 2.0 * INSET_TB_PT)
+    } else {
+        (y, h)
+    };
+
+    let mut counters = AutoNumCounters::default();
+    let blocks: Vec<Block> = paragraphs
+        .iter()
+        .map(|p| paragraph_block(p, &mut counters))
+        .collect();
+    Some(TextBoxSpec::new(
+        Rect::new(ix, iy, ix + iw, iy + ih),
+        blocks,
+    ))
+}
+
+/// 一个段落 → `Block::Paragraph`。
+fn paragraph_block(para: &ResolvedParagraph, counters: &mut AutoNumCounters) -> Block {
+    let mut props = ParaProps::new();
+    props.align = map_align(para.align.as_deref());
+
+    let mar_l = para.mar_l.map(emu_to_points).unwrap_or(0.0);
+    let indent = para.indent.map(emu_to_points).unwrap_or(0.0);
+    let label = bullet_label(&para.bullet, para.level, counters);
+    if label.is_some() {
+        // OOXML 语义:带符号段落所有行的正文都从 marL 起;负 indent 只定位符号
+        // (引擎标签以右缘贴正文起点绘制,故这里首行缩进归零)。
+        props.indent_left = if mar_l > 0.0 {
+            mar_l
+        } else {
+            BULLET_FALLBACK_MARL_PT
+        };
+        props.first_line_indent = 0.0;
+    } else {
+        props.indent_left = mar_l;
+        props.first_line_indent = indent;
+    }
+    props.list = label;
+
+    let runs: Vec<Run> = para.runs.iter().map(run_input).collect();
+    Block::Paragraph(props, runs)
+}
+
+/// 一个 run → 引擎 [`Run`](五属性 + B-3 的下划线/删除线直通)。
+fn run_input(run: &ResolvedRun) -> Run {
+    let mut style = RunStyle::new(family_for(run), f64::from(run.size_pt));
+    style.bold = run.bold;
+    style.italic = run.italic;
+    style.underline = run.underline;
+    style.strike = run.strike;
+    style.color = rgb(run.color);
+    Run::new(run.text.clone(), style)
+}
+
+/// 终端颜色 → 引擎 RGB(文字色的 alpha 引擎 RunStyle 尚不承载,忽略)。
+pub(crate) fn rgb(c: ResolvedColor) -> Rgb {
+    Rgb::new(
+        f64::from(c.rgb[0]) / 255.0,
+        f64::from(c.rgb[1]) / 255.0,
+        f64::from(c.rgb[2]) / 255.0,
+    )
+}
+
+/// 选定 run 的请求字体族:CJK 文本优先东亚字体,其余拉丁优先;
+/// 链上全缺退 [`DEFAULT_LATIN`](引擎替换表 / 兜底字体继续接力)。
+fn family_for(run: &ResolvedRun) -> String {
+    let has_cjk = run.text.chars().any(is_cjk);
+    let pick = if has_cjk {
+        run.ea_font
+            .as_deref()
+            .or(run.font.as_deref())
+            .or(run.cs_font.as_deref())
+    } else {
+        run.font
+            .as_deref()
+            .or(run.ea_font.as_deref())
+            .or(run.cs_font.as_deref())
+    };
+    pick.unwrap_or(DEFAULT_LATIN).to_string()
+}
+
+/// CJK 判定(统一表意文字 + 扩展 A + 假名 + 谚文 + 全角标点)。
+fn is_cjk(ch: char) -> bool {
+    matches!(u32::from(ch),
+        0x3040..=0x30FF          // 假名
+        | 0x3400..=0x4DBF        // 扩展 A
+        | 0x4E00..=0x9FFF        // 统一表意
+        | 0xAC00..=0xD7AF        // 谚文
+        | 0xF900..=0xFAFF        // 兼容表意
+        | 0x3000..=0x303F        // CJK 标点
+        | 0xFF00..=0xFFEF        // 全角形式
+        | 0x20000..=0x2FA1F      // 扩展 B+
+    )
+}
+
+/// 对齐映射(`a:pPr@algn` → 引擎 [`Align`];`dist` 近似为两端对齐)。
+fn map_align(algn: Option<&str>) -> Align {
+    match algn {
+        Some("ctr") => Align::Center,
+        Some("r") => Align::Right,
+        Some("just") | Some("dist") => Align::Justify,
+        _ => Align::Left,
+    }
+}
+
+// ---- 项目符号 ---------------------------------------------------------------
+
+/// 每层级一个自动编号计数器(文本框作用域;更深层在出现更浅段落时重置)。
+#[derive(Default)]
+struct AutoNumCounters {
+    counts: Vec<i32>, // 索引 = 层级
+}
+
+impl AutoNumCounters {
+    /// 该层级下一个序号(`start_at` 只在首次出现时生效),并重置更深层级。
+    fn next(&mut self, level: u8, start_at: Option<i32>) -> i32 {
+        let lvl = usize::from(level);
+        if self.counts.len() <= lvl {
+            self.counts.resize(lvl + 1, 0);
+        }
+        if self.counts[lvl] == 0 {
+            self.counts[lvl] = start_at.unwrap_or(1);
+        } else {
+            self.counts[lvl] += 1;
+        }
+        self.counts.truncate(lvl + 1);
+        self.counts[lvl]
+    }
+}
+
+/// 项目符号 → 引擎 [`ListLabel`](`None` 含显式 `buNone` 压制)。
+fn bullet_label(
+    bullet: &ResolvedBullet,
+    level: u8,
+    counters: &mut AutoNumCounters,
+) -> Option<ListLabel> {
+    match bullet {
+        ResolvedBullet::None => None,
+        ResolvedBullet::Char { ch, .. } => Some(ListLabel {
+            text: ch.clone(),
+            gutter: BULLET_GUTTER_PT,
+        }),
+        ResolvedBullet::AutoNum {
+            scheme, start_at, ..
+        } => {
+            let n = counters.next(level, *start_at);
+            Some(ListLabel {
+                text: format_autonum(scheme.as_deref(), n),
+                gutter: BULLET_GUTTER_PT,
+            })
+        }
+    }
+}
+
+/// 按 `buAutoNum@type` 常见 scheme 子集格式化序号;未知 scheme 退化 `N.`。
+fn format_autonum(scheme: Option<&str>, n: i32) -> String {
+    let scheme = scheme.unwrap_or("arabicPeriod");
+    let base = if scheme.starts_with("alphaLc") {
+        to_alpha(n).to_lowercase()
+    } else if scheme.starts_with("alphaUc") {
+        to_alpha(n)
+    } else if scheme.starts_with("romanLc") {
+        to_roman(n).to_lowercase()
+    } else if scheme.starts_with("romanUc") {
+        to_roman(n)
+    } else {
+        n.to_string()
+    };
+    if scheme.ends_with("ParenBoth") {
+        format!("({base})")
+    } else if scheme.ends_with("ParenR") {
+        format!("{base})")
+    } else if scheme.ends_with("Plain") {
+        base
+    } else {
+        format!("{base}.")
+    }
+}
+
+/// 1 → A,26 → Z,27 → AA(大写;调用方按 scheme 折小写)。
+fn to_alpha(n: i32) -> String {
+    let mut n = i64::from(n.max(1));
+    let mut out = Vec::new();
+    while n > 0 {
+        n -= 1;
+        out.push(b'A' + u8::try_from(n % 26).unwrap_or(0));
+        n /= 26;
+    }
+    out.reverse();
+    String::from_utf8(out).unwrap_or_else(|_| "A".into())
+}
+
+/// 1 → I,4 → IV(大写罗马数字;>3999 直接十进制兜底)。
+fn to_roman(n: i32) -> String {
+    if !(1..=3999).contains(&n) {
+        return n.to_string();
+    }
+    const TABLE: [(i32, &str); 13] = [
+        (1000, "M"),
+        (900, "CM"),
+        (500, "D"),
+        (400, "CD"),
+        (100, "C"),
+        (90, "XC"),
+        (50, "L"),
+        (40, "XL"),
+        (10, "X"),
+        (9, "IX"),
+        (5, "V"),
+        (4, "IV"),
+        (1, "I"),
+    ];
+    let mut n = n;
+    let mut out = String::new();
+    for (v, s) in TABLE {
+        while n >= v {
+            out.push_str(s);
+            n -= v;
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn autonum_formats() {
+        assert_eq!(format_autonum(Some("arabicPeriod"), 3), "3.");
+        assert_eq!(format_autonum(Some("arabicParenR"), 2), "2)");
+        assert_eq!(format_autonum(Some("arabicParenBoth"), 2), "(2)");
+        assert_eq!(format_autonum(Some("arabicPlain"), 7), "7");
+        assert_eq!(format_autonum(Some("alphaLcPeriod"), 1), "a.");
+        assert_eq!(format_autonum(Some("alphaUcParenR"), 28), "AB)");
+        assert_eq!(format_autonum(Some("romanLcPeriod"), 4), "iv.");
+        assert_eq!(format_autonum(Some("romanUcPeriod"), 1949), "MCMXLIX.");
+        assert_eq!(format_autonum(None, 5), "5.");
+    }
+
+    #[test]
+    fn autonum_counters_reset_deeper_levels() {
+        let mut c = AutoNumCounters::default();
+        assert_eq!(c.next(0, None), 1);
+        assert_eq!(c.next(1, None), 1);
+        assert_eq!(c.next(1, None), 2);
+        assert_eq!(c.next(0, None), 2); // 回到 0 层
+        assert_eq!(c.next(1, None), 1); // 深层已重置
+        let mut d = AutoNumCounters::default();
+        assert_eq!(d.next(0, Some(5)), 5);
+        assert_eq!(d.next(0, Some(5)), 6);
+    }
+
+    #[test]
+    fn cjk_prefers_ea_font() {
+        let run = ResolvedRun {
+            text: "中文".into(),
+            kind: ppt_core::model::RunKind::Text,
+            font: Some("Calibri".into()),
+            ea_font: Some("SimSun".into()),
+            cs_font: None,
+            size_pt: 18.0,
+            bold: false,
+            italic: false,
+            underline: false,
+            strike: false,
+            color: ResolvedColor::opaque([0, 0, 0]),
+        };
+        assert_eq!(family_for(&run), "SimSun");
+    }
+}

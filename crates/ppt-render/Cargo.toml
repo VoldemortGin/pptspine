@@ -1,0 +1,14 @@
+[package]
+name = "ppt-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Maps the resolved pptspine IR onto the shared pdf-typeset engine: slide -> PDF page."
+publish = false
+
+[dependencies]
+ppt-core = { workspace = true }
+pdf-typeset = { workspace = true }

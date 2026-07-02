@@ -4,6 +4,7 @@ members = [
     "crates/ppt-core",
     "crates/ppt-parse",
     "crates/ppt-ocr",
+    "crates/ppt-render",
     "crates/py-bindings",
 ]
 
@@ -20,10 +21,16 @@ rust-version = "1.96"
 ppt-core = { path = "crates/ppt-core", version = "0.0.1" }
 ppt-parse = { path = "crates/ppt-parse", version = "0.0.1" }
 ppt-ocr = { path = "crates/ppt-ocr", version = "0.0.1" }
+ppt-render = { path = "crates/ppt-render", version = "0.0.1" }
 
 # --- sibling family crate: domain-neutral OCR (single source of truth for the
 # path; ppt-ocr uses `ocrspine.workspace = true` so no per-crate path math). ---
 ocrspine = { git = "https://github.com/VoldemortGin/ocrspine", rev = "732975f0233cd6500edfbbb82bc06c2332369871" }
+
+# --- sibling family crate: shared PDF typesetting engine (pdfspine Phase A;
+# PRD-PDF-EXPORT §1 locked dependency form, same precedent as ocrspine above.
+# ppt-render uses `pdf-typeset.workspace = true` so no per-crate path math). ---
+pdf-typeset = { git = "https://github.com/VoldemortGin/pdfspine", rev = "709b41daef28530842fb0503320c75bc776053d6" }
 
 # --- shared third-party deps (pinned to resolve on toolchain 1.96) ---
 thiserror = "2"

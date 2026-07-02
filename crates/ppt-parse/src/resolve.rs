@@ -19,7 +19,8 @@
 use ppt_core::color::{apply_transforms, ColorSpec, ResolvedColor};
 use ppt_core::geom::Rect;
 use ppt_core::model::{
-    AutoShape, Cell, Connector, Paragraph, Shape, Slide, Stroke, Table, TextFrame, TextRun,
+    AutoShape, Cell, Connector, Paragraph, Presentation, Shape, Slide, Stroke, Table, TextFrame,
+    TextRun,
 };
 use ppt_core::resolved::{
     ResolvedAutoShape, ResolvedBullet, ResolvedCell, ResolvedConnector, ResolvedParagraph,
@@ -36,13 +37,20 @@ use crate::{InheritanceParts, ParsedPptx};
 
 /// 把解析输出整体解析成终态 IR。纯函数、绝不 panic;缺失的链级按缺省兜底。
 pub fn resolve(parsed: &ParsedPptx) -> ResolvedPresentation {
+    resolve_parts(&parsed.presentation, &parsed.inherit)
+}
+
+/// 同 [`resolve`],但接受拆开的两部分(py-bindings 各自持有 `Arc` 时无需重组克隆)。
+pub fn resolve_parts(
+    presentation: &Presentation,
+    inherit: &InheritanceParts,
+) -> ResolvedPresentation {
     ResolvedPresentation {
-        slide_size: parsed.presentation.slide_size,
-        slides: parsed
-            .presentation
+        slide_size: presentation.slide_size,
+        slides: presentation
             .slides
             .iter()
-            .map(|s| resolve_slide(s, &parsed.inherit))
+            .map(|s| resolve_slide(s, inherit))
             .collect(),
     }
 }

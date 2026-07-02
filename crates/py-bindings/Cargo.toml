@@ -23,4 +23,5 @@ ocr = []
 ppt-core = { workspace = true }
 ppt-parse = { workspace = true }
 ppt-ocr = { workspace = true }
+ppt-render = { workspace = true }
 pyo3 = { workspace = true, features = ["abi3-py311", "extension-module"] }
