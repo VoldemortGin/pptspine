@@ -44,8 +44,8 @@ pub enum Shape {
     Table(Table),
     /// 图片(`p:pic`)。
     Picture(Picture),
-    /// 组合(`p:grpSp`),递归包含子形状。
-    Group(Vec<Shape>),
+    /// 组合(`p:grpSp`),携带自身变换 + 子坐标空间,递归包含子形状。
+    Group(GroupShape),
     /// 几何自选图形(`p:sp` 带 `a:prstGeom`)。
     Auto(AutoShape),
     /// 连接线(`p:cxnSp`)。
@@ -55,10 +55,76 @@ pub enum Shape {
     Placeholder(GraphicPlaceholder),
 }
 
+/// `a:xfrm` 自身属性(§3.d):旋转 + 翻转(矩形之外的变换部分)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Xfrm {
+    /// 旋转角(1/60000 度,顺时针为正;`a:xfrm@rot`)。
+    pub rot: i32,
+    /// 水平翻转(`a:xfrm@flipH`)。
+    pub flip_h: bool,
+    /// 垂直翻转(`a:xfrm@flipV`)。
+    pub flip_v: bool,
+}
+
+impl Xfrm {
+    /// 是否恒等变换(无旋转、无翻转)。
+    #[must_use]
+    pub fn is_identity(self) -> bool {
+        self.rot == 0 && !self.flip_h && !self.flip_v
+    }
+
+    /// 旋转角(度,顺时针为正)。
+    #[must_use]
+    pub fn rot_deg(self) -> f64 {
+        f64::from(self.rot) / 60_000.0
+    }
+}
+
+/// 组合(`p:grpSp`,§3.e):自身矩形(`grpSpPr > a:xfrm` off/ext)+ 子坐标空间
+/// (`a:chOff`/`a:chExt`)+ 旋转/翻转 + 子形状。渲染按
+/// `(child − chOff) · (ext/chExt) + off` 重映射子坐标(B-5)。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct GroupShape {
+    /// 组合在父坐标系里的矩形(`a:off`/`a:ext`)。
+    pub rect: Option<Rect>,
+    /// 子坐标空间(`a:chOff`/`a:chExt`)。
+    pub child_rect: Option<Rect>,
+    /// 组合自身的旋转/翻转。
+    pub xfrm: Xfrm,
+    /// 子形状,按文档顺序。
+    pub children: Vec<Shape>,
+}
+
+/// 形状级填充(`spPr` 直接子元素,§3.m):显式 `a:noFill` 与"未设置(走继承 /
+/// `p:style` 引用)"区分开。
+#[derive(Debug, Clone, PartialEq)]
+pub enum Fill {
+    /// 显式无填充(`a:noFill`)。
+    None,
+    /// 纯色(`a:solidFill`)。
+    Solid(ColorSpec),
+    /// 渐变(`a:gradFill`):stop 颜色按文档顺序(v1 渲染降级取首个作代表色)。
+    Gradient(Vec<ColorSpec>),
+    /// 图片填充(形状级 `a:blipFill`;v1 渲染不涂,信息保留)。
+    Blip,
+}
+
+/// 相对矩形(`a:srcRect` / `a:fillRect`,§3.n):四边偏移,单位千分之一百分点
+/// (100000 = 100%);正值向内收,负值向外扩。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RelRect {
+    pub l: i32,
+    pub t: i32,
+    pub r: i32,
+    pub b: i32,
+}
+
 /// 一个文本框体:可选位置 + 段落序列(+ 继承链所需的占位符 / 列表样式 / 形状样式引用)。
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct TextFrame {
     pub rect: Option<Rect>,
+    /// 旋转/翻转(`a:xfrm` 自身属性)。
+    pub xfrm: Xfrm,
     pub paragraphs: Vec<Paragraph>,
     /// 占位符标识(`p:nvSpPr > p:nvPr > p:ph`);非占位符为 `None`。
     pub placeholder: Option<PlaceholderRef>,
@@ -157,12 +223,18 @@ pub struct Cell {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Picture {
     pub rect: Option<Rect>,
+    /// 旋转/翻转(`a:xfrm` 自身属性;翻转对图片是真镜像)。
+    pub xfrm: Xfrm,
     /// `a:blip@r:embed` 的关系 id。
     pub rel_id: String,
     /// 经 `.rels` 解析得到的 `ppt/media/*` 文件名(media map 的键)。
     pub media_name: Option<String>,
     /// 图片字节长度(便利字段;字节本身在 media map 里)。
     pub image_bytes_len: usize,
+    /// 源裁剪(`a:blipFill > a:srcRect`)。
+    pub src_rect: Option<RelRect>,
+    /// 拉伸目标(`a:blipFill > a:stretch > a:fillRect`)。
+    pub fill_rect: Option<RelRect>,
     /// 占位符标识(`p:nvPicPr > p:nvPr > p:ph`,图片占位符几何可继承)。
     pub placeholder: Option<PlaceholderRef>,
 }
@@ -171,10 +243,14 @@ pub struct Picture {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct AutoShape {
     pub rect: Option<Rect>,
+    /// 旋转/翻转(`a:xfrm` 自身属性)。
+    pub xfrm: Xfrm,
     /// 预设几何名(`a:prstGeom@prst`,如 `"rect"`/`"ellipse"`)。
     pub geometry: Option<String>,
-    /// 填充色(`spPr` > `a:solidFill`)。
-    pub fill: Option<ColorSpec>,
+    /// 预设几何调整值(`a:avLst > a:gd`,`(name, val)` 对,§3.j)。
+    pub adjusts: Vec<(String, i64)>,
+    /// 填充(`spPr` 直接子元素;`None` = 未设置,走继承 / 样式引用)。
+    pub fill: Option<Fill>,
     /// 描边(`spPr` > `a:ln`)。
     pub stroke: Option<Stroke>,
     /// 形状内的文字(若有 `p:txBody`)。装箱以控制 `Shape` 枚举体积
@@ -190,10 +266,14 @@ pub struct AutoShape {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Connector {
     pub rect: Option<Rect>,
+    /// 旋转/翻转(`a:xfrm` 自身属性;连接线方向常靠翻转表达)。
+    pub xfrm: Xfrm,
     /// 预设几何名(如 `"line"`/`"straightConnector1"`/`"bentConnector3"`)。
     pub geometry: Option<String>,
-    /// 填充色(`spPr` > `a:solidFill`)。
-    pub fill: Option<ColorSpec>,
+    /// 预设几何调整值(`a:avLst > a:gd`,如 bentConnector3 的转折位置)。
+    pub adjusts: Vec<(String, i64)>,
+    /// 填充(`spPr` 直接子元素;`None` = 未设置,走继承 / 样式引用)。
+    pub fill: Option<Fill>,
     /// 描边(`spPr` > `a:ln`)。
     pub stroke: Option<Stroke>,
     /// 形状样式引用(`p:style`,连接线常经 `lnRef` 取主题线色)。

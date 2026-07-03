@@ -5,7 +5,7 @@
 
 use crate::color::ResolvedColor;
 use crate::geom::{Emu, Rect};
-use crate::model::{GraphicPlaceholder, Picture, RunKind};
+use crate::model::{GraphicPlaceholder, Picture, RunKind, Xfrm};
 
 /// 继承链全无字号时的兜底字号(PowerPoint 默认 18 磅)。
 pub const DEFAULT_FONT_SIZE_PT: f32 = 18.0;
@@ -33,16 +33,50 @@ pub enum ResolvedShape {
     Table(ResolvedTable),
     /// 图片:占位符几何已物化到 `rect`,其余原样。
     Picture(Picture),
-    /// 组合:子形状递归解析(组合仿射重映射属 B-5,此处保持嵌套原样)。
-    Group(Vec<ResolvedShape>),
+    /// 组合:自身变换 + 子坐标空间保留,子形状递归解析(渲染侧按
+    /// `(child − chOff)·(ext/chExt) + off` 累积仿射,B-5)。
+    Group(ResolvedGroup),
     /// 图表 / SmartArt / OLE 占位(原样透传,渲染侧画占位框)。
     Placeholder(GraphicPlaceholder),
+}
+
+/// 已解析的组合:子形状仍在原始子坐标系里,重映射交渲染侧累积。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedGroup {
+    /// 组合在父坐标系里的矩形(`a:off`/`a:ext`)。
+    pub rect: Option<Rect>,
+    /// 子坐标空间(`a:chOff`/`a:chExt`)。
+    pub child_rect: Option<Rect>,
+    /// 组合自身的旋转/翻转。
+    pub xfrm: Xfrm,
+    pub children: Vec<ResolvedShape>,
+}
+
+/// 已解析的形状填充终态。"整条链无填充 / 显式 `noFill`"由外层 `Option` 表达。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ResolvedFill {
+    /// 纯色填充。
+    Solid(ResolvedColor),
+    /// 渐变降级出的代表色(首个 stop;渲染侧记 `GradientDegraded`,PRD §1)。
+    Gradient(ResolvedColor),
+}
+
+impl ResolvedFill {
+    /// 终端颜色(渐变即其代表色)。
+    #[must_use]
+    pub fn color(self) -> ResolvedColor {
+        match self {
+            ResolvedFill::Solid(c) | ResolvedFill::Gradient(c) => c,
+        }
+    }
 }
 
 /// 已解析的文本框:矩形已按 slide → layout → master 物化。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedTextFrame {
     pub rect: Option<Rect>,
+    /// 旋转/翻转(文本渲染只用旋转;翻转不镜像文字,PowerPoint 语义)。
+    pub xfrm: Xfrm,
     pub paragraphs: Vec<ResolvedParagraph>,
 }
 
@@ -50,8 +84,11 @@ pub struct ResolvedTextFrame {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedAutoShape {
     pub rect: Option<Rect>,
+    pub xfrm: Xfrm,
     pub geometry: Option<String>,
-    pub fill: Option<ResolvedColor>,
+    /// 预设几何调整值(`a:avLst`,原样透传给 TS-6)。
+    pub adjusts: Vec<(String, i64)>,
+    pub fill: Option<ResolvedFill>,
     pub stroke: Option<ResolvedStroke>,
     pub text: Option<ResolvedTextFrame>,
 }
@@ -60,8 +97,10 @@ pub struct ResolvedAutoShape {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedConnector {
     pub rect: Option<Rect>,
+    pub xfrm: Xfrm,
     pub geometry: Option<String>,
-    pub fill: Option<ResolvedColor>,
+    pub adjusts: Vec<(String, i64)>,
+    pub fill: Option<ResolvedFill>,
     pub stroke: Option<ResolvedStroke>,
 }
 

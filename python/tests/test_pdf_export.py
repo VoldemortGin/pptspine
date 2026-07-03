@@ -273,3 +273,131 @@ def test_e2e_title_geometry_from_master(e2e_pptx_bytes: bytes) -> None:
     for w in title_words:
         assert rx - 1.0 <= w[0] and w[2] <= rx + rw + 1.0
         assert ry - 1.0 <= w[1] and w[3] <= ry + rh + 1.0
+
+
+# --- B-4:形状变换(rot/flip/avLst/prstDash/srcRect)------------------------------
+
+
+def _words_bbox(words) -> tuple[float, float, float, float]:
+    return (
+        min(w[0] for w in words),
+        min(w[1] for w in words),
+        max(w[2] for w in words),
+        max(w[3] for w in words),
+    )
+
+
+def test_b4_rotated_textbox_word_center_at_rect_center(
+    rotated_textbox_pptx: tuple[bytes, bytes, tuple[int, int, int, int]],
+) -> None:
+    """旋转 45° 文本框:词 bbox 中心距矩形中心 ≤ 1 pt(旋转绕盒心,不漂移)。"""
+    rot_pptx, plain_pptx, (ex, ey, ew, eh) = rotated_textbox_pptx
+    cx = (ex + ew / 2) / EMU_PER_PT
+    cy = (ey + eh / 2) / EMU_PER_PT
+
+    for pptx in (plain_pptx, rot_pptx):
+        pdf, _ = _export(pptx)
+        words = _open_pdf(pdf)[0].get_text("words")
+        assert words, "expected extractable words"
+        x0, y0, x1, y1 = _words_bbox(words)
+        assert (x0 + x1) / 2 == pytest.approx(cx, abs=1.0)
+        assert (y0 + y1) / 2 == pytest.approx(cy, abs=1.0)
+
+    # 旋转确实发生:45° 后词 bbox 的宽高都超过未旋转版(对角线铺开)。
+    plain_pdf, _ = _export(plain_pptx)
+    rot_pdf, _ = _export(rot_pptx)
+    pw = _words_bbox(_open_pdf(plain_pdf)[0].get_text("words"))
+    rw = _words_bbox(_open_pdf(rot_pdf)[0].get_text("words"))
+    assert (rw[3] - rw[1]) > (pw[3] - pw[1]) + 5.0, "rotated words must span taller"
+
+
+def test_b4_round_rect_adjust_changes_raster(
+    round_rect_adjust_pptx: tuple[bytes, bytes],
+) -> None:
+    """roundRect avLst:adj=50000 与缺省的光栅不同(SSIM < 1.0),且都非空白。"""
+    adjusted, default = round_rect_adjust_pptx
+    pix_a = _open_pdf(_export(adjusted)[0])[0].get_pixmap()
+    pix_d = _open_pdf(_export(default)[0])[0].get_pixmap()
+    assert not _near_blank(pix_a)
+    assert not _near_blank(pix_d)
+    assert bytes(pix_a.samples) != bytes(pix_d.samples), "avLst adj must change the raster"
+
+
+def test_b4_flip_h_moves_ink_to_the_other_side(
+    flipped_triangle_pptx: tuple[bytes, bytes],
+) -> None:
+    """rtTriangle flipH:光栅非对称——直角边(墨量重心)在**形状矩形内**换边。"""
+    flipped, plain = flipped_triangle_pptx
+    # 形状矩形(pt = 72 dpi 光栅像素):off(914400,914400) ext(3657600,2743200)。
+    rx0, rx1 = 72, 72 + 288
+    mid = (rx0 + rx1) // 2
+
+    def ink_halves(pix) -> tuple[float, float]:
+        samples = pix.samples
+        n, w, h = pix.n, pix.width, pix.height
+        left = right = 0.0
+        for row in range(h):
+            base = row * w * n
+            for col in range(rx0, min(rx1, w)):
+                i = base + col * n
+                dark = 255.0 - sum(samples[i + c] for c in range(min(n, 3))) / min(n, 3)
+                if col < mid:
+                    left += dark
+                else:
+                    right += dark
+        return left, right
+
+    pl, pr = ink_halves(_open_pdf(_export(plain)[0])[0].get_pixmap())
+    fl, fr = ink_halves(_open_pdf(_export(flipped)[0])[0].get_pixmap())
+    assert pl > pr, "unflipped rtTriangle is left-heavy inside its rect"
+    assert fr > fl, "flipH must move the mass to the right half of the rect"
+
+
+def test_b4_dash_pattern_emitted(dashed_connector_pptx: bytes) -> None:
+    """prstDash="dash"、线宽 2 pt → 内容流(未压缩)出现 `[8 6] 0 d`。"""
+    pdf, _ = _export(dashed_connector_pptx)
+    assert b"[8 6] 0 d" in pdf, "expected DrawingML dash pattern (4/3 line widths)"
+
+
+def test_b4_src_rect_crop_changes_raster_and_image_survives(
+    src_rect_pptx: tuple[bytes, bytes],
+) -> None:
+    """srcRect 裁剪:图片存活(embed 恰一份)、光栅与不裁剪版不同、带剪裁路径。"""
+    cropped, plain = src_rect_pptx
+    pdf_c, _ = _export(cropped)
+    pdf_p, _ = _export(plain)
+    page_c = _open_pdf(pdf_c)[0]
+    page_p = _open_pdf(pdf_p)[0]
+    assert len(page_c.get_images(full=True)) == 1
+    assert len(page_p.get_images(full=True)) == 1
+    assert not _near_blank(page_c.get_pixmap())
+    assert bytes(page_c.get_pixmap().samples) != bytes(page_p.get_pixmap().samples)
+    assert b"W n" in pdf_c, "srcRect crop must clip the enlarged placement"
+
+
+# --- B-5:Group 仿射(chOff/chExt 重映射 + 嵌套)----------------------------------
+
+
+def _assert_words_match(pdf_a: bytes, pdf_b: bytes) -> None:
+    """两份 PDF 的 get_text_words 逐词坐标一致(1 pt 门)、文本一致。"""
+    wa = _open_pdf(pdf_a)[0].get_text("words")
+    wb = _open_pdf(pdf_b)[0].get_text("words")
+    assert wa and len(wa) == len(wb)
+    for a, b in zip(wa, wb):
+        assert a[4] == b[4], f"word text mismatch: {a[4]!r} vs {b[4]!r}"
+        for i in range(4):
+            assert a[i] == pytest.approx(b[i], abs=1.0), f"coord {i} of {a[4]!r}"
+
+
+def test_b5_grouped_scaled_textbox_matches_flattened_twin(
+    grouped_textbox_pptx: tuple[bytes, bytes],
+) -> None:
+    grouped, twin = grouped_textbox_pptx
+    _assert_words_match(_export(grouped)[0], _export(twin)[0])
+
+
+def test_b5_nested_groups_match_flattened_twin(
+    nested_group_pptx: tuple[bytes, bytes],
+) -> None:
+    nested, twin = nested_group_pptx
+    _assert_words_match(_export(nested)[0], _export(twin)[0])

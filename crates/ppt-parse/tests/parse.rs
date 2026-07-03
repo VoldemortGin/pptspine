@@ -520,3 +520,161 @@ fn tbl_grid_col_widths_parsed() {
     // 既有字段不受影响。
     assert_eq!(t.rows[0].cells.len(), 2);
 }
+
+/// B-4(§3.d/§3.j):`a:xfrm` 自身的 rot/flipH/flipV 与 `a:avLst > a:gd`
+/// 调整值落进 `AutoShape`。
+#[test]
+fn xfrm_rot_flip_and_avlst_parsed() {
+    let shapes = shapes_of(
+        r#"<p:sp>
+             <p:spPr>
+               <a:xfrm rot="2700000" flipH="1" flipV="true">
+                 <a:off x="914400" y="914400"/><a:ext cx="1828800" cy="914400"/>
+               </a:xfrm>
+               <a:prstGeom prst="roundRect">
+                 <a:avLst><a:gd name="adj" fmla="val 50000"/></a:avLst>
+               </a:prstGeom>
+               <a:solidFill><a:srgbClr val="FFCC00"/></a:solidFill>
+             </p:spPr>
+           </p:sp>"#,
+    );
+    let Shape::Auto(auto) = &shapes[0] else {
+        panic!("expected an autoshape");
+    };
+    assert_eq!(auto.xfrm.rot, 2_700_000); // 45° 顺时针
+    assert!(auto.xfrm.flip_h && auto.xfrm.flip_v);
+    assert_eq!(auto.adjusts, vec![("adj".to_string(), 50_000)]);
+    assert_eq!(auto.geometry.as_deref(), Some("roundRect"));
+}
+
+/// B-5(§3.e):`p:grpSp` 解析出组合自身矩形 + `chOff`/`chExt` 子坐标空间 +
+/// 旋转,子形状(含嵌套组合)按文档顺序保留。
+#[test]
+fn grp_sp_parses_group_and_nested_group() {
+    let shapes = shapes_of(
+        r#"<p:grpSp>
+             <p:nvGrpSpPr><p:cNvPr id="10" name="Group 9"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+             <p:grpSpPr>
+               <a:xfrm rot="5400000">
+                 <a:off x="914400" y="914400"/><a:ext cx="3657600" cy="1828800"/>
+                 <a:chOff x="0" y="0"/><a:chExt cx="1828800" cy="914400"/>
+               </a:xfrm>
+             </p:grpSpPr>
+             <p:sp><p:txBody><a:p><a:r><a:t>inside</a:t></a:r></a:p></p:txBody></p:sp>
+             <p:grpSp>
+               <p:grpSpPr>
+                 <a:xfrm>
+                   <a:off x="0" y="0"/><a:ext cx="914400" cy="457200"/>
+                   <a:chOff x="0" y="0"/><a:chExt cx="914400" cy="457200"/>
+                 </a:xfrm>
+               </p:grpSpPr>
+               <p:sp><p:txBody><a:p><a:r><a:t>deep</a:t></a:r></a:p></p:txBody></p:sp>
+             </p:grpSp>
+           </p:grpSp>"#,
+    );
+    let Shape::Group(g) = &shapes[0] else {
+        panic!("expected a group");
+    };
+    let rect = g.rect.expect("group rect");
+    assert_eq!(
+        (rect.x, rect.y, rect.w, rect.h),
+        (914_400, 914_400, 3_657_600, 1_828_800)
+    );
+    let child = g.child_rect.expect("child space");
+    assert_eq!(
+        (child.x, child.y, child.w, child.h),
+        (0, 0, 1_828_800, 914_400)
+    );
+    assert_eq!(g.xfrm.rot, 5_400_000); // 90°
+    assert_eq!(g.children.len(), 2);
+    assert!(matches!(&g.children[0], Shape::TextBox(_)));
+    let Shape::Group(inner) = &g.children[1] else {
+        panic!("expected the nested group");
+    };
+    assert_eq!(inner.children.len(), 1);
+}
+
+/// B-4(§3.n):`p:blipFill` 的 `a:srcRect` 裁剪与 `a:stretch > a:fillRect`
+/// 拉伸目标落进 `Picture`;图片自身的 rot/flip 一并保留。
+#[test]
+fn pic_src_rect_fill_rect_and_xfrm_parsed() {
+    let shapes = shapes_of(
+        r#"<p:pic>
+             <p:nvPicPr><p:cNvPr id="2" name="Picture 1"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+             <p:blipFill>
+               <a:blip r:embed="rId7"/>
+               <a:srcRect l="10000" t="20000" r="30000" b="0"/>
+               <a:stretch><a:fillRect l="-5000" r="-5000"/></a:stretch>
+             </p:blipFill>
+             <p:spPr>
+               <a:xfrm rot="600000" flipH="1">
+                 <a:off x="0" y="0"/><a:ext cx="914400" cy="914400"/>
+               </a:xfrm>
+             </p:spPr>
+           </p:pic>"#,
+    );
+    let Shape::Picture(pic) = &shapes[0] else {
+        panic!("expected a picture");
+    };
+    assert_eq!(pic.rel_id, "rId7");
+    let sr = pic.src_rect.expect("srcRect");
+    assert_eq!((sr.l, sr.t, sr.r, sr.b), (10_000, 20_000, 30_000, 0));
+    let fr = pic.fill_rect.expect("fillRect");
+    assert_eq!((fr.l, fr.t, fr.r, fr.b), (-5_000, 0, -5_000, 0));
+    assert_eq!(pic.xfrm.rot, 600_000);
+    assert!(pic.xfrm.flip_h && !pic.xfrm.flip_v);
+}
+
+/// B-4(§3.m):形状级填充变体——显式 `a:noFill` 与"未设置"区分、`a:gradFill`
+/// 保留 stop 颜色、`a:blipFill` 标记为图片填充。
+#[test]
+fn fill_variants_parsed() {
+    use ppt_core::model::Fill;
+    let shapes = shapes_of(
+        r#"<p:sp>
+             <p:spPr>
+               <a:prstGeom prst="rect"/><a:noFill/>
+               <a:ln w="12700"><a:solidFill><a:srgbClr val="000000"/></a:solidFill></a:ln>
+             </p:spPr>
+           </p:sp>
+           <p:sp>
+             <p:spPr>
+               <a:prstGeom prst="rect"/>
+               <a:gradFill>
+                 <a:gsLst>
+                   <a:gs pos="0"><a:srgbClr val="FF0000"/></a:gs>
+                   <a:gs pos="100000"><a:srgbClr val="0000FF"/></a:gs>
+                 </a:gsLst>
+                 <a:lin ang="5400000" scaled="1"/>
+               </a:gradFill>
+             </p:spPr>
+           </p:sp>
+           <p:sp>
+             <p:spPr>
+               <a:prstGeom prst="rect"/>
+               <a:blipFill><a:blip r:embed="rId3"/><a:stretch><a:fillRect/></a:stretch></a:blipFill>
+             </p:spPr>
+           </p:sp>"#,
+    );
+    let Shape::Auto(no_fill) = &shapes[0] else {
+        panic!("expected an autoshape (noFill + stroke)");
+    };
+    assert_eq!(no_fill.fill, Some(Fill::None));
+
+    let Shape::Auto(grad) = &shapes[1] else {
+        panic!("expected an autoshape (gradFill)");
+    };
+    let Some(Fill::Gradient(stops)) = &grad.fill else {
+        panic!("expected a gradient fill, got {:?}", grad.fill);
+    };
+    assert_eq!(stops.len(), 2);
+    assert_eq!(
+        stops[0].base_srgb().map(|c| c.rgb),
+        Some([0xFF, 0x00, 0x00])
+    );
+
+    let Shape::Auto(blip) = &shapes[2] else {
+        panic!("expected an autoshape (blipFill)");
+    };
+    assert_eq!(blip.fill, Some(Fill::Blip));
+}

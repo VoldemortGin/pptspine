@@ -21,8 +21,8 @@ use std::collections::BTreeMap;
 use ppt_core::color::ColorSpec;
 use ppt_core::geom::{Emu, Rect};
 use ppt_core::model::{
-    AutoShape, Cell, Connector, GraphicPlaceholder, Paragraph, Picture, Row, RunKind, Shape,
-    Stroke, Table, TextFrame, TextRun,
+    AutoShape, Cell, Connector, Fill, GraphicPlaceholder, GroupShape, Paragraph, Picture, RelRect,
+    Row, RunKind, Shape, Stroke, Table, TextFrame, TextRun, Xfrm,
 };
 use ppt_core::style::{
     FontRef, PlaceholderRef, RunStyle, ShapeStyle, StyleMatrixRef, TextStyleLevels, TxStyles,
@@ -202,30 +202,9 @@ fn parse_shapes_into<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx, out
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
-                match name.as_slice() {
-                    b"sp" => {
-                        if let Some(s) = parse_sp(reader) {
-                            out.push(s);
-                        }
-                    }
-                    b"graphicFrame" => {
-                        if let Some(s) = parse_graphic_frame(reader) {
-                            out.push(s);
-                        }
-                    }
-                    b"pic" => {
-                        if let Some(s) = parse_pic(reader, ctx) {
-                            out.push(s);
-                        }
-                    }
-                    b"cxnSp" => out.push(parse_cxn_sp(reader)),
-                    b"grpSp" => {
-                        let children = parse_shape_container(reader, ctx);
-                        out.push(Shape::Group(children));
-                    }
-                    b"AlternateContent" => parse_alternate_content(reader, ctx, out),
+                if !dispatch_shape(&name, reader, ctx, out) {
                     // 其它直接子元素(grpSpPr / nvGrpSpPr 等)整体跳过。
-                    _ => skip_element(reader, &name),
+                    skip_element(reader, &name);
                 }
             }
             Ok(Event::End(_)) => break, // 容器结束。
@@ -235,6 +214,91 @@ fn parse_shapes_into<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx, out
         }
         buf.clear();
     }
+}
+
+/// 形状元素分发(`parse_shapes_into` / `parse_grp_sp` 共用):识别并解析一个形状
+/// 起始标签,追加到 `out`。非形状元素返回 `false`(调用方自行跳过)。
+fn dispatch_shape<R: std::io::BufRead>(
+    name: &[u8],
+    reader: &mut Reader<R>,
+    ctx: &Ctx,
+    out: &mut Vec<Shape>,
+) -> bool {
+    match name {
+        b"sp" => {
+            if let Some(s) = parse_sp(reader) {
+                out.push(s);
+            }
+        }
+        b"graphicFrame" => {
+            if let Some(s) = parse_graphic_frame(reader) {
+                out.push(s);
+            }
+        }
+        b"pic" => {
+            if let Some(s) = parse_pic(reader, ctx) {
+                out.push(s);
+            }
+        }
+        b"cxnSp" => out.push(parse_cxn_sp(reader)),
+        b"grpSp" => out.push(Shape::Group(parse_grp_sp(reader, ctx))),
+        b"AlternateContent" => parse_alternate_content(reader, ctx, out),
+        _ => return false,
+    }
+    true
+}
+
+/// 解析一个 `p:grpSp`(组合):`p:grpSpPr > a:xfrm`(off/ext + chOff/chExt +
+/// rot/flip)+ 子形状。已消费 `<p:grpSp>` 起始标签(B-5,§3.e)。
+fn parse_grp_sp<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> GroupShape {
+    let mut group = GroupShape::default();
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                let name = local_name(e.name().as_ref()).to_vec();
+                if name.as_slice() == b"grpSpPr" {
+                    if let Some(x) = parse_grp_sppr(reader) {
+                        group.rect = x.rect;
+                        group.child_rect = x.child_rect;
+                        group.xfrm = x.xfrm;
+                    }
+                } else if !dispatch_shape(&name, reader, ctx, &mut group.children) {
+                    skip_element(reader, &name);
+                }
+            }
+            Ok(Event::End(_)) => break,
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    group
+}
+
+/// 在 `p:grpSpPr` 里找 `a:xfrm`(组合变换)。已消费起始标签,消费到其结束标签。
+fn parse_grp_sppr<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<XfrmData> {
+    let mut xfrm = None;
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                let name = local_name(e.name().as_ref()).to_vec();
+                if name.as_slice() == b"xfrm" {
+                    xfrm = Some(parse_xfrm(reader, &e));
+                } else {
+                    skip_element(reader, &name);
+                }
+            }
+            Ok(Event::End(_)) => break,
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    xfrm
 }
 
 /// 解析 `mc:AlternateContent`:按锁定策略降入 `mc:Fallback`(兼容表示),把其中的形状
@@ -266,10 +330,7 @@ fn parse_alternate_content<R: std::io::BufRead>(
 
 /// 解析一个 `p:sp`(文本框或自选图形)。已消费 `<p:sp>` 起始标签。
 fn parse_sp<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Shape> {
-    let mut rect: Option<Rect> = None;
-    let mut geometry: Option<String> = None;
-    let mut fill: Option<ColorSpec> = None;
-    let mut stroke: Option<Stroke> = None;
+    let mut pr = SpPr::default();
     let mut placeholder: Option<PlaceholderRef> = None;
     let mut style: Option<ShapeStyle> = None;
     let mut body = TxBodyData::default();
@@ -283,11 +344,13 @@ fn parse_sp<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Shape> {
                 match name.as_slice() {
                     b"nvSpPr" => placeholder = parse_nv_ph(reader).or(placeholder),
                     b"spPr" => {
-                        let pr = parse_sppr(reader);
-                        rect = pr.rect.or(rect);
-                        geometry = pr.geometry.or(geometry);
-                        fill = pr.fill.or(fill);
-                        stroke = pr.stroke.or(stroke);
+                        let got = parse_sppr(reader);
+                        pr.rect = got.rect.or(pr.rect);
+                        pr.xfrm = got.xfrm;
+                        pr.geometry = got.geometry.or(pr.geometry);
+                        pr.adjusts = got.adjusts;
+                        pr.fill = got.fill.or(pr.fill);
+                        pr.stroke = got.stroke.or(pr.stroke);
                     }
                     b"style" => style = Some(parse_shape_style(reader)),
                     b"txBody" => {
@@ -306,14 +369,17 @@ fn parse_sp<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Shape> {
     }
 
     let text_frame = TextFrame {
-        rect,
+        rect: pr.rect,
+        xfrm: pr.xfrm,
         paragraphs: body.paragraphs,
         placeholder: placeholder.clone(),
         list_style: body.list_style,
         style: style.clone(),
     };
-    // 有预设几何 / 填充 / 描边 => 当作自选图形;否则当作纯文本框。
-    if geometry.is_some() || fill.is_some() || stroke.is_some() {
+    // 有预设几何 / 实际填充 / 描边 => 当作自选图形;否则当作纯文本框
+    // (孤立的显式 `noFill` 不改变分类——渲染结果与纯文本框一致)。
+    let has_paint = pr.fill.as_ref().is_some_and(|f| !matches!(f, Fill::None));
+    if pr.geometry.is_some() || has_paint || pr.stroke.is_some() {
         // 段落非空,或带 lstStyle(layout/master 占位符常态——继承链需要),才保留文字体。
         let text = if has_txbody
             && (!text_frame.paragraphs.is_empty() || text_frame.list_style.is_some())
@@ -323,10 +389,12 @@ fn parse_sp<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Shape> {
             None
         };
         Some(Shape::Auto(AutoShape {
-            rect,
-            geometry,
-            fill,
-            stroke,
+            rect: pr.rect,
+            xfrm: pr.xfrm,
+            geometry: pr.geometry,
+            adjusts: pr.adjusts,
+            fill: pr.fill,
+            stroke: pr.stroke,
             text,
             placeholder,
             style,
@@ -459,7 +527,9 @@ fn parse_cxn_sp<R: std::io::BufRead>(reader: &mut Reader<R>) -> Shape {
                     b"spPr" => {
                         let got = parse_sppr(reader);
                         pr.rect = got.rect.or(pr.rect);
+                        pr.xfrm = got.xfrm;
                         pr.geometry = got.geometry.or(pr.geometry);
+                        pr.adjusts = got.adjusts;
                         pr.fill = got.fill.or(pr.fill);
                         pr.stroke = got.stroke.or(pr.stroke);
                     }
@@ -476,7 +546,9 @@ fn parse_cxn_sp<R: std::io::BufRead>(reader: &mut Reader<R>) -> Shape {
     }
     Shape::Connector(Connector {
         rect: pr.rect,
+        xfrm: pr.xfrm,
         geometry: pr.geometry,
+        adjusts: pr.adjusts,
         fill: pr.fill,
         stroke: pr.stroke,
         style,
@@ -487,12 +559,15 @@ fn parse_cxn_sp<R: std::io::BufRead>(reader: &mut Reader<R>) -> Shape {
 #[derive(Default)]
 struct SpPr {
     rect: Option<Rect>,
+    xfrm: Xfrm,
     geometry: Option<String>,
-    fill: Option<ColorSpec>,
+    adjusts: Vec<(String, i64)>,
+    fill: Option<Fill>,
     stroke: Option<Stroke>,
 }
 
-/// 解析 `a:spPr`:`a:xfrm`(位置尺寸)、`a:prstGeom`(几何名)、`a:solidFill`(填充)、
+/// 解析 `a:spPr`:`a:xfrm`(位置尺寸 + 旋转/翻转)、`a:prstGeom`(几何名 + avLst
+/// 调整值)、填充(`a:solidFill`/`a:noFill`/`a:gradFill`/`a:blipFill`)、
 /// `a:ln`(描边,其内可再有 `a:solidFill`)。已消费 `<*:spPr>` 起始标签。
 fn parse_sppr<R: std::io::BufRead>(reader: &mut Reader<R>) -> SpPr {
     let mut pr = SpPr::default();
@@ -502,21 +577,40 @@ fn parse_sppr<R: std::io::BufRead>(reader: &mut Reader<R>) -> SpPr {
             Ok(Event::Start(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
                 match name.as_slice() {
-                    b"xfrm" => pr.rect = parse_xfrm(reader),
+                    b"xfrm" => {
+                        let x = parse_xfrm(reader, &e);
+                        pr.rect = x.rect;
+                        pr.xfrm = x.xfrm;
+                    }
                     b"prstGeom" => {
                         pr.geometry = attr_of(&e, b"prst");
+                        pr.adjusts = parse_av_lst(reader);
+                    }
+                    b"solidFill" => {
+                        if let Some(spec) = parse_solid_fill(reader) {
+                            pr.fill = Some(Fill::Solid(spec));
+                        }
+                    }
+                    b"noFill" => {
+                        pr.fill = Some(Fill::None);
                         skip_element(reader, &name);
                     }
-                    b"solidFill" => pr.fill = parse_solid_fill(reader).or(pr.fill),
+                    b"gradFill" => pr.fill = Some(Fill::Gradient(parse_grad_fill(reader))),
+                    b"blipFill" => {
+                        pr.fill = Some(Fill::Blip);
+                        skip_element(reader, &name);
+                    }
                     b"ln" => pr.stroke = parse_ln(reader, &e).or(pr.stroke),
                     _ => skip_element(reader, &name),
                 }
             }
             Ok(Event::Empty(e)) => {
-                // `<a:prstGeom prst="rect"/>` / `<a:ln w="…"/>` 也可能是自闭合。
+                // `<a:prstGeom prst="rect"/>` / `<a:noFill/>` / `<a:ln w="…"/>`
+                // 也可能是自闭合。
                 let name = local_name(e.name().as_ref()).to_vec();
                 match name.as_slice() {
                     b"prstGeom" => pr.geometry = attr_of(&e, b"prst"),
+                    b"noFill" => pr.fill = Some(Fill::None),
                     b"ln" => pr.stroke = stroke_if_any(None, ln_width(&e), None).or(pr.stroke),
                     _ => {}
                 }
@@ -531,26 +625,39 @@ fn parse_sppr<R: std::io::BufRead>(reader: &mut Reader<R>) -> SpPr {
     pr
 }
 
-/// 解析 `a:xfrm` 内的 `a:off`(x/y)与 `a:ext`(cx/cy)-> `Rect`。已消费 `<a:xfrm>` 起始标签。
-fn parse_xfrm<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Rect> {
-    let mut x: Option<Emu> = None;
-    let mut y: Option<Emu> = None;
-    let mut w: Option<Emu> = None;
-    let mut h: Option<Emu> = None;
+/// `a:xfrm` 的完整解析结果:矩形 + 旋转/翻转 + 子坐标空间(组合才有)。
+#[derive(Debug, Clone, Copy, Default)]
+struct XfrmData {
+    rect: Option<Rect>,
+    child_rect: Option<Rect>,
+    xfrm: Xfrm,
+}
+
+/// 解析 `a:xfrm`:自身属性 `rot`/`flipH`/`flipV`(§3.d)+ 子元素 `a:off`/`a:ext`
+/// (-> `rect`)与 `a:chOff`/`a:chExt`(-> `child_rect`,组合子坐标空间,§3.e)。
+/// 已消费 `<a:xfrm>` 起始标签;`start` 是该起始标签。
+fn parse_xfrm<R: std::io::BufRead>(reader: &mut Reader<R>, start: &BytesStart) -> XfrmData {
+    let xfrm = Xfrm {
+        rot: attr_of(start, b"rot")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0),
+        flip_h: bool_attr(start, b"flipH"),
+        flip_v: bool_attr(start, b"flipV"),
+    };
+    let mut off: Option<(Emu, Emu)> = None;
+    let mut ext: Option<(Emu, Emu)> = None;
+    let mut ch_off: Option<(Emu, Emu)> = None;
+    let mut ch_ext: Option<(Emu, Emu)> = None;
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Empty(e)) | Ok(Event::Start(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
                 match name.as_slice() {
-                    b"off" => {
-                        x = attr_of(&e, b"x").and_then(|s| s.parse().ok());
-                        y = attr_of(&e, b"y").and_then(|s| s.parse().ok());
-                    }
-                    b"ext" => {
-                        w = attr_of(&e, b"cx").and_then(|s| s.parse().ok());
-                        h = attr_of(&e, b"cy").and_then(|s| s.parse().ok());
-                    }
+                    b"off" => off = xy_of(&e, b"x", b"y"),
+                    b"ext" => ext = xy_of(&e, b"cx", b"cy"),
+                    b"chOff" => ch_off = xy_of(&e, b"x", b"y"),
+                    b"chExt" => ch_ext = xy_of(&e, b"cx", b"cy"),
                     _ => {}
                 }
             }
@@ -561,10 +668,106 @@ fn parse_xfrm<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Rect> {
         }
         buf.clear();
     }
-    match (x, y, w, h) {
-        (Some(x), Some(y), Some(w), Some(h)) => Some(Rect::new(x, y, w, h)),
+    let rect_of = |o: Option<(Emu, Emu)>, e: Option<(Emu, Emu)>| match (o, e) {
+        (Some((x, y)), Some((w, h))) => Some(Rect::new(x, y, w, h)),
         _ => None,
+    };
+    XfrmData {
+        rect: rect_of(off, ext),
+        child_rect: rect_of(ch_off, ch_ext),
+        xfrm,
     }
+}
+
+/// 从元素属性读一对 EMU 坐标(两个都合法才算)。
+fn xy_of(e: &BytesStart, kx: &[u8], ky: &[u8]) -> Option<(Emu, Emu)> {
+    let x = attr_of(e, kx).and_then(|s| s.parse().ok())?;
+    let y = attr_of(e, ky).and_then(|s| s.parse().ok())?;
+    Some((x, y))
+}
+
+/// 解析 `a:prstGeom` 内的 `a:avLst > a:gd`(§3.j)-> `(name, val)` 对。
+/// `fmla` 形如 `"val 25000"`,取末 token 解析;非 `val` 公式跳过(保持保守)。
+/// 已消费 `<a:prstGeom>` 起始标签,消费到其结束标签。
+fn parse_av_lst<R: std::io::BufRead>(reader: &mut Reader<R>) -> Vec<(String, i64)> {
+    let mut adjusts = Vec::new();
+    let mut depth = 1usize;
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                depth += 1;
+                if let Some(gd) = gd_of(&e) {
+                    adjusts.push(gd);
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                if let Some(gd) = gd_of(&e) {
+                    adjusts.push(gd);
+                }
+            }
+            Ok(Event::End(_)) => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    adjusts
+}
+
+/// 识别一个 `<a:gd name="adj" fmla="val 50000"/>`;非 gd / 非 val 公式 → `None`。
+fn gd_of(e: &BytesStart) -> Option<(String, i64)> {
+    if local_name(e.name().as_ref()) != b"gd" {
+        return None;
+    }
+    let name = attr_of(e, b"name")?;
+    let fmla = attr_of(e, b"fmla")?;
+    let mut it = fmla.split_whitespace();
+    if it.next() != Some("val") {
+        return None;
+    }
+    let val: i64 = it.next()?.parse().ok()?;
+    Some((name, val))
+}
+
+/// 解析 `a:gradFill` 的 stop 颜色(`a:gsLst > a:gs` 内首个颜色元素,按文档顺序)。
+/// 已消费 `<a:gradFill>` 起始标签,消费到其结束标签。
+fn parse_grad_fill<R: std::io::BufRead>(reader: &mut Reader<R>) -> Vec<ColorSpec> {
+    let mut stops = Vec::new();
+    let mut depth = 1usize;
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                let name = local_name(e.name().as_ref()).to_vec();
+                if name.as_slice() == b"gs" {
+                    // parse_color_in 消费到 </a:gs>,不影响 depth。
+                    if let Some(spec) = parse_color_in(reader) {
+                        stops.push(spec);
+                    }
+                } else {
+                    depth += 1;
+                }
+            }
+            Ok(Event::End(_)) => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    stops
 }
 
 /// 解析 `a:ln`(描边):自身 `@w` 线宽 + 其内 `a:solidFill` 颜色 + `a:prstDash@val`
@@ -796,7 +999,7 @@ fn parse_graphic_frame<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Sh
                 let name = local_name(e.name().as_ref()).to_vec();
                 match name.as_slice() {
                     // 这些分支各自消费到自己的结束标签,不影响 depth。
-                    b"xfrm" => rect = parse_xfrm(reader).or(rect),
+                    b"xfrm" => rect = parse_xfrm(reader, &e).rect.or(rect),
                     b"tbl" => {
                         table = Some(parse_table(reader, rect));
                     }
@@ -1006,11 +1209,13 @@ fn parse_tcpr_fill<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<ColorS
     color
 }
 
-/// 解析 `p:pic`(图片):`p:spPr`(位置)+ `a:blip@r:embed`(rel id)+ 占位符标识。
+/// 解析 `p:pic`(图片):`p:spPr`(位置 + 旋转/翻转)+ `p:blipFill`(rel id +
+/// `srcRect` 裁剪 + `stretch/fillRect` 拉伸目标,§3.n)+ 占位符标识。
 /// 已消费 `<p:pic>` 起始标签。
 fn parse_pic<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Option<Shape> {
     let mut rect: Option<Rect> = None;
-    let mut rel_id = String::new();
+    let mut xfrm = Xfrm::default();
+    let mut blip = BlipFillData::default();
     let mut placeholder: Option<PlaceholderRef> = None;
     let mut buf = Vec::new();
     loop {
@@ -1022,12 +1227,9 @@ fn parse_pic<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Option<S
                     b"spPr" => {
                         let pr = parse_sppr(reader);
                         rect = pr.rect.or(rect);
+                        xfrm = pr.xfrm;
                     }
-                    b"blipFill" => {
-                        if let Some(rid) = parse_blip_fill(reader) {
-                            rel_id = rid;
-                        }
-                    }
+                    b"blipFill" => blip = parse_blip_fill(reader),
                     _ => skip_element(reader, &name),
                 }
             }
@@ -1039,6 +1241,7 @@ fn parse_pic<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Option<S
         buf.clear();
     }
 
+    let rel_id = blip.rel_id.unwrap_or_default();
     // 经 rels 把 rel_id 映射到 media 裸文件名。
     let media_name = ctx.rels.get(&rel_id).map(|r| {
         super::normalize_target(&r.target)
@@ -1054,36 +1257,76 @@ fn parse_pic<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Option<S
 
     Some(Shape::Picture(Picture {
         rect,
+        xfrm,
         rel_id,
         media_name,
         image_bytes_len,
+        src_rect: blip.src_rect,
+        fill_rect: blip.fill_rect,
         placeholder,
     }))
 }
 
-/// 解析 `p:blipFill` 内的 `a:blip@r:embed` -> rel id。已消费 `<p:blipFill>` 起始标签。
-fn parse_blip_fill<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<String> {
-    let mut rid = None;
+/// `p:blipFill` 的解析结果:rel id + 源裁剪 + 拉伸目标。
+#[derive(Debug, Clone, Default)]
+struct BlipFillData {
+    rel_id: Option<String>,
+    src_rect: Option<RelRect>,
+    fill_rect: Option<RelRect>,
+}
+
+/// 解析 `p:blipFill`:`a:blip@r:embed`、`a:srcRect`、`a:stretch > a:fillRect`。
+/// 已消费 `<p:blipFill>` 起始标签(深度计数消费到其结束标签)。
+fn parse_blip_fill<R: std::io::BufRead>(reader: &mut Reader<R>) -> BlipFillData {
+    let mut out = BlipFillData::default();
+    let mut depth = 1usize;
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Empty(e)) | Ok(Event::Start(e)) => {
-                let name = local_name(e.name().as_ref()).to_vec();
-                if name.as_slice() == b"blip" {
-                    // `r:embed` 属性。
-                    for attr in e.attributes().flatten() {
-                        if local_name(attr.key.as_ref()) == b"embed" {
-                            rid = Some(attr_string(&attr));
-                        }
-                    }
+            Ok(Event::Start(e)) => {
+                depth += 1;
+                blip_fill_elem(&e, &mut out);
+            }
+            Ok(Event::Empty(e)) => blip_fill_elem(&e, &mut out),
+            Ok(Event::End(_)) => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
                 }
             }
-            Ok(Event::End(_)) => break,
             Ok(Event::Eof) => break,
             Err(_) => break,
             _ => {}
         }
         buf.clear();
     }
-    rid
+    out
+}
+
+/// 识别 `blipFill` 内的一个元素(任意深度):`blip`(rel id)/ `srcRect` / `fillRect`。
+fn blip_fill_elem(e: &BytesStart, out: &mut BlipFillData) {
+    match local_name(e.name().as_ref()) {
+        b"blip" => {
+            // `r:embed` 属性。
+            for attr in e.attributes().flatten() {
+                if local_name(attr.key.as_ref()) == b"embed" {
+                    out.rel_id = Some(attr_string(&attr));
+                }
+            }
+        }
+        b"srcRect" => out.src_rect = Some(rel_rect_of(e)),
+        b"fillRect" => out.fill_rect = Some(rel_rect_of(e)),
+        _ => {}
+    }
+}
+
+/// 从 `a:srcRect` / `a:fillRect` 的 `l`/`t`/`r`/`b` 属性建 [`RelRect`](缺省 0)。
+fn rel_rect_of(e: &BytesStart) -> RelRect {
+    let g = |k: &[u8]| attr_of(e, k).and_then(|s| s.parse().ok()).unwrap_or(0);
+    RelRect {
+        l: g(b"l"),
+        t: g(b"t"),
+        r: g(b"r"),
+        b: g(b"b"),
+    }
 }

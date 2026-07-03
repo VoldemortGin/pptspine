@@ -18,8 +18,8 @@ pub use error::{PptError, Result};
 pub use export::{presentation_markdown, presentation_text, slide_text};
 pub use geom::{emu_to_points, Emu, Point, Rect, EMU_PER_INCH, EMU_PER_POINT};
 pub use model::{
-    AutoShape, Cell, Color, Paragraph, Picture, Presentation, Row, Shape, Slide, Table, TextFrame,
-    TextRun,
+    AutoShape, Cell, Color, Fill, GroupShape, Paragraph, Picture, Presentation, RelRect, Row,
+    Shape, Slide, Table, TextFrame, TextRun, Xfrm,
 };
 pub use resolved::{ResolvedPresentation, ResolvedShape, ResolvedSlide};
 pub use style::{

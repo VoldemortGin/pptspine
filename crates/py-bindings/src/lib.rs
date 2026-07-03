@@ -20,7 +20,7 @@ use ppt_core::color::ColorSpec;
 use ppt_core::export::{presentation_markdown, presentation_text, slide_text};
 use ppt_core::geom::emu_to_points;
 use ppt_core::model::{
-    AutoShape, Cell, Color, Connector, GraphicPlaceholder, Paragraph, Picture,
+    AutoShape, Cell, Color, Connector, Fill, GraphicPlaceholder, Paragraph, Picture,
     Presentation as CorePresentation, Row, RunKind, Shape, Slide as CoreSlide, Stroke, Table,
     TextFrame, TextRun,
 };
@@ -77,6 +77,16 @@ fn color_hex(c: &Color) -> String {
 /// Rust 侧 `ppt_parse::resolve`,由 ppt-render 消费)。
 fn spec_hex(spec: &ColorSpec) -> Option<String> {
     spec.base_srgb().map(|c| color_hex(&c))
+}
+
+/// 把形状级 [`Fill`] 转成 `"RRGGBB"`(与历史 dict 输出保持兼容):纯色取基色,
+/// 渐变取首个 stop 作代表色;`noFill` / 图片填充 → `None`。
+fn fill_hex(fill: &Fill) -> Option<String> {
+    match fill {
+        Fill::Solid(spec) => spec_hex(spec),
+        Fill::Gradient(stops) => stops.first().and_then(spec_hex),
+        Fill::None | Fill::Blip => None,
+    }
 }
 
 /// 把一个可选 [`ppt_core::geom::Rect`] 转成 `(x, y, w, h)` 磅(point)四元组的 dict
@@ -249,7 +259,7 @@ fn autoshape_dict<'py>(py: Python<'py>, sh: &AutoShape) -> PyResult<Bound<'py, P
     d.set_item("rect", rect_emu)?;
     d.set_item("rect_points", rect_pts)?;
     d.set_item("geometry", sh.geometry.as_deref())?;
-    d.set_item("fill", sh.fill.as_ref().and_then(spec_hex))?;
+    d.set_item("fill", sh.fill.as_ref().and_then(fill_hex))?;
     set_stroke_items(&d, sh.stroke.as_ref())?;
     match &sh.text {
         Some(tf) => {
@@ -273,7 +283,7 @@ fn connector_dict<'py>(py: Python<'py>, c: &Connector) -> PyResult<Bound<'py, Py
     d.set_item("rect", rect_emu)?;
     d.set_item("rect_points", rect_pts)?;
     d.set_item("geometry", c.geometry.as_deref())?;
-    d.set_item("fill", c.fill.as_ref().and_then(spec_hex))?;
+    d.set_item("fill", c.fill.as_ref().and_then(fill_hex))?;
     set_stroke_items(&d, c.stroke.as_ref())?;
     Ok(d)
 }
@@ -298,10 +308,10 @@ fn shape_dict<'py>(py: Python<'py>, shape: &Shape) -> PyResult<Bound<'py, PyDict
         Shape::Auto(a) => autoshape_dict(py, a),
         Shape::Connector(c) => connector_dict(py, c),
         Shape::Placeholder(p) => placeholder_dict(py, p),
-        Shape::Group(children) => {
+        Shape::Group(g) => {
             let d = PyDict::new(py);
             let kids = PyList::empty(py);
-            for c in children {
+            for c in &g.children {
                 kids.append(shape_dict(py, c)?)?;
             }
             d.set_item("kind", "group")?;

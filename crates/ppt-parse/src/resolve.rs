@@ -19,13 +19,14 @@
 use ppt_core::color::{apply_transforms, ColorSpec, ResolvedColor};
 use ppt_core::geom::Rect;
 use ppt_core::model::{
-    AutoShape, Cell, Connector, Paragraph, Presentation, Shape, Slide, Stroke, Table, TextFrame,
-    TextRun,
+    AutoShape, Cell, Connector, Fill, Paragraph, Presentation, Shape, Slide, Stroke, Table,
+    TextFrame, TextRun,
 };
 use ppt_core::resolved::{
-    ResolvedAutoShape, ResolvedBullet, ResolvedCell, ResolvedConnector, ResolvedParagraph,
-    ResolvedPresentation, ResolvedRow, ResolvedRun, ResolvedShape, ResolvedSlide, ResolvedStroke,
-    ResolvedTable, ResolvedTextFrame, DEFAULT_FONT_SIZE_PT,
+    ResolvedAutoShape, ResolvedBullet, ResolvedCell, ResolvedConnector, ResolvedFill,
+    ResolvedGroup, ResolvedParagraph, ResolvedPresentation, ResolvedRow, ResolvedRun,
+    ResolvedShape, ResolvedSlide, ResolvedStroke, ResolvedTable, ResolvedTextFrame,
+    DEFAULT_FONT_SIZE_PT,
 };
 use ppt_core::style::{
     Bullet, FontRef, PlaceholderRef, RunStyle, ShapeStyle, TextLevelStyle, TextStyleLevels,
@@ -118,9 +119,14 @@ fn resolve_shape(shape: &Shape, ctx: &Ctx) -> ResolvedShape {
             pic.rect = rect;
             ResolvedShape::Picture(pic)
         }
-        Shape::Group(children) => {
-            // 组合仿射重映射属 B-5;此处仅递归解析子形状,保持嵌套。
-            ResolvedShape::Group(children.iter().map(|c| resolve_shape(c, ctx)).collect())
+        Shape::Group(g) => {
+            // 变换与子坐标空间原样透传;仿射累积交渲染侧(B-5)。
+            ResolvedShape::Group(ResolvedGroup {
+                rect: g.rect,
+                child_rect: g.child_rect,
+                xfrm: g.xfrm,
+                children: g.children.iter().map(|c| resolve_shape(c, ctx)).collect(),
+            })
         }
         Shape::Placeholder(gp) => ResolvedShape::Placeholder(gp.clone()),
     }
@@ -140,6 +146,7 @@ fn resolve_text_box(tf: &TextFrame, ctx: &Ctx) -> ResolvedTextFrame {
     let font_ref = tf.style.as_ref().and_then(|s| s.font_ref.as_ref());
     ResolvedTextFrame {
         rect,
+        xfrm: tf.xfrm,
         paragraphs: tf
             .paragraphs
             .iter()
@@ -273,6 +280,8 @@ fn resolve_auto(a: &AutoShape, ctx: &Ctx) -> ResolvedAutoShape {
         let font_ref = a.style.as_ref().and_then(|s| s.font_ref.as_ref());
         ResolvedTextFrame {
             rect,
+            // 形状上的文字随形状旋转(翻转不镜像文字)。
+            xfrm: a.xfrm,
             paragraphs: tf
                 .paragraphs
                 .iter()
@@ -282,7 +291,9 @@ fn resolve_auto(a: &AutoShape, ctx: &Ctx) -> ResolvedAutoShape {
     });
     ResolvedAutoShape {
         rect,
+        xfrm: a.xfrm,
         geometry: a.geometry.clone(),
+        adjusts: a.adjusts.clone(),
         fill: resolve_fill(ctx, a.fill.as_ref(), a.style.as_ref()),
         stroke: resolve_stroke(ctx, a.stroke.as_ref(), a.style.as_ref()),
         text,
@@ -292,7 +303,9 @@ fn resolve_auto(a: &AutoShape, ctx: &Ctx) -> ResolvedAutoShape {
 fn resolve_connector(c: &Connector, ctx: &Ctx) -> ResolvedConnector {
     ResolvedConnector {
         rect: c.rect,
+        xfrm: c.xfrm,
         geometry: c.geometry.clone(),
+        adjusts: c.adjusts.clone(),
         fill: resolve_fill(ctx, c.fill.as_ref(), c.style.as_ref()),
         stroke: resolve_stroke(ctx, c.stroke.as_ref(), c.style.as_ref()),
     }
@@ -334,15 +347,27 @@ fn resolve_cell(cell: &Cell, chain: &[&TextStyleLevels], ctx: &Ctx) -> ResolvedC
     }
 }
 
-/// 填充解析:显式 `spPr` 填充获胜;否则经 `fillRef` 查主题 `fillStyleLst`
-/// (`phClr` 以引用色替换;非纯色 / 越界项降级为引用色本身 = 代表色)。
+/// 填充解析:显式 `spPr` 填充获胜(`noFill` 也是显式——直接无填充,不落
+/// `fillRef`;渐变降级为首个 stop 的代表色,渲染侧据 [`ResolvedFill::Gradient`]
+/// 记 `GradientDegraded`;形状级图片填充 v1 不涂)。未设置时经 `fillRef` 查主题
+/// `fillStyleLst`(`phClr` 以引用色替换;非纯色 / 越界项降级为引用色本身 = 代表色)。
 fn resolve_fill(
     ctx: &Ctx,
-    fill: Option<&ColorSpec>,
+    fill: Option<&Fill>,
     style: Option<&ShapeStyle>,
-) -> Option<ResolvedColor> {
-    if let Some(spec) = fill {
-        return Some(resolve_color(ctx, spec, None));
+) -> Option<ResolvedFill> {
+    match fill {
+        Some(Fill::None) => return None,
+        Some(Fill::Solid(spec)) => {
+            return Some(ResolvedFill::Solid(resolve_color(ctx, spec, None)))
+        }
+        Some(Fill::Gradient(stops)) => {
+            return stops
+                .first()
+                .map(|s| ResolvedFill::Gradient(resolve_color(ctx, s, None)));
+        }
+        Some(Fill::Blip) => return None,
+        None => {}
     }
     let fr = style?.fill_ref.as_ref().filter(|r| r.idx >= 1)?;
     let ph_rgb = fr
@@ -356,8 +381,8 @@ fn resolve_fill(
         .cloned()
         .flatten();
     match entry {
-        Some(spec) => Some(resolve_color(ctx, &spec, ph_rgb)),
-        None => ph_rgb.map(ResolvedColor::opaque),
+        Some(spec) => Some(ResolvedFill::Solid(resolve_color(ctx, &spec, ph_rgb))),
+        None => ph_rgb.map(|rgb| ResolvedFill::Solid(ResolvedColor::opaque(rgb))),
     }
 }
 

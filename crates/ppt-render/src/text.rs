@@ -1,18 +1,21 @@
 //! 文本框映射(B-2):[`ResolvedTextFrame`] 的段落 / run → `pdf-typeset` 的
 //! TS-5 绝对定位文本框输入([`TextBoxSpec`])。
 //!
-//! 本批语义(与 PRD §8 B-2 绿条对齐):
-//! - 矩形按 OOXML `bodyPr` 缺省内边距收缩(左右 91440 EMU = 7.2 pt、
-//!   上下 45720 EMU = 3.6 pt);真实 `bodyPr`(锚定 / wrap / autofit)属 B-6。
+//! 本批语义(与 PRD §8 B-2/B-4 绿条对齐):
+//! - 矩形由调用方**预先映射到页坐标 pt**(组合 `Flatten` 预乘,B-5),这里只按
+//!   OOXML `bodyPr` 缺省内边距收缩(左右 91440 EMU = 7.2 pt、上下 45720 EMU =
+//!   3.6 pt;内边距是文本框自身属性,**不随组合缩放**——与"拆组等价形状"逐字重合)。
 //! - 顶部锚定、自动换行、不裁剪(裁剪与 `normAutofit` 一并在 B-6 接线,避免在
 //!   bodyPr 未合并前裁掉 PowerPoint 本会自适应的文字)。
-//! - 旋转属 B-4(xfrm `rot` 尚未进 IR),恒 0。
+//! - 旋转(B-4):`rotation_deg` 直通引擎 `TextBoxSpec::rotation_deg`(视觉逆
+//!   时针);pptx `rot`(顺时针 1/60000 度)由调用方换算取负。翻转不镜像文字
+//!   (PowerPoint 语义),不进本层。
 //! - 项目符号:`buChar` 直接作标签;`buAutoNum` 以逐层计数器格式化(常见 scheme
 //!   子集,未知 scheme 退化为 `N.`)。标签字号/字体继承首 run(引擎 `ListLabel`
 //!   的语义;`buSzPct`/`buFont` 的独立应用属 B-6)。
 
 use ppt_core::color::ResolvedColor;
-use ppt_core::geom::{emu_to_points, Rect as EmuRect};
+use ppt_core::geom::emu_to_points;
 use ppt_core::resolved::{ResolvedBullet, ResolvedParagraph, ResolvedRun};
 
 use pdf_typeset::{Align, Block, ListLabel, ParaProps, Rect, Rgb, Run, RunStyle, TextBoxSpec};
@@ -28,13 +31,15 @@ const BULLET_FALLBACK_MARL_PT: f64 = 18.0;
 /// 继承链全无字体名时的兜底拉丁字体(Office 缺省主题 minor latin)。
 const DEFAULT_LATIN: &str = "Calibri";
 
-/// 把一个文本体折成 TS-5 文本框输入;无矩形(链上也没有)则无从定位,返回 `None`。
+/// 把一个文本体折成 TS-5 文本框输入。`rect` 已是页坐标 pt(组合仿射预乘后);
+/// `rotation_deg` 为视觉逆时针角(pptx `rot` 换算取负后传入)。
 pub(crate) fn text_box_spec(
-    rect: Option<EmuRect>,
+    rect: Rect,
+    rotation_deg: f64,
     paragraphs: &[ResolvedParagraph],
-) -> Option<TextBoxSpec> {
-    let r = rect?;
-    let (x, y, w, h) = r.to_points();
+) -> TextBoxSpec {
+    let (x, y) = (rect.x0, rect.y0);
+    let (w, h) = (rect.x1 - rect.x0, rect.y1 - rect.y0);
     // 缺省内边距;盒子过小时放弃该向内边距(引擎对 0 宽高再兜底)。
     let (ix, iw) = if w > 2.0 * INSET_LR_PT {
         (x + INSET_LR_PT, w - 2.0 * INSET_LR_PT)
@@ -52,10 +57,9 @@ pub(crate) fn text_box_spec(
         .iter()
         .map(|p| paragraph_block(p, &mut counters))
         .collect();
-    Some(TextBoxSpec::new(
-        Rect::new(ix, iy, ix + iw, iy + ih),
-        blocks,
-    ))
+    let mut spec = TextBoxSpec::new(Rect::new(ix, iy, ix + iw, iy + ih), blocks);
+    spec.rotation_deg = rotation_deg;
+    spec
 }
 
 /// 一个段落 → `Block::Paragraph`。

@@ -60,8 +60,8 @@ fn collect_shape_text(shape: &Shape, out: &mut Vec<String>) {
             }
         }
         Shape::Picture(_) | Shape::Connector(_) | Shape::Placeholder(_) => {}
-        Shape::Group(children) => {
-            for c in children {
+        Shape::Group(g) => {
+            for c in &g.children {
                 collect_shape_text(c, out);
             }
         }
@@ -160,8 +160,8 @@ fn collect_shape_markdown(shape: &Shape, title_done: &mut bool, out: &mut Vec<St
             }
         }
         Shape::Picture(_) | Shape::Connector(_) | Shape::Placeholder(_) => {}
-        Shape::Group(children) => {
-            for c in children {
+        Shape::Group(g) => {
+            for c in &g.children {
                 collect_shape_markdown(c, title_done, out);
             }
         }

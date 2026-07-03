@@ -836,3 +836,227 @@ def build_e2e_pptx() -> bytes:
             "ppt/media/image1.png": png,
         }
     )
+
+
+# --- B-4 / B-5 fixture(PRD-PDF-EXPORT §8:形状变换 / Group 仿射)-----------------
+#
+# B-4:旋转 45° 文本框(词心 1 pt 门)、roundRect avLst 调整(光栅对照)、
+# rtTriangle flipH(光栅非对称)、prstDash 虚线(op 断言)、srcRect 裁剪(光栅对照)。
+# B-5:组合缩放文本框与"拆组等价"孪生 deck(get_text_words 1 pt 门)+ 嵌套组合。
+
+
+def _sp_tree_slide(sp_tree_inner: str) -> str:
+    return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+       xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+       xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld><p:spTree>{sp_tree_inner}</p:spTree></p:cSld>
+</p:sld>"""
+
+
+def build_sp_tree_pptx(sp_tree_inner: str) -> bytes:
+    """给定 ``p:spTree`` 内容,合成单 slide 4:3 deck(B-4/B-5 fixture 共用)。"""
+    return _zip_pptx(
+        {
+            "[Content_Types].xml": _CONTENT_TYPES,
+            "_rels/.rels": _ROOT_RELS,
+            "ppt/presentation.xml": _PRESENTATION,
+            "ppt/_rels/presentation.xml.rels": _PRESENTATION_RELS,
+            "ppt/slides/slide1.xml": _sp_tree_slide(sp_tree_inner),
+            "ppt/slides/_rels/slide1.xml.rels": _ROOT_RELS_EMPTY,
+        }
+    )
+
+
+# 旋转文本框:单行 "Center" 居中对齐;盒高按 Liberation Sans 度量调到
+# "词心 = 矩形中心"(hhea lineGap 67 / ascent 1854 / descent 434,em 2048;
+# 词心离内容顶 ≈ 11.5–11.8 pt,取中值 11.66 → 盒高 2×(3.6+11.66) ≈ 30.52 pt)。
+_ROT_RECT_EMU = (914_400, 1_828_800, 2_286_000, 387_604)
+
+
+def _rotated_textbox_slide(rot: int) -> str:
+    x, y, w, h = _ROT_RECT_EMU
+    return f"""<p:sp>
+        <p:spPr>
+          <a:xfrm rot="{rot}"><a:off x="{x}" y="{y}"/><a:ext cx="{w}" cy="{h}"/></a:xfrm>
+        </p:spPr>
+        <p:txBody>
+          <a:p><a:pPr algn="ctr"/>
+            <a:r><a:rPr sz="2000"><a:latin typeface="Arial"/></a:rPr><a:t>Center</a:t></a:r>
+          </a:p>
+        </p:txBody>
+      </p:sp>"""
+
+
+@pytest.fixture(scope="session")
+def rotated_textbox_pptx() -> tuple[bytes, bytes, tuple[int, int, int, int]]:
+    """B-4 旋转门:``(rot45_pptx, plain_pptx, rect_emu)``。"""
+    return (
+        build_sp_tree_pptx(_rotated_textbox_slide(45 * 60_000)),
+        build_sp_tree_pptx(_rotated_textbox_slide(0)),
+        _ROT_RECT_EMU,
+    )
+
+
+def _round_rect_slide(av_lst: str) -> str:
+    return f"""<p:sp>
+        <p:spPr>
+          <a:xfrm><a:off x="914400" y="914400"/><a:ext cx="2743200" cy="1828800"/></a:xfrm>
+          <a:prstGeom prst="roundRect">{av_lst}</a:prstGeom>
+          <a:solidFill><a:srgbClr val="CC0000"/></a:solidFill>
+        </p:spPr>
+      </p:sp>"""
+
+
+@pytest.fixture(scope="session")
+def round_rect_adjust_pptx() -> tuple[bytes, bytes]:
+    """B-4 avLst 门:``(adjusted_pptx, default_pptx)``(adj=50000 vs 缺省)。"""
+    adjusted = _round_rect_slide('<a:avLst><a:gd name="adj" fmla="val 50000"/></a:avLst>')
+    default = _round_rect_slide("<a:avLst/>")
+    return build_sp_tree_pptx(adjusted), build_sp_tree_pptx(default)
+
+
+def _rt_triangle_slide(flip: str) -> str:
+    return f"""<p:sp>
+        <p:spPr>
+          <a:xfrm{flip}><a:off x="914400" y="914400"/><a:ext cx="3657600" cy="2743200"/></a:xfrm>
+          <a:prstGeom prst="rtTriangle"/>
+          <a:solidFill><a:srgbClr val="000080"/></a:solidFill>
+        </p:spPr>
+      </p:sp>"""
+
+
+@pytest.fixture(scope="session")
+def flipped_triangle_pptx() -> tuple[bytes, bytes]:
+    """B-4 翻转门:``(flipped_pptx, plain_pptx)``(rtTriangle 直角边随 flipH 换边)。"""
+    return (
+        build_sp_tree_pptx(_rt_triangle_slide(' flipH="1"')),
+        build_sp_tree_pptx(_rt_triangle_slide("")),
+    )
+
+
+_DASH_CONNECTOR = """<p:cxnSp>
+        <p:nvCxnSpPr><p:cNvPr id="4" name="Connector 3"/><p:cNvCxnSpPr/><p:nvPr/></p:nvCxnSpPr>
+        <p:spPr>
+          <a:xfrm><a:off x="914400" y="914400"/><a:ext cx="3657600" cy="1828800"/></a:xfrm>
+          <a:prstGeom prst="straightConnector1"/>
+          <a:ln w="25400">
+            <a:solidFill><a:srgbClr val="FF0000"/></a:solidFill>
+            <a:prstDash val="dash"/>
+          </a:ln>
+        </p:spPr>
+      </p:cxnSp>"""
+
+
+@pytest.fixture(scope="session")
+def dashed_connector_pptx() -> bytes:
+    """B-4 虚线门:prstDash="dash"、线宽 2 pt 的连接线。"""
+    return build_sp_tree_pptx(_DASH_CONNECTOR)
+
+
+def _picture_slide(blip_extra: str) -> str:
+    return f"""<p:pic>
+        <p:nvPicPr><p:cNvPr id="2" name="Picture 1"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+        <p:blipFill><a:blip r:embed="rId1"/>{blip_extra}</p:blipFill>
+        <p:spPr>
+          <a:xfrm><a:off x="914400" y="914400"/><a:ext cx="2743200" cy="1143000"/></a:xfrm>
+          <a:prstGeom prst="rect"/>
+        </p:spPr>
+      </p:pic>"""
+
+
+def _picture_pptx(blip_extra: str) -> bytes:
+    png = _OCR_SAMPLE_PNG.read_bytes()
+    return _zip_pptx(
+        {
+            "[Content_Types].xml": _CONTENT_TYPES_IMAGE,
+            "_rels/.rels": _ROOT_RELS,
+            "ppt/presentation.xml": _PRESENTATION,
+            "ppt/_rels/presentation.xml.rels": _PRESENTATION_RELS,
+            "ppt/slides/slide1.xml": _sp_tree_slide(_picture_slide(blip_extra)),
+            "ppt/slides/_rels/slide1.xml.rels": _SLIDE_IMAGE_RELS,
+            "ppt/media/image1.png": png,
+        }
+    )
+
+
+@pytest.fixture(scope="session")
+def src_rect_pptx() -> tuple[bytes, bytes]:
+    """B-4 srcRect 门:``(cropped_pptx, plain_pptx)``(裁掉源图右半)。"""
+    return (
+        _picture_pptx('<a:srcRect r="50000"/>'),
+        _picture_pptx(""),
+    )
+
+
+# B-5:组合缩放文本框(child (0,0,144,72)pt → rect (72,72,288,144)pt,s=2)与
+# 拆组等价孪生(同字号——PowerPoint 语义:组合缩放不缩放字号)。
+_GROUP_TEXT_BODY = """<p:txBody>
+          <a:p><a:r><a:rPr sz="2000"><a:latin typeface="Arial"/></a:rPr><a:t>Twin gate</a:t></a:r></a:p>
+        </p:txBody>"""
+
+_GROUPED_SLIDE = f"""<p:grpSp>
+        <p:nvGrpSpPr><p:cNvPr id="10" name="Group 9"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+        <p:grpSpPr>
+          <a:xfrm>
+            <a:off x="914400" y="914400"/><a:ext cx="3657600" cy="1828800"/>
+            <a:chOff x="0" y="0"/><a:chExt cx="1828800" cy="914400"/>
+          </a:xfrm>
+        </p:grpSpPr>
+        <p:sp>
+          <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1828800" cy="914400"/></a:xfrm></p:spPr>
+          {_GROUP_TEXT_BODY}
+        </p:sp>
+      </p:grpSp>"""
+
+_GROUP_TWIN_SLIDE = f"""<p:sp>
+        <p:spPr><a:xfrm><a:off x="914400" y="914400"/><a:ext cx="3657600" cy="1828800"/></a:xfrm></p:spPr>
+        {_GROUP_TEXT_BODY}
+      </p:sp>"""
+
+
+@pytest.fixture(scope="session")
+def grouped_textbox_pptx() -> tuple[bytes, bytes]:
+    """B-5 孪生门:``(grouped_pptx, flattened_twin_pptx)``。"""
+    return build_sp_tree_pptx(_GROUPED_SLIDE), build_sp_tree_pptx(_GROUP_TWIN_SLIDE)
+
+
+# 嵌套组合:外层 (0,0,216,108)pt → (72,72,432,216)pt,内层 (0,0,72,36)pt →
+# (36,18,144,72)pt;复合映射文本框 (0,0,72,36) → (144,108,288,144)pt。
+_NESTED_TEXT_BODY = """<p:txBody>
+          <a:p><a:r><a:rPr sz="2000"><a:latin typeface="Arial"/></a:rPr><a:t>Deep nest</a:t></a:r></a:p>
+        </p:txBody>"""
+
+_NESTED_SLIDE = f"""<p:grpSp>
+        <p:nvGrpSpPr><p:cNvPr id="20" name="Outer"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+        <p:grpSpPr>
+          <a:xfrm>
+            <a:off x="914400" y="914400"/><a:ext cx="5486400" cy="2743200"/>
+            <a:chOff x="0" y="0"/><a:chExt cx="2743200" cy="1371600"/>
+          </a:xfrm>
+        </p:grpSpPr>
+        <p:grpSp>
+          <p:nvGrpSpPr><p:cNvPr id="21" name="Inner"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+          <p:grpSpPr>
+            <a:xfrm>
+              <a:off x="457200" y="228600"/><a:ext cx="1828800" cy="914400"/>
+              <a:chOff x="0" y="0"/><a:chExt cx="914400" cy="457200"/>
+            </a:xfrm>
+          </p:grpSpPr>
+          <p:sp>
+            <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="914400" cy="457200"/></a:xfrm></p:spPr>
+            {_NESTED_TEXT_BODY}
+          </p:sp>
+        </p:grpSp>
+      </p:grpSp>"""
+
+_NESTED_TWIN_SLIDE = f"""<p:sp>
+        <p:spPr><a:xfrm><a:off x="1828800" y="1371600"/><a:ext cx="3657600" cy="1828800"/></a:xfrm></p:spPr>
+        {_NESTED_TEXT_BODY}
+      </p:sp>"""
+
+
+@pytest.fixture(scope="session")
+def nested_group_pptx() -> tuple[bytes, bytes]:
+    """B-5 嵌套门:``(nested_pptx, flattened_twin_pptx)``。"""
+    return build_sp_tree_pptx(_NESTED_SLIDE), build_sp_tree_pptx(_NESTED_TWIN_SLIDE)

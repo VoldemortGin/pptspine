@@ -640,7 +640,7 @@ fn fill_ref_resolves_from_theme_format_lists() {
         .shapes
         .iter()
         .map(|s| match s {
-            ResolvedShape::Auto(a) => a.fill.expect("fill resolved").rgb,
+            ResolvedShape::Auto(a) => a.fill.expect("fill resolved").color().rgb,
             other => panic!("expected auto shape, got {other:?}"),
         })
         .collect();
