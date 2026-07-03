@@ -21,8 +21,9 @@ use std::collections::BTreeMap;
 use ppt_core::color::ColorSpec;
 use ppt_core::geom::{Emu, Rect};
 use ppt_core::model::{
-    AutoShape, Cell, Connector, Fill, GraphicPlaceholder, GroupShape, Paragraph, Picture, RelRect,
-    Row, RunKind, Shape, Stroke, Table, TextFrame, TextRun, Xfrm,
+    AutoShape, Autofit, Background, BodyProps, Cell, CellBorders, Connector, Fill,
+    GraphicPlaceholder, GroupShape, Paragraph, Picture, RelRect, Row, RunKind, Shape, Stroke,
+    Table, TextFrame, TextRun, Xfrm,
 };
 use ppt_core::style::{
     FontRef, PlaceholderRef, RunStyle, ShapeStyle, StyleMatrixRef, TextStyleLevels, TxStyles,
@@ -36,13 +37,16 @@ use super::text_style::{
     parse_solid_fill, run_style_attrs,
 };
 use super::Relationship;
-use super::{attr_of, attr_string, bool_attr, local_name, parse_rels, read_text, skip_element};
+use super::{
+    attr_of, attr_string, bool_attr, local_name, ooxml_bool, parse_rels, read_text, skip_element,
+};
 
-/// `p:txBody` 的解析结果:段落 + 自带 `a:lstStyle`。
+/// `p:txBody` 的解析结果:段落 + 自带 `a:lstStyle` + `a:bodyPr`。
 #[derive(Debug, Clone, Default)]
 struct TxBodyData {
     paragraphs: Vec<Paragraph>,
     list_style: Option<TextStyleLevels>,
+    body: BodyProps,
 }
 
 /// 一个形部件(slide / slideLayout / slideMaster)的解析结果。
@@ -57,6 +61,8 @@ pub struct PartData {
     pub clr_map_ovr: Option<ClrMap>,
     /// `p:txStyles`(仅 slideMaster 有):title / body / other 三桶。
     pub tx_styles: Option<TxStyles>,
+    /// `p:cSld > p:bg`(slide / layout / master 皆可有,B-10)。
+    pub background: Option<Background>,
 }
 
 /// 解析一个形部件。`rels_xml` 是该部件的 `.rels` 文本(用于把图片 `r:embed` 映射到
@@ -88,6 +94,7 @@ pub fn parse_part(
                     }
                     b"clrMapOvr" => out.clr_map_ovr = parse_clr_map_ovr(&mut reader),
                     b"txStyles" => out.tx_styles = Some(parse_tx_styles(&mut reader)),
+                    b"bg" => out.background = parse_bg(&mut reader, &ctx),
                     // 其余容器(sld / cSld / sldMaster …)继续下钻。
                     _ => {}
                 }
@@ -180,10 +187,105 @@ fn parse_tx_styles<R: std::io::BufRead>(reader: &mut Reader<R>) -> TxStyles {
     styles
 }
 
+/// 解析 `p:bg`(B-10,§3.o):`p:bgPr`(直接填充 / 图片)或 `p:bgRef`(主题引用)。
+/// 已消费 `<p:bg>` 起始标签。
+fn parse_bg<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Option<Background> {
+    let mut bg = None;
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                let name = local_name(e.name().as_ref()).to_vec();
+                match name.as_slice() {
+                    b"bgPr" => bg = parse_bg_pr(reader, ctx).or(bg),
+                    b"bgRef" => {
+                        bg = Some(Background::Ref {
+                            idx: ref_idx(&e),
+                            color: parse_color_in(reader),
+                        });
+                    }
+                    _ => skip_element(reader, &name),
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                if local_name(e.name().as_ref()) == b"bgRef" {
+                    bg = Some(Background::Ref {
+                        idx: ref_idx(&e),
+                        color: None,
+                    });
+                }
+            }
+            Ok(Event::End(_)) => break,
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    bg
+}
+
+/// 解析 `p:bgPr` 的第一个填充子元素:solidFill / gradFill / blipFill(经 rels 折
+/// media 裸名)/ noFill。已消费起始标签。
+fn parse_bg_pr<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Option<Background> {
+    let mut bg = None;
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                let name = local_name(e.name().as_ref()).to_vec();
+                match name.as_slice() {
+                    b"solidFill" => {
+                        if let Some(spec) = parse_solid_fill(reader) {
+                            bg = Some(Background::Fill(Fill::Solid(spec)));
+                        }
+                    }
+                    b"gradFill" => {
+                        bg = Some(Background::Fill(Fill::Gradient(parse_grad_fill(reader))));
+                    }
+                    b"blipFill" => {
+                        let data = parse_blip_fill(reader);
+                        bg = Some(Background::Blip {
+                            media_name: data.rel_id.as_deref().and_then(|r| media_name_of(ctx, r)),
+                        });
+                    }
+                    b"noFill" => {
+                        bg = Some(Background::Fill(Fill::None));
+                        skip_element(reader, &name);
+                    }
+                    _ => skip_element(reader, &name),
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                if local_name(e.name().as_ref()) == b"noFill" {
+                    bg = Some(Background::Fill(Fill::None));
+                }
+            }
+            Ok(Event::End(_)) => break,
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    bg
+}
+
 /// 解析期的只读上下文。
 struct Ctx<'a> {
     rels: &'a BTreeMap<String, Relationship>,
     media_index: &'a BTreeMap<String, usize>,
+}
+
+/// 经部件 rels 把一个 `r:embed` 关系 id 折成 media 裸文件名(如 `image1.png`)。
+fn media_name_of(ctx: &Ctx, rel_id: &str) -> Option<String> {
+    ctx.rels.get(rel_id).map(|r| {
+        super::normalize_target(&r.target)
+            .rsplit('/')
+            .next()
+            .unwrap_or("")
+            .to_string()
+    })
 }
 
 /// 解析一个形状容器(`p:spTree` 或 `p:grpSp`)的直接子形状,直到容器结束标签。
@@ -375,6 +477,7 @@ fn parse_sp<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Shape> {
         placeholder: placeholder.clone(),
         list_style: body.list_style,
         style: style.clone(),
+        body: body.body,
     };
     // 有预设几何 / 实际填充 / 描边 => 当作自选图形;否则当作纯文本框
     // (孤立的显式 `noFill` 不改变分类——渲染结果与纯文本框一致)。
@@ -831,7 +934,8 @@ fn stroke_if_any(
     })
 }
 
-/// 解析 `p:txBody` -> 段落序列 + 自带列表样式。已消费 `<p:txBody>` 起始标签。
+/// 解析 `p:txBody` -> 段落序列 + 自带列表样式 + `a:bodyPr`(B-6)。
+/// 已消费 `<p:txBody>` 起始标签。
 fn parse_txbody<R: std::io::BufRead>(reader: &mut Reader<R>) -> TxBodyData {
     let mut body = TxBodyData::default();
     let mut buf = Vec::new();
@@ -841,6 +945,7 @@ fn parse_txbody<R: std::io::BufRead>(reader: &mut Reader<R>) -> TxBodyData {
                 let name = local_name(e.name().as_ref()).to_vec();
                 match name.as_slice() {
                     b"p" => body.paragraphs.push(parse_paragraph(reader)),
+                    b"bodyPr" => body.body = parse_body_pr(reader, &e),
                     b"lstStyle" => {
                         let ls = parse_list_style(reader);
                         if !ls.is_empty() {
@@ -848,6 +953,12 @@ fn parse_txbody<R: std::io::BufRead>(reader: &mut Reader<R>) -> TxBodyData {
                         }
                     }
                     _ => skip_element(reader, &name),
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                // `<a:bodyPr .../>` 常见自闭合(占位符缺省形)。
+                if local_name(e.name().as_ref()) == b"bodyPr" {
+                    body.body = body_pr_attrs(&e);
                 }
             }
             Ok(Event::End(_)) => break,
@@ -858,6 +969,65 @@ fn parse_txbody<R: std::io::BufRead>(reader: &mut Reader<R>) -> TxBodyData {
         buf.clear();
     }
     body
+}
+
+/// `a:bodyPr` 属性上的文本体属性(锚定 / 内边距 / 换行 / 文字方向,§3.f)。
+fn body_pr_attrs(e: &BytesStart) -> BodyProps {
+    let emu = |k: &[u8]| attr_of(e, k).and_then(|s| s.parse().ok());
+    BodyProps {
+        anchor: attr_of(e, b"anchor"),
+        anchor_ctr: attr_of(e, b"anchorCtr").map(ooxml_bool),
+        l_ins: emu(b"lIns"),
+        t_ins: emu(b"tIns"),
+        r_ins: emu(b"rIns"),
+        b_ins: emu(b"bIns"),
+        // `wrap="none"` 显式关;`wrap="square"` 显式开;缺失 → 继承。
+        wrap: attr_of(e, b"wrap").map(|v| v != "none"),
+        vert: attr_of(e, b"vert"),
+        autofit: None,
+    }
+}
+
+/// 解析 `a:bodyPr`(非自闭合):属性 + 自动适配子元素
+/// (`a:normAutofit@fontScale/@lnSpcReduction` / `a:spAutoFit` / `a:noAutofit`)。
+/// 已消费起始标签;`start` 是该起始标签。
+fn parse_body_pr<R: std::io::BufRead>(reader: &mut Reader<R>, start: &BytesStart) -> BodyProps {
+    let mut bp = body_pr_attrs(start);
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Empty(e)) => {
+                let name = local_name(e.name().as_ref()).to_vec();
+                autofit_of(&mut bp, &name, &e);
+            }
+            Ok(Event::Start(e)) => {
+                let name = local_name(e.name().as_ref()).to_vec();
+                autofit_of(&mut bp, &name, &e);
+                skip_element(reader, &name);
+            }
+            Ok(Event::End(_)) => break,
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    bp
+}
+
+/// 识别一个自动适配子元素并填入 `bp.autofit`(非适配元素忽略)。
+fn autofit_of(bp: &mut BodyProps, name: &[u8], e: &BytesStart) {
+    match name {
+        b"normAutofit" => {
+            bp.autofit = Some(Autofit::Normal {
+                font_scale: attr_of(e, b"fontScale").and_then(|s| s.parse().ok()),
+                ln_spc_reduction: attr_of(e, b"lnSpcReduction").and_then(|s| s.parse().ok()),
+            });
+        }
+        b"spAutoFit" => bp.autofit = Some(Autofit::Shape),
+        b"noAutofit" => bp.autofit = Some(Autofit::None),
+        _ => {}
+    }
 }
 
 /// 解析 `a:p`(段落):`a:pPr`(完整段落属性)、`a:r`(run)、`a:br`(段内硬换行)、
@@ -1041,10 +1211,12 @@ fn parse_graphic_frame<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Sh
     }
 }
 
-/// 解析 `a:tbl` -> `Table`(`a:tblGrid` 列宽 + `a:tr` 行)。已消费 `<a:tbl>` 起始标签。
+/// 解析 `a:tbl` -> `Table`(`a:tblGrid` 列宽 + `a:tr` 行 + `a:tblPr` 样式 id)。
+/// 已消费 `<a:tbl>` 起始标签。
 fn parse_table<R: std::io::BufRead>(reader: &mut Reader<R>, rect: Option<Rect>) -> Table {
     let mut col_widths = Vec::new();
     let mut rows = Vec::new();
+    let mut table_style_id = None;
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
@@ -1052,6 +1224,7 @@ fn parse_table<R: std::io::BufRead>(reader: &mut Reader<R>, rect: Option<Rect>) 
                 let name = local_name(e.name().as_ref()).to_vec();
                 match name.as_slice() {
                     b"tblGrid" => col_widths = parse_tbl_grid(reader),
+                    b"tblPr" => table_style_id = parse_tbl_pr(reader).or(table_style_id),
                     b"tr" => {
                         let height = attr_of(&e, b"h").and_then(|s| s.parse().ok());
                         let cells = parse_table_row(reader);
@@ -1071,7 +1244,36 @@ fn parse_table<R: std::io::BufRead>(reader: &mut Reader<R>, rect: Option<Rect>) 
         rect,
         col_widths,
         rows,
+        table_style_id,
     }
+}
+
+/// 解析 `a:tblPr` 内的 `a:tableStyleId` 文本(v1 不解析 `tableStyles.xml` 语义,
+/// 仅捕获 id 供渲染降级告警,PRD §1)。已消费 `<a:tblPr>` 起始标签。
+fn parse_tbl_pr<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<String> {
+    let mut id = None;
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                let name = local_name(e.name().as_ref()).to_vec();
+                if name.as_slice() == b"tableStyleId" {
+                    let text = read_text(reader);
+                    if !text.trim().is_empty() {
+                        id = Some(text.trim().to_string());
+                    }
+                } else {
+                    skip_element(reader, &name);
+                }
+            }
+            Ok(Event::End(_)) => break,
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    id
 }
 
 /// 解析 `a:tblGrid` -> 各列宽(EMU,`a:gridCol@w`,按文档顺序)。已消费起始标签。
@@ -1155,6 +1357,13 @@ fn cell_skeleton(e: &BytesStart) -> Cell {
         row_span,
         fill: None,
         merged,
+        // tcPr 内边距 / 锚定 / 逐边框线的解析属 B-7 后续;缺省在终态 IR 回填。
+        mar_l: None,
+        mar_r: None,
+        mar_t: None,
+        mar_b: None,
+        anchor: None,
+        borders: CellBorders::default(),
     }
 }
 

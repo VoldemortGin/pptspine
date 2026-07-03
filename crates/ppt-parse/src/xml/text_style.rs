@@ -8,7 +8,7 @@
 
 use ppt_core::color::{ColorSpec, ColorTransform};
 use ppt_core::model::Color;
-use ppt_core::style::{Bullet, RunStyle, TextLevelStyle, TextStyleLevels};
+use ppt_core::style::{Bullet, RunStyle, Spacing, TextLevelStyle, TextStyleLevels};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 
@@ -232,11 +232,16 @@ pub fn parse_level_style<R: std::io::BufRead>(
             }
             Ok(Event::Start(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
-                if name.as_slice() == b"defRPr" {
-                    ls.def_rpr = Some(parse_run_style(reader, &e));
-                } else {
-                    fill_level_child(&mut ls, &name, &e);
-                    skip_element(reader, &name);
+                match name.as_slice() {
+                    b"defRPr" => ls.def_rpr = Some(parse_run_style(reader, &e)),
+                    // 行距 / 段前 / 段后(B-6,§3.g):容器内是 spcPct / spcPts。
+                    b"lnSpc" => ls.ln_spc = parse_spacing_in(reader).or(ls.ln_spc),
+                    b"spcBef" => ls.spc_bef = parse_spacing_in(reader).or(ls.spc_bef),
+                    b"spcAft" => ls.spc_aft = parse_spacing_in(reader).or(ls.spc_aft),
+                    _ => {
+                        fill_level_child(&mut ls, &name, &e);
+                        skip_element(reader, &name);
+                    }
                 }
             }
             Ok(Event::End(_)) => break,
@@ -247,6 +252,45 @@ pub fn parse_level_style<R: std::io::BufRead>(
         buf.clear();
     }
     ls
+}
+
+/// 在 `a:lnSpc` / `a:spcBef` / `a:spcAft` 内解析 `a:spcPct@val`(千分之一个
+/// 百分点)或 `a:spcPts@val`(百分之一磅 → 磅)。已消费容器起始标签。
+fn parse_spacing_in<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Spacing> {
+    let mut spacing = None;
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Empty(e)) => {
+                let name = local_name(e.name().as_ref()).to_vec();
+                spacing = spacing_of(&name, &e).or(spacing);
+            }
+            Ok(Event::Start(e)) => {
+                let name = local_name(e.name().as_ref()).to_vec();
+                spacing = spacing_of(&name, &e).or(spacing);
+                skip_element(reader, &name);
+            }
+            Ok(Event::End(_)) => break,
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    spacing
+}
+
+/// 识别一个 `spcPct` / `spcPts` 元素 -> [`Spacing`];其它元素 → `None`。
+fn spacing_of(name: &[u8], e: &BytesStart) -> Option<Spacing> {
+    match name {
+        b"spcPct" => attr_of(e, b"val")
+            .and_then(|s| s.parse().ok())
+            .map(Spacing::Pct),
+        b"spcPts" => attr_of(e, b"val")
+            .and_then(|s| s.parse::<f32>().ok())
+            .map(|v| Spacing::Pts(v / 100.0)),
+        _ => None,
+    }
 }
 
 /// 识别 bu* 子元素并填入(`defRPr` 由调用方处理)。

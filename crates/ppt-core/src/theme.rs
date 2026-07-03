@@ -163,6 +163,9 @@ pub struct Theme {
     pub fill_styles: Vec<Option<ColorSpec>>,
     /// `fmtScheme > a:lnStyleLst` 各项(1 基 `lnRef@idx` 对应 `line_styles[idx-1]`)。
     pub line_styles: Vec<ThemeLine>,
+    /// `fmtScheme > a:bgFillStyleLst` 各项的纯色 spec(`p:bgRef@idx` ≥ 1001 对应
+    /// `bg_fill_styles[idx-1001]`,B-10);非纯色项为 `None`(降级为代表色)。
+    pub bg_fill_styles: Vec<Option<ColorSpec>>,
 }
 
 #[cfg(test)]

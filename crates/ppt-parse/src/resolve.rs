@@ -19,14 +19,15 @@
 use ppt_core::color::{apply_transforms, ColorSpec, ResolvedColor};
 use ppt_core::geom::Rect;
 use ppt_core::model::{
-    AutoShape, Cell, Connector, Fill, Paragraph, Presentation, Shape, Slide, Stroke, Table,
-    TextFrame, TextRun,
+    AutoShape, Autofit, Background, BodyProps, Cell, Connector, Fill, Paragraph, Presentation,
+    Shape, Slide, Stroke, Table, TextFrame, TextRun,
 };
 use ppt_core::resolved::{
-    ResolvedAutoShape, ResolvedBullet, ResolvedCell, ResolvedConnector, ResolvedFill,
-    ResolvedGroup, ResolvedParagraph, ResolvedPresentation, ResolvedRow, ResolvedRun,
-    ResolvedShape, ResolvedSlide, ResolvedStroke, ResolvedTable, ResolvedTextFrame,
-    DEFAULT_FONT_SIZE_PT,
+    ResolvedAnchor, ResolvedAutoShape, ResolvedBackground, ResolvedBodyProps, ResolvedBullet,
+    ResolvedCell, ResolvedCellBorders, ResolvedConnector, ResolvedFill, ResolvedGroup,
+    ResolvedParagraph, ResolvedPresentation, ResolvedRow, ResolvedRun, ResolvedShape,
+    ResolvedSlide, ResolvedStroke, ResolvedTable, ResolvedTextFrame, DEFAULT_FONT_SIZE_PT,
+    DEFAULT_INSET_LR_EMU, DEFAULT_INSET_TB_EMU,
 };
 use ppt_core::style::{
     Bullet, FontRef, PlaceholderRef, RunStyle, ShapeStyle, TextLevelStyle, TextStyleLevels,
@@ -94,11 +95,79 @@ fn resolve_slide(slide: &Slide, inherit: &InheritanceParts) -> ResolvedSlide {
     };
     ResolvedSlide {
         index: slide.index,
+        // B-10:幻灯片自身背景(layout / master 背景继承需 LayoutPart/MasterPart
+        // 携带 background,属后续解析补齐)。
+        background: resolve_background(slide.background.as_ref(), &ctx),
         shapes: slide
             .shapes
             .iter()
             .map(|sh| resolve_shape(sh, &ctx))
             .collect(),
+    }
+}
+
+/// B-10:`p:bg` → 终态背景(纯色 / 图片 / 主题引用降级为代表色)。
+fn resolve_background(bg: Option<&Background>, ctx: &Ctx) -> Option<ResolvedBackground> {
+    match bg? {
+        Background::Fill(f) => resolve_fill(ctx, Some(f), None).map(ResolvedBackground::Color),
+        Background::Blip { media_name } => media_name
+            .clone()
+            .map(|m| ResolvedBackground::Picture { media_name: m }),
+        Background::Ref { color, .. } => color
+            .as_ref()
+            .map(|c| ResolvedBackground::Color(ResolvedFill::Solid(resolve_color(ctx, c, None)))),
+    }
+}
+
+/// B-6:`bodyPr` 占位符继承链(master → layout → 形状自身)合并后回填 OOXML 缺省。
+fn resolve_body(
+    own: &BodyProps,
+    layout_ph: Option<&Shape>,
+    master_ph: Option<&Shape>,
+) -> ResolvedBodyProps {
+    let mut merged = master_ph.and_then(shape_body).cloned().unwrap_or_default();
+    if let Some(lb) = layout_ph.and_then(shape_body) {
+        merged = merged.overridden_by(lb);
+    }
+    merged = merged.overridden_by(own);
+    to_resolved_body(&merged)
+}
+
+/// 占位符形状的 `bodyPr`(仅文本承载形状有)。
+fn shape_body(sh: &Shape) -> Option<&BodyProps> {
+    match sh {
+        Shape::TextBox(tf) => Some(&tf.body),
+        Shape::Auto(a) => a.text.as_ref().map(|tf| &tf.body),
+        _ => None,
+    }
+}
+
+/// 合并后的 `BodyProps`(全 Option)→ 终态(OOXML 缺省已回填)。
+fn to_resolved_body(b: &BodyProps) -> ResolvedBodyProps {
+    let (font_scale, ln_spc_reduction) = match b.autofit {
+        Some(Autofit::Normal {
+            font_scale,
+            ln_spc_reduction,
+        }) => (
+            font_scale.map(|v| v as f32 / 100_000.0),
+            ln_spc_reduction.map(|v| v as f32 / 100_000.0),
+        ),
+        _ => (None, None),
+    };
+    ResolvedBodyProps {
+        anchor: ResolvedAnchor::from_ooxml(b.anchor.as_deref()),
+        anchor_ctr: b.anchor_ctr.unwrap_or(false),
+        l_ins: b.l_ins.unwrap_or(DEFAULT_INSET_LR_EMU),
+        t_ins: b.t_ins.unwrap_or(DEFAULT_INSET_TB_EMU),
+        r_ins: b.r_ins.unwrap_or(DEFAULT_INSET_LR_EMU),
+        b_ins: b.b_ins.unwrap_or(DEFAULT_INSET_TB_EMU),
+        wrap: b.wrap.unwrap_or(true),
+        font_scale,
+        ln_spc_reduction,
+        // v1:不裁剪(引擎字形软剪裁已修但保守放行溢出;normAutofit 的 fontScale
+        // 已把文字缩小,无需再裁)。
+        clip: false,
+        vertical: b.vert.as_deref().map(|v| v != "horz").unwrap_or(false),
     }
 }
 
@@ -147,6 +216,7 @@ fn resolve_text_box(tf: &TextFrame, ctx: &Ctx) -> ResolvedTextFrame {
     ResolvedTextFrame {
         rect,
         xfrm: tf.xfrm,
+        body: resolve_body(&tf.body, layout_ph, master_ph),
         paragraphs: tf
             .paragraphs
             .iter()
@@ -175,6 +245,9 @@ fn resolve_paragraph(
         align: merged.align.clone(),
         mar_l: merged.mar_l,
         indent: merged.indent,
+        ln_spc: merged.ln_spc,
+        spc_bef: merged.spc_bef,
+        spc_aft: merged.spc_aft,
         bullet: resolve_bullet(&merged, ctx),
         runs: para
             .runs
@@ -282,6 +355,7 @@ fn resolve_auto(a: &AutoShape, ctx: &Ctx) -> ResolvedAutoShape {
             rect,
             // 形状上的文字随形状旋转(翻转不镜像文字)。
             xfrm: a.xfrm,
+            body: resolve_body(&tf.body, layout_ph, master_ph),
             paragraphs: tf
                 .paragraphs
                 .iter()
@@ -318,6 +392,7 @@ fn resolve_table(t: &Table, ctx: &Ctx) -> ResolvedTable {
     ResolvedTable {
         rect: t.rect,
         col_widths: t.col_widths.clone(),
+        table_style_id: t.table_style_id.clone(),
         rows: t
             .rows
             .iter()
@@ -334,6 +409,7 @@ fn resolve_table(t: &Table, ctx: &Ctx) -> ResolvedTable {
 }
 
 fn resolve_cell(cell: &Cell, chain: &[&TextStyleLevels], ctx: &Ctx) -> ResolvedCell {
+    let border = |s: Option<&Stroke>| resolve_stroke(ctx, s, None);
     ResolvedCell {
         paragraphs: cell
             .paragraphs
@@ -344,6 +420,17 @@ fn resolve_cell(cell: &Cell, chain: &[&TextStyleLevels], ctx: &Ctx) -> ResolvedC
         row_span: cell.row_span,
         fill: cell.fill.as_ref().map(|c| resolve_color(ctx, c, None)),
         merged: cell.merged,
+        mar_l: cell.mar_l.unwrap_or(DEFAULT_INSET_LR_EMU),
+        mar_r: cell.mar_r.unwrap_or(DEFAULT_INSET_LR_EMU),
+        mar_t: cell.mar_t.unwrap_or(DEFAULT_INSET_TB_EMU),
+        mar_b: cell.mar_b.unwrap_or(DEFAULT_INSET_TB_EMU),
+        anchor: ResolvedAnchor::from_ooxml(cell.anchor.as_deref()),
+        borders: ResolvedCellBorders {
+            left: border(cell.borders.left.as_ref()),
+            right: border(cell.borders.right.as_ref()),
+            top: border(cell.borders.top.as_ref()),
+            bottom: border(cell.borders.bottom.as_ref()),
+        },
     }
 }
 

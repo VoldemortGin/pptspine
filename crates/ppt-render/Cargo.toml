@@ -12,3 +12,7 @@ publish = false
 [dependencies]
 ppt-core = { workspace = true }
 pdf-typeset = { workspace = true }
+
+[dev-dependencies]
+# 真实 TTF 字节来源(内置 Liberation):B-11 `font_map` 文件路径分支测试。
+pdf-fonts = { workspace = true }

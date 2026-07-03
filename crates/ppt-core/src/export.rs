@@ -305,6 +305,12 @@ mod tests {
             row_span,
             fill: None,
             merged,
+            mar_l: None,
+            mar_r: None,
+            mar_t: None,
+            mar_b: None,
+            anchor: None,
+            borders: crate::model::CellBorders::default(),
         }
     }
 
@@ -316,6 +322,7 @@ mod tests {
             master_name: None,
             notes: notes.map(|s| s.to_string()),
             clr_map_ovr: None,
+            background: None,
         }
     }
 
@@ -324,6 +331,7 @@ mod tests {
         let table = Table {
             rect: None,
             col_widths: Vec::new(),
+            table_style_id: None,
             rows: vec![
                 Row {
                     cells: vec![cell("A1", 1, 1, false), cell("B1", 1, 1, false)],
@@ -347,6 +355,7 @@ mod tests {
         let table = Table {
             rect: None,
             col_widths: Vec::new(),
+            table_style_id: None,
             rows: vec![
                 Row {
                     // gridSpan=2 表头 + 一个 hMerge 延续格
@@ -396,6 +405,7 @@ mod tests {
         let table = Table {
             rect: None,
             col_widths: Vec::new(),
+            table_style_id: None,
             rows: vec![Row {
                 cells: vec![cell("a<b>&c", 2, 1, false), cell("", 1, 1, true)],
                 height: None,

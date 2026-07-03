@@ -118,6 +118,7 @@ pub fn parse_bytes(bytes: &[u8]) -> Result<ParsedPptx> {
             master_name,
             notes,
             clr_map_ovr: data.clr_map_ovr,
+            background: data.background,
         });
     }
 

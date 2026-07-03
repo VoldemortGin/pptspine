@@ -9,8 +9,9 @@
 //!
 //! 本批覆盖:空白页装配 + 显式几何文本框(B-1/B-2)+ 预设形状底 fill/stroke +
 //! xfrm rot/flip 与 avLst 调整值 + prstDash 虚线 + 图片放置(srcRect/fillRect)
-//! (B-4)+ 组合仿射(B-5)+ 图表/SmartArt 占位框。**后续批次**:bodyPr 锚定/
-//! 自适应(B-6)、表格(B-7)、背景(B-10)。
+//! (B-4)+ 组合仿射(B-5)+ 图表/SmartArt 占位框 + bodyPr 锚定/内边距/换行/
+//! normAutofit 字号缩放(B-6)+ 表格网格/填充/文字/逐边框线(B-7)+ 幻灯片背景
+//! (B-10)。**后续**:tcPr 边框/内边距解析、layout/master 背景继承。
 
 mod shapes;
 mod text;
@@ -20,11 +21,11 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use ppt_core::geom::emu_to_points;
-use ppt_core::resolved::{ResolvedPresentation, ResolvedShape, ResolvedSlide};
+use ppt_core::resolved::{ResolvedFill, ResolvedPresentation, ResolvedShape, ResolvedSlide};
 use ppt_core::{PptError, Result};
 
 pub use pdf_typeset::{ExportResult, ExportWarning};
-use pdf_typeset::{Matrix, Op, PageOps, Typesetter};
+use pdf_typeset::{Matrix, Op, PageOps, Rect, Typesetter};
 
 use transform::{group_transform, Flatten, GroupTransform};
 
@@ -71,7 +72,7 @@ pub fn render_pdf(
         .map(|slide| PageOps {
             width,
             height,
-            ops: slide_ops(&mut ts, &mut ctx, slide),
+            ops: slide_ops(&mut ts, &mut ctx, slide, width, height),
         })
         .collect();
 
@@ -90,13 +91,81 @@ struct RenderCtx<'a> {
     warnings: Vec<ExportWarning>,
 }
 
-/// 一张 slide 的全部绘制 op(spTree 顺序 = 绘制顺序)。
-fn slide_ops(ts: &mut Typesetter, ctx: &mut RenderCtx<'_>, slide: &ResolvedSlide) -> Vec<Op> {
+/// 一张 slide 的全部绘制 op(背景先铺,再 spTree 顺序 = 绘制顺序)。
+fn slide_ops(
+    ts: &mut Typesetter,
+    ctx: &mut RenderCtx<'_>,
+    slide: &ResolvedSlide,
+    width: f64,
+    height: f64,
+) -> Vec<Op> {
     let mut ops = Vec::new();
+    // B-10:整页背景(slide 自身 `p:bg`;layout/master 继承属后续)。
+    if let Some(bg) = &slide.background {
+        background_ops(ts, ctx, bg, width, height, &mut ops);
+    }
     for shape in &slide.shapes {
         shape_ops(ts, ctx, shape, Flatten::IDENTITY, &mut ops);
     }
     ops
+}
+
+/// B-10:整页背景 → 满页填充 / 图片。
+fn background_ops(
+    ts: &mut Typesetter,
+    ctx: &mut RenderCtx<'_>,
+    bg: &ppt_core::resolved::ResolvedBackground,
+    width: f64,
+    height: f64,
+    ops: &mut Vec<Op>,
+) {
+    use ppt_core::resolved::ResolvedBackground;
+    match bg {
+        ResolvedBackground::Color(fill) => {
+            if matches!(fill, ResolvedFill::Gradient(_)) {
+                ctx.warnings.push(ExportWarning::GradientDegraded {
+                    kind: "bgFill".to_string(),
+                });
+            }
+            let c = text::rgb(fill.color());
+            ops.push(Op::FillRect {
+                x: 0.0,
+                y: 0.0,
+                w: width,
+                h: height,
+                color: c,
+            });
+        }
+        ResolvedBackground::Picture { media_name } => {
+            let key = format!("bg::{media_name}");
+            let id = if let Some(&cached) = ctx.image_ids.get(&key) {
+                cached
+            } else {
+                let id = match ctx.media.get(media_name) {
+                    Some(bytes) => {
+                        ts.add_image(&pdf_typeset::ImageSpec::new(bytes.clone(), width, height))
+                    }
+                    None => {
+                        ctx.warnings.push(ExportWarning::ImageDropped {
+                            reason: format!("background media '{media_name}' not found"),
+                        });
+                        None
+                    }
+                };
+                ctx.image_ids.insert(key, id);
+                id
+            };
+            if let Some(id) = id {
+                ops.push(Op::Image {
+                    id,
+                    x: 0.0,
+                    y: 0.0,
+                    w: width,
+                    h: height,
+                });
+            }
+        }
+    }
 }
 
 /// 文本体 → op(矩形经组合仿射映射;pptx `rot` 顺时针 → 引擎视觉逆时针取负;
@@ -111,7 +180,12 @@ fn text_ops(
     let Some(rect) = rect else {
         return;
     };
-    let spec = text::text_box_spec(flat.map_emu_rect(rect), -tf.xfrm.rot_deg(), &tf.paragraphs);
+    let spec = text::text_box_spec(
+        flat.map_emu_rect(rect),
+        -tf.xfrm.rot_deg(),
+        &tf.body,
+        &tf.paragraphs,
+    );
     ops.extend(ts.layout_text_box(&spec));
 }
 
@@ -158,8 +232,135 @@ fn shape_ops(
             }
         },
         ResolvedShape::Placeholder(gp) => shapes::graphic_placeholder_ops(gp, flat, ops),
-        // 表格的绝对单元格布局 / 边框 / 边距属 B-7,本批不绘制。
-        ResolvedShape::Table(_) => {}
+        // B-7:绝对单元格网格 + 填充 + 文字 + 逐边框线。
+        ResolvedShape::Table(t) => table_ops(ts, ctx, t, flat, ops),
+    }
+}
+
+/// B-7:表格 → 单元格网格。列宽按 `col_widths` 比例铺满表格矩形;行高按声明值
+/// 比例铺满(全缺省时等分);单元格填充 / 文字(用 `tcPr` 内边距 + 锚定)/ 逐边框线;
+/// `gridSpan` 横跨、`rowSpan` 纵跨(合并延续格跳过绘制)。`tableStyleId` 记一次降级。
+fn table_ops(
+    ts: &mut Typesetter,
+    ctx: &mut RenderCtx<'_>,
+    table: &ppt_core::resolved::ResolvedTable,
+    flat: Flatten,
+    ops: &mut Vec<Op>,
+) {
+    let Some(rect) = table.rect else {
+        return;
+    };
+    if table.table_style_id.is_some() {
+        ctx.warnings.push(ExportWarning::Custom {
+            kind: "table-style".to_string(),
+            detail: "tableStyle 主题语义 v1 未实现;仅绘制直接填充 / 边框".to_string(),
+        });
+    }
+    let r = flat.map_emu_rect(rect);
+    let ncols = table.col_widths.len();
+    if ncols == 0 || table.rows.is_empty() {
+        return;
+    }
+    // 列 x 边界:按 col_widths 比例铺满表宽。
+    let total_w: f64 = table.col_widths.iter().map(|w| emu_to_points(*w)).sum();
+    let table_w = r.x1 - r.x0;
+    let mut xs = Vec::with_capacity(ncols + 1);
+    let mut acc = r.x0;
+    xs.push(acc);
+    for w in &table.col_widths {
+        let frac = if total_w > 0.0 {
+            emu_to_points(*w) / total_w
+        } else {
+            1.0 / ncols as f64
+        };
+        acc += frac * table_w;
+        xs.push(acc);
+    }
+    // 行 y 边界:声明行高全在则按比例铺满,否则等分(内容测高属后续)。
+    let nrows = table.rows.len();
+    let table_h = r.y1 - r.y0;
+    let declared: Vec<Option<f64>> = table
+        .rows
+        .iter()
+        .map(|r| r.height.map(emu_to_points))
+        .collect();
+    let all_known = declared.iter().all(Option::is_some);
+    let sum_known: f64 = declared.iter().flatten().sum();
+    let mut ys = Vec::with_capacity(nrows + 1);
+    let mut yacc = r.y0;
+    ys.push(yacc);
+    for (i, _) in table.rows.iter().enumerate() {
+        let hpt = if all_known && sum_known > 0.0 {
+            declared[i].unwrap() / sum_known * table_h
+        } else {
+            table_h / nrows as f64
+        };
+        yacc += hpt;
+        ys.push(yacc);
+    }
+
+    for (ri, row) in table.rows.iter().enumerate() {
+        // 每个 `a:tc` 恰占一个网格列(gridSpan 首格宽绘 + 后随 hMerge 占位格)。
+        for (c, cell) in row.cells.iter().enumerate() {
+            if c >= ncols {
+                break;
+            }
+            if !cell.merged {
+                let cspan = (cell.col_span.max(1) as usize).min(ncols - c);
+                let rspan = (cell.row_span.max(1) as usize).min(nrows - ri);
+                let crect = Rect::new(xs[c], ys[ri], xs[c + cspan], ys[ri + rspan]);
+                if let Some(fill) = cell.fill {
+                    ops.push(Op::FillRect {
+                        x: crect.x0,
+                        y: crect.y0,
+                        w: crect.x1 - crect.x0,
+                        h: crect.y1 - crect.y0,
+                        color: text::rgb(fill),
+                    });
+                }
+                cell_border_ops(&cell.borders, crect, ops);
+                let body = cell_body(cell);
+                let spec = text::text_box_spec(crect, 0.0, &body, &cell.paragraphs);
+                ops.extend(ts.layout_text_box(&spec));
+            }
+        }
+    }
+}
+
+/// 单元格逐边框线(已解析的边;`tcBorders` 解析属后续,当前恒空)。
+fn cell_border_ops(b: &ppt_core::resolved::ResolvedCellBorders, r: Rect, ops: &mut Vec<Op>) {
+    let mut edge = |s: &Option<ppt_core::resolved::ResolvedStroke>, x1, y1, x2, y2| {
+        if let Some(st) = s {
+            let color = st
+                .color
+                .map(text::rgb)
+                .unwrap_or_else(|| pdf_typeset::Rgb::new(0.0, 0.0, 0.0));
+            let width = st.width_emu.map(emu_to_points).unwrap_or(0.75);
+            ops.push(Op::Line {
+                x1,
+                y1,
+                x2,
+                y2,
+                color,
+                width,
+            });
+        }
+    };
+    edge(&b.top, r.x0, r.y0, r.x1, r.y0);
+    edge(&b.bottom, r.x0, r.y1, r.x1, r.y1);
+    edge(&b.left, r.x0, r.y0, r.x0, r.y1);
+    edge(&b.right, r.x1, r.y0, r.x1, r.y1);
+}
+
+/// 单元格 `tcPr` 内边距 + 锚定 → 复用文本框 bodyPr 通道。
+fn cell_body(cell: &ppt_core::resolved::ResolvedCell) -> ppt_core::resolved::ResolvedBodyProps {
+    ppt_core::resolved::ResolvedBodyProps {
+        anchor: cell.anchor,
+        l_ins: cell.mar_l,
+        r_ins: cell.mar_r,
+        t_ins: cell.mar_t,
+        b_ins: cell.mar_b,
+        ..Default::default()
     }
 }
 
@@ -219,6 +420,9 @@ mod tests {
             align: None,
             mar_l: None,
             indent: None,
+            ln_spc: None,
+            spc_bef: None,
+            spc_aft: None,
             bullet: ResolvedBullet::None,
             runs: vec![run(text)],
         }
@@ -232,6 +436,7 @@ mod tests {
                 flip_h: false,
                 flip_v: false,
             },
+            body: ppt_core::resolved::ResolvedBodyProps::default(),
             paragraphs: vec![para(text)],
         })
     }
@@ -244,7 +449,11 @@ mod tests {
     }
 
     fn one_slide(shapes: Vec<ResolvedShape>) -> ResolvedPresentation {
-        pres(vec![ResolvedSlide { index: 0, shapes }])
+        pres(vec![ResolvedSlide {
+            index: 0,
+            background: None,
+            shapes,
+        }])
     }
 
     fn render(p: &ResolvedPresentation) -> ExportResult {
@@ -279,14 +488,87 @@ mod tests {
     }
 
     #[test]
+    fn b10_background_fills_full_page() {
+        use ppt_core::resolved::ResolvedBackground;
+        let slide = ResolvedSlide {
+            index: 0,
+            background: Some(ResolvedBackground::Color(ResolvedFill::Solid(
+                ResolvedColor::opaque([255, 0, 0]),
+            ))),
+            shapes: vec![],
+        };
+        let out = render(&pres(vec![slide]));
+        let hay = String::from_utf8_lossy(&out.pdf);
+        // 满页红色背景填充(内容流不压缩,可 grep)。
+        assert!(hay.contains("1 0 0 rg"), "background red fill missing");
+    }
+
+    #[test]
+    fn b7_table_renders_cell_fill_and_grid() {
+        use ppt_core::resolved::{ResolvedCell, ResolvedCellBorders, ResolvedRow, ResolvedTable};
+        let mk_cell = |t: &str, fill: Option<ResolvedColor>| ResolvedCell {
+            paragraphs: vec![para(t)],
+            col_span: 1,
+            row_span: 1,
+            fill,
+            merged: false,
+            mar_l: 91_440,
+            mar_r: 91_440,
+            mar_t: 45_720,
+            mar_b: 45_720,
+            anchor: ppt_core::resolved::ResolvedAnchor::Top,
+            borders: ResolvedCellBorders::default(),
+        };
+        let table = ResolvedShape::Table(ResolvedTable {
+            rect: Some(Rect::new(0, 0, 6_000_000, 2_000_000)),
+            col_widths: vec![3_000_000, 3_000_000],
+            table_style_id: None,
+            rows: vec![ResolvedRow {
+                cells: vec![
+                    mk_cell("A1", Some(ResolvedColor::opaque([0, 0, 255]))),
+                    mk_cell("B1", None),
+                ],
+                height: Some(2_000_000),
+            }],
+        });
+        let out = render(&one_slide(vec![table]));
+        let hay = String::from_utf8_lossy(&out.pdf);
+        // 蓝色单元格填充落在内容流。
+        assert!(hay.contains("0 0 1 rg"), "cell blue fill missing");
+        // 单元格文字经引擎排版(BT/ET 文本块存在)。
+        assert!(hay.contains("BT"), "table cell text missing");
+    }
+
+    #[test]
+    fn b6_bottom_anchor_places_text_lower() {
+        // 底部锚定的文本框:验证渲染不 panic + 产出有效非空 PDF(锚定几何由引擎
+        // TS-5 保证,此处只钉住 bodyPr 接线通路)。
+        let body = ppt_core::resolved::ResolvedBodyProps {
+            anchor: ppt_core::resolved::ResolvedAnchor::Bottom,
+            ..Default::default()
+        };
+        let tf = ResolvedTextFrame {
+            rect: Some(Rect::new(0, 0, 4_000_000, 3_000_000)),
+            xfrm: Xfrm::default(),
+            body,
+            paragraphs: vec![para("anchored")],
+        };
+        let out = render(&one_slide(vec![ResolvedShape::TextBox(tf)]));
+        assert!(out.pdf.starts_with(b"%PDF-"));
+        assert!(String::from_utf8_lossy(&out.pdf).contains("BT"));
+    }
+
+    #[test]
     fn blank_slides_export_one_page_each() {
         let p = pres(vec![
             ResolvedSlide {
                 index: 0,
+                background: None,
                 shapes: vec![],
             },
             ResolvedSlide {
                 index: 1,
+                background: None,
                 shapes: vec![],
             },
         ]);

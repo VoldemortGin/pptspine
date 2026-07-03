@@ -63,8 +63,17 @@ impl RunStyle {
     }
 }
 
+/// 间距值(`a:lnSpc` / `a:spcBef` / `a:spcAft` 的 `a:spcPct` / `a:spcPts`,§3.g)。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Spacing {
+    /// 百分比(千分之一个百分点,`a:spcPct@val`,100000 = 100%)。
+    Pct(i64),
+    /// 磅(`a:spcPts@val` 以百分之一磅存储,解析时已除以 100)。
+    Pts(f32),
+}
+
 /// 一个层级的段落样式(`a:lvlNpPr` / 段落自身 `a:pPr` 形):
-/// 对齐、列表缩进、项目符号(字符 / 字体 / 大小)与缺省 run 样式。
+/// 对齐、列表缩进、行距/段距、项目符号(字符 / 字体 / 大小)与缺省 run 样式。
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct TextLevelStyle {
     /// 对齐(`@algn`)。
@@ -73,6 +82,12 @@ pub struct TextLevelStyle {
     pub mar_l: Option<Emu>,
     /// 首行缩进(EMU,`@indent`,可负)。
     pub indent: Option<Emu>,
+    /// 行距(`a:lnSpc`,B-6)。
+    pub ln_spc: Option<Spacing>,
+    /// 段前距(`a:spcBef`)。
+    pub spc_bef: Option<Spacing>,
+    /// 段后距(`a:spcAft`)。
+    pub spc_aft: Option<Spacing>,
     /// 项目符号(`None` = 未指定 → 继承)。
     pub bullet: Option<Bullet>,
     /// 符号字体(`a:buFont@typeface`)。
@@ -90,6 +105,9 @@ impl TextLevelStyle {
             align: over.align.clone().or_else(|| self.align.clone()),
             mar_l: over.mar_l.or(self.mar_l),
             indent: over.indent.or(self.indent),
+            ln_spc: over.ln_spc.or(self.ln_spc),
+            spc_bef: over.spc_bef.or(self.spc_bef),
+            spc_aft: over.spc_aft.or(self.spc_aft),
             bullet: over.bullet.clone().or_else(|| self.bullet.clone()),
             bu_font: over.bu_font.clone().or_else(|| self.bu_font.clone()),
             bu_size_pct: over.bu_size_pct.or(self.bu_size_pct),

@@ -33,6 +33,20 @@ pub struct Slide {
     /// 颜色映射覆盖(`p:clrMapOvr > a:overrideClrMapping`);
     /// `None` = 沿用 layout / master 的映射(`a:masterClrMapping` 或缺失)。
     pub clr_map_ovr: Option<ClrMap>,
+    /// 幻灯片自身的背景(`p:bg`,§3.o);`None` = 沿 layout → master 链继承。
+    pub background: Option<Background>,
+}
+
+/// 幻灯片背景(`p:bg`,§3.o,B-10)。
+#[derive(Debug, Clone, PartialEq)]
+pub enum Background {
+    /// 直接填充(`p:bgPr` 的 solidFill / gradFill / noFill)。
+    Fill(Fill),
+    /// 图片背景(`p:bgPr > a:blipFill`,rel id 已经部件 rels 折成 media 裸名)。
+    Blip { media_name: Option<String> },
+    /// 主题引用(`p:bgRef`):`@idx` 1..=999 进 `fillStyleLst[idx-1]`、
+    /// 1001.. 进 `bgFillStyleLst[idx-1001]`;子颜色是 `phClr` 的取值。
+    Ref { idx: u32, color: Option<ColorSpec> },
 }
 
 /// 形状树里的一个节点。
@@ -119,6 +133,63 @@ pub struct RelRect {
     pub b: i32,
 }
 
+/// `a:bodyPr` 的自动适配子元素(§3.f)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Autofit {
+    /// 显式关闭(`a:noAutofit`)。
+    None,
+    /// 形状适配文字(`a:spAutoFit`;渲染 v1 no-op,PRD §8 B-6)。
+    Shape,
+    /// 文字缩放适配(`a:normAutofit`):文档里**已存储**的 fontScale /
+    /// lnSpcReduction(千分之一个百分点,100000 = 100%;属性缺失 → `None`)。
+    Normal {
+        font_scale: Option<i64>,
+        ln_spc_reduction: Option<i64>,
+    },
+}
+
+/// 文本体属性(`a:bodyPr`,§3.f):全字段三态(`None` = 缺失 → 沿占位符链继承)。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BodyProps {
+    /// 垂直锚定(`@anchor`:`t`/`ctr`/`b`/`just`/`dist`)。
+    pub anchor: Option<String>,
+    /// 锚定居中(`@anchorCtr`,文本块整体水平居中;v1 渲染不消费,信息保留)。
+    pub anchor_ctr: Option<bool>,
+    /// 左内边距(EMU;OOXML 缺省 91440 = 0.1",解析层不填缺省)。
+    pub l_ins: Option<Emu>,
+    /// 上内边距(EMU;OOXML 缺省 45720 = 0.05")。
+    pub t_ins: Option<Emu>,
+    /// 右内边距(EMU)。
+    pub r_ins: Option<Emu>,
+    /// 下内边距(EMU)。
+    pub b_ins: Option<Emu>,
+    /// 自动换行(`@wrap`:`"none"` → `Some(false)`,`"square"` → `Some(true)`)。
+    pub wrap: Option<bool>,
+    /// 文字方向(`@vert`;非 `horz` 渲染侧水平降级 + 告警,PRD §1)。
+    pub vert: Option<String>,
+    /// 自动适配子元素。
+    pub autofit: Option<Autofit>,
+}
+
+impl BodyProps {
+    /// 逐属性合并:`over`(更近来源)的 `Some` 覆盖 `self` 的对应字段(B-6 链:
+    /// master 占位符 → layout 占位符 → 形状自身)。
+    #[must_use]
+    pub fn overridden_by(&self, over: &BodyProps) -> BodyProps {
+        BodyProps {
+            anchor: over.anchor.clone().or_else(|| self.anchor.clone()),
+            anchor_ctr: over.anchor_ctr.or(self.anchor_ctr),
+            l_ins: over.l_ins.or(self.l_ins),
+            t_ins: over.t_ins.or(self.t_ins),
+            r_ins: over.r_ins.or(self.r_ins),
+            b_ins: over.b_ins.or(self.b_ins),
+            wrap: over.wrap.or(self.wrap),
+            vert: over.vert.clone().or_else(|| self.vert.clone()),
+            autofit: over.autofit.or(self.autofit),
+        }
+    }
+}
+
 /// 一个文本框体:可选位置 + 段落序列(+ 继承链所需的占位符 / 列表样式 / 形状样式引用)。
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct TextFrame {
@@ -132,6 +203,8 @@ pub struct TextFrame {
     pub list_style: Option<TextStyleLevels>,
     /// 形状样式引用(`p:style`,主题索引式格式)。
     pub style: Option<ShapeStyle>,
+    /// 文本体属性(`a:bodyPr`,B-6;缺失字段沿占位符链继承)。
+    pub body: BodyProps,
 }
 
 /// 一个段落(`a:p`)。
@@ -195,6 +268,9 @@ pub struct Table {
     /// 各列宽(EMU,`a:tblGrid` > `a:gridCol@w`,按文档顺序);无 `tblGrid` 时为空。
     pub col_widths: Vec<Emu>,
     pub rows: Vec<Row>,
+    /// 表格样式 id(`a:tblPr > a:tableStyleId`)。v1 不解析 `tableStyles.xml`
+    /// 语义(PRD §1 CUT),仅保留 id 供渲染侧降级告警。
+    pub table_style_id: Option<String>,
 }
 
 /// 表格的一行(`a:tr`)。
@@ -203,6 +279,16 @@ pub struct Row {
     pub cells: Vec<Cell>,
     /// 行高(EMU,`a:tr@h`)。
     pub height: Option<Emu>,
+}
+
+/// 单元格逐边框线(`a:tcPr > a:lnL/lnR/lnT/lnB`,§3.q)。
+/// `None` 边不画——v1 只画显式边框(`tableStyles.xml` 语义在 v1 之外,PRD §1)。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CellBorders {
+    pub left: Option<Stroke>,
+    pub right: Option<Stroke>,
+    pub top: Option<Stroke>,
+    pub bottom: Option<Stroke>,
 }
 
 /// 表格单元格(`a:tc`)。
@@ -217,6 +303,16 @@ pub struct Cell {
     pub fill: Option<ColorSpec>,
     /// 是否是被合并掉的延续格(`a:tc@hMerge` / `a:tc@vMerge`)。
     pub merged: bool,
+    /// 单元格内边距(EMU,`a:tcPr@marL/@marR/@marT/@marB`;缺失 → OOXML 缺省
+    /// 91440 / 45720,由解析后的终态 IR 回填)。
+    pub mar_l: Option<Emu>,
+    pub mar_r: Option<Emu>,
+    pub mar_t: Option<Emu>,
+    pub mar_b: Option<Emu>,
+    /// 垂直锚定(`a:tcPr@anchor`:`t`/`ctr`/`b`)。
+    pub anchor: Option<String>,
+    /// 逐边框线(§3.q)。
+    pub borders: CellBorders,
 }
 
 /// 一张图片(`p:pic`)。原始字节存放在解析输出的 media map 里,这里只携带定位信息。

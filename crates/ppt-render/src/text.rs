@@ -16,14 +16,15 @@
 
 use ppt_core::color::ResolvedColor;
 use ppt_core::geom::emu_to_points;
-use ppt_core::resolved::{ResolvedBullet, ResolvedParagraph, ResolvedRun};
+use ppt_core::resolved::{
+    ResolvedAnchor, ResolvedBodyProps, ResolvedBullet, ResolvedParagraph, ResolvedRun,
+};
+use ppt_core::style::Spacing;
 
-use pdf_typeset::{Align, Block, ListLabel, ParaProps, Rect, Rgb, Run, RunStyle, TextBoxSpec};
+use pdf_typeset::{
+    Align, Block, LineSpacing, ListLabel, ParaProps, Rect, Rgb, Run, RunStyle, TextBoxSpec, VAnchor,
+};
 
-/// OOXML `bodyPr` 缺省左右内边距(91440 EMU)。
-const INSET_LR_PT: f64 = 7.2;
-/// OOXML `bodyPr` 缺省上下内边距(45720 EMU)。
-const INSET_TB_PT: f64 = 3.6;
 /// 项目符号标签右缘到正文起点的间距(pt;引擎 `ListLabel::gutter`)。
 const BULLET_GUTTER_PT: f64 = 6.0;
 /// 继承链全缺 `marL` 时带符号段落的兜底左缩进(228600 EMU = 0.25 in)。
@@ -36,18 +37,21 @@ const DEFAULT_LATIN: &str = "Calibri";
 pub(crate) fn text_box_spec(
     rect: Rect,
     rotation_deg: f64,
+    body: &ResolvedBodyProps,
     paragraphs: &[ResolvedParagraph],
 ) -> TextBoxSpec {
     let (x, y) = (rect.x0, rect.y0);
     let (w, h) = (rect.x1 - rect.x0, rect.y1 - rect.y0);
-    // 缺省内边距;盒子过小时放弃该向内边距(引擎对 0 宽高再兜底)。
-    let (ix, iw) = if w > 2.0 * INSET_LR_PT {
-        (x + INSET_LR_PT, w - 2.0 * INSET_LR_PT)
+    // B-6:bodyPr 内边距(EMU→pt);盒子过小时放弃该向内边距(引擎对 0 宽高再兜底)。
+    let (l, r) = (emu_to_points(body.l_ins), emu_to_points(body.r_ins));
+    let (t, b) = (emu_to_points(body.t_ins), emu_to_points(body.b_ins));
+    let (ix, iw) = if w > l + r {
+        (x + l, w - l - r)
     } else {
         (x, w)
     };
-    let (iy, ih) = if h > 2.0 * INSET_TB_PT {
-        (y + INSET_TB_PT, h - 2.0 * INSET_TB_PT)
+    let (iy, ih) = if h > t + b {
+        (y + t, h - t - b)
     } else {
         (y, h)
     };
@@ -59,13 +63,43 @@ pub(crate) fn text_box_spec(
         .collect();
     let mut spec = TextBoxSpec::new(Rect::new(ix, iy, ix + iw, iy + ih), blocks);
     spec.rotation_deg = rotation_deg;
+    // B-6:垂直锚定 / 自动换行 / normAutofit 字号缩放。
+    spec.v_anchor = match body.anchor {
+        ResolvedAnchor::Top => VAnchor::Top,
+        ResolvedAnchor::Middle => VAnchor::Middle,
+        ResolvedAnchor::Bottom => VAnchor::Bottom,
+    };
+    spec.wrap = body.wrap;
+    spec.font_scale = body.font_scale.map(f64::from);
     spec
+}
+
+/// B-6:pptx `a:spcPct`(千分之一百分点)/ `a:spcPts`(点)→ 引擎行距。
+fn line_spacing_of(s: Spacing) -> LineSpacing {
+    match s {
+        Spacing::Pct(n) => LineSpacing::Multiple(n as f64 / 100_000.0),
+        Spacing::Pts(p) => LineSpacing::Exact(f64::from(p)),
+    }
+}
+
+/// 段前 / 段后距(pt)。`spcPts` 直用;`spcPct`(行高百分比)缺字号上下文,v1 忽略
+/// (真实 deck 的段距压倒性用 `spcPts`)。
+fn space_pts(s: Option<Spacing>) -> f64 {
+    match s {
+        Some(Spacing::Pts(p)) => f64::from(p),
+        _ => 0.0,
+    }
 }
 
 /// 一个段落 → `Block::Paragraph`。
 fn paragraph_block(para: &ResolvedParagraph, counters: &mut AutoNumCounters) -> Block {
     let mut props = ParaProps::new();
     props.align = map_align(para.align.as_deref());
+    if let Some(s) = para.ln_spc {
+        props.spacing = line_spacing_of(s);
+    }
+    props.space_before = space_pts(para.spc_bef);
+    props.space_after = space_pts(para.spc_aft);
 
     let mar_l = para.mar_l.map(emu_to_points).unwrap_or(0.0);
     let indent = para.indent.map(emu_to_points).unwrap_or(0.0);
@@ -184,20 +218,32 @@ fn bullet_label(
 ) -> Option<ListLabel> {
     match bullet {
         ResolvedBullet::None => None,
-        ResolvedBullet::Char { ch, .. } => Some(ListLabel {
-            text: ch.clone(),
-            gutter: BULLET_GUTTER_PT,
-        }),
+        ResolvedBullet::Char { ch, font, size_pct } => {
+            Some(label_with(ch.clone(), font.clone(), *size_pct))
+        }
         ResolvedBullet::AutoNum {
-            scheme, start_at, ..
+            scheme,
+            start_at,
+            font,
+            size_pct,
         } => {
             let n = counters.next(level, *start_at);
-            Some(ListLabel {
-                text: format_autonum(scheme.as_deref(), n),
-                gutter: BULLET_GUTTER_PT,
-            })
+            Some(label_with(
+                format_autonum(scheme.as_deref(), n),
+                font.clone(),
+                *size_pct,
+            ))
         }
     }
+}
+
+/// 组一个引擎 [`ListLabel`]:符号字体 / `buSzPct`(1.0 = 100% → 引擎百分数)直通
+/// (TS-8 扩展;`None` 继承首 run)。
+fn label_with(text: String, font: Option<String>, size_pct: Option<f32>) -> ListLabel {
+    let mut label = ListLabel::new(text, BULLET_GUTTER_PT);
+    label.size_pct = size_pct.map(|v| f64::from(v) * 100.0);
+    label.font = font;
+    label
 }
 
 /// 按 `buAutoNum@type` 常见 scheme 子集格式化序号;未知 scheme 退化 `N.`。
