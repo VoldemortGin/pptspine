@@ -148,23 +148,15 @@ jobs:
           target: x86_64
           args: --release --out dist --strip
           sccache: "true"
-      # Same release gate as the core matrix: install the just-built wheel into a
-      # clean venv and run a real PP-OCRv5 recognition on the bundled models.
-      - name: OCR smoke (install wheel + real recognition)
-        shell: bash
-        run: |
-          python -m venv .ocrsmoke
-          if [ -f .ocrsmoke/bin/python ]; then
-            PY=.ocrsmoke/bin/python
-          else
-            PY=.ocrsmoke/Scripts/python
-          fi
-          "$PY" -m pip install --upgrade pip
-          # OCR 模型现由共享数据包 ocrspine-models 提供（硬依赖）：先从 PyPI 装它，
-          # 再用 --no-index 装本地 wheel（依赖已满足，仍只测本地构建的 wheel）。
-          "$PY" -m pip install ocrspine-models
-          "$PY" -m pip install --find-links dist --no-index pptspine
-          "$PY" scripts/ocr_smoke.py python/tests/fixtures/ocr_sample.png
+      # 这里**不做** OCR 冒烟:本 job 是在 arm64 的 macos-14 runner 上对 x86_64 的
+      # **交叉**构建,产出的 Intel wheel 无法在本机 arm64 Python 里 pip install/运行——
+      # 硬跑安装会报 “No matching distribution found”,wheel 就死在这步、走不到
+      # upload-artifact(v0.2.0 缺 Intel wheel 正是因此)。因此交叉腿只构建 + 上传,不做
+      # 安装冒烟:与核心矩阵里 ubuntu-latest/aarch64 那条 cross 构建同样跳过原生 OCR
+      # (见上方矩阵注释),也与 docspine release.yml 的做法一致——它对交叉编译目标
+      # (macos-14/x86_64、ubuntu/aarch64)从不做安装冒烟,只 build 后 upload-artifact。
+      # OCR 由原生跑得起来的其它架构(x86_64-Linux / arm64-macOS / Windows)在核心矩阵里
+      # 真机验证:tract 纯 Rust、跨架构一致,无 per-arch kernel 需逐架构复验。
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-macos-13-x86_64
