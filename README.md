@@ -6,7 +6,11 @@ A pure-Rust PowerPoint (`.pptx`) parser with Python bindings (PyO3 / maturin,
 abi3-py311). A `.pptx` file is OOXML — a zip archive of XML parts — and pptspine
 walks that XML directly to produce a structured, information-preserving model:
 slides, text frames (paragraphs + styled runs), tables (cells, merges, fills),
-pictures, and autoshapes. Embedded images can additionally be OCR'd locally,
+pictures, and autoshapes. A parsed deck can also be **exported to PDF**
+(`to_pdf()` / `save_pdf()`, one page per slide) through the shared pure-Rust
+`pdf-typeset` engine from the sibling
+[`pdfspine`](https://github.com/VoldemortGin/pdfspine) — no LibreOffice, no
+cloud converter. Embedded images can additionally be OCR'd locally,
 offline, and deterministically via the sibling [`ocrspine`](../ocrspine) crate
 (PP-OCRv5 through `tract-onnx` — no cloud, no network).
 
@@ -26,6 +30,7 @@ offline, and deterministically via the sibling [`ocrspine`](../ocrspine) crate
 | Groups (`p:grpSp`): recursive | parsed |
 | Speaker notes (`notesSlide` → `Slide.notes`) | parsed |
 | Structured export: `to_text()` / `to_markdown()` (GFM + HTML tables for merges) | working |
+| PDF export: `to_pdf()` / `save_pdf()` — one page per slide; placeholder/theme inheritance, shape transforms (rot/flip/adj/dash/`srcRect`), group affine, tables, slide backgrounds, body-anchor/autofit | working |
 | Image OCR (embedded pictures → words + boxes) | working (`ocr_image`) |
 | Image-table geometry reconstruction from OCR boxes | **deferred** (stub) |
 
@@ -92,6 +97,22 @@ for shape in pres.slides()[0].shapes():
             print([i["text"] for i in pptspine.ocr_image(data)])
 ```
 
+## Export to PDF
+
+```python
+pres = pptspine.open("deck.pptx")
+pres.save_pdf("deck.pdf")          # one PDF page per slide
+pdf_bytes = pres.to_pdf()          # or in-memory bytes
+
+# Optional: map a requested font family to a local font file (or to another
+# installed family), layered on top of the built-in substitution table:
+pres.save_pdf("deck.pdf", font_map={"Aptos": "/path/to/Aptos.ttf"})
+```
+
+Rendering is deterministic and fully offline. Missing fonts degrade gracefully:
+an available face is substituted and a Python `UserWarning` is emitted **once
+per warning kind** — the export never fails on a missing font.
+
 ## Rust workspace
 
 ```
@@ -99,6 +120,7 @@ crates/
   ppt-core    domain model + geometry (EMU) + typed PptError. No IO/zip/XML.
   ppt-parse   OOXML reader: zip extract + quick-xml walk -> Presentation.
   ppt-ocr     image-OCR bridge over ocrspine (PaddleOcr).
+  ppt-render  slide -> PDF renderer over the shared pdf-typeset engine (from pdfspine).
   py-bindings PyO3 _core extension (the FFI chokepoint).
 ```
 
