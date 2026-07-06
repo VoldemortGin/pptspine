@@ -1378,11 +1378,21 @@ fn parse_table_cell<R: std::io::BufRead>(reader: &mut Reader<R>, start: &BytesSt
                 let name = local_name(e.name().as_ref()).to_vec();
                 match name.as_slice() {
                     b"txBody" => cell.paragraphs = parse_txbody(reader).paragraphs,
-                    b"tcPr" => cell.fill = parse_tcpr_fill(reader).or(cell.fill),
+                    // tcPr 带子元素(填充 / 逐边框线):属性 + 子元素都解析。
+                    b"tcPr" => {
+                        let mut t = tcpr_attrs(&e);
+                        parse_tcpr_children(reader, &mut t);
+                        apply_tcpr(&mut cell, t);
+                    }
                     _ => skip_element(reader, &name),
                 }
             }
-            Ok(Event::Empty(_)) => {}
+            // 自闭合 tcPr(`<a:tcPr marL=.. anchor=../>`):只有属性,无子元素。
+            Ok(Event::Empty(e)) => {
+                if local_name(e.name().as_ref()) == b"tcPr" {
+                    apply_tcpr(&mut cell, tcpr_attrs(&e));
+                }
+            }
             Ok(Event::End(_)) => break,
             Ok(Event::Eof) => break,
             Err(_) => break,
@@ -1393,21 +1403,60 @@ fn parse_table_cell<R: std::io::BufRead>(reader: &mut Reader<R>, start: &BytesSt
     cell
 }
 
-/// 解析 `a:tcPr` 里的 `a:solidFill` 颜色。已消费 `<a:tcPr>` 起始标签。
-fn parse_tcpr_fill<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<ColorSpec> {
-    let mut color = None;
+/// `a:tcPr` 的解析中间态:填充 + 内边距(EMU)+ 垂直锚定 + 逐边框线(§3.p/§3.q)。
+#[derive(Default)]
+struct TcPr {
+    fill: Option<ColorSpec>,
+    mar_l: Option<Emu>,
+    mar_r: Option<Emu>,
+    mar_t: Option<Emu>,
+    mar_b: Option<Emu>,
+    anchor: Option<String>,
+    borders: CellBorders,
+}
+
+/// 读 `a:tcPr` 的属性:`@marL/@marR/@marT/@marB`(内边距 EMU)、`@anchor`(t/ctr/b)。
+fn tcpr_attrs(e: &BytesStart) -> TcPr {
+    let emu = |k: &[u8]| attr_of(e, k).and_then(|s| s.parse::<Emu>().ok());
+    TcPr {
+        mar_l: emu(b"marL"),
+        mar_r: emu(b"marR"),
+        mar_t: emu(b"marT"),
+        mar_b: emu(b"marB"),
+        anchor: attr_of(e, b"anchor"),
+        ..TcPr::default()
+    }
+}
+
+/// 读 `a:tcPr` 的子元素:`a:solidFill`(单元格填充)、`a:lnL/lnR/lnT/lnB`(逐边框线,
+/// 各是一个 `a:ln`——width/dash/solidFill 走 [`parse_ln`];自闭合仅 width)。
+/// 对角线 `lnTlToBr`/`lnBlToTr` v1 忽略。
+fn parse_tcpr_children<R: std::io::BufRead>(reader: &mut Reader<R>, t: &mut TcPr) {
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
-                if name.as_slice() == b"solidFill" {
-                    color = parse_solid_fill(reader).or(color);
-                } else {
-                    skip_element(reader, &name);
+                match name.as_slice() {
+                    b"solidFill" => t.fill = parse_solid_fill(reader).or(t.fill.take()),
+                    b"lnL" => t.borders.left = parse_ln(reader, &e),
+                    b"lnR" => t.borders.right = parse_ln(reader, &e),
+                    b"lnT" => t.borders.top = parse_ln(reader, &e),
+                    b"lnB" => t.borders.bottom = parse_ln(reader, &e),
+                    _ => skip_element(reader, &name),
                 }
             }
-            Ok(Event::Empty(_)) => {}
+            Ok(Event::Empty(e)) => {
+                let name = local_name(e.name().as_ref()).to_vec();
+                let w = || stroke_if_any(None, ln_width(&e), None);
+                match name.as_slice() {
+                    b"lnL" => t.borders.left = w(),
+                    b"lnR" => t.borders.right = w(),
+                    b"lnT" => t.borders.top = w(),
+                    b"lnB" => t.borders.bottom = w(),
+                    _ => {}
+                }
+            }
             Ok(Event::End(_)) => break,
             Ok(Event::Eof) => break,
             Err(_) => break,
@@ -1415,7 +1464,22 @@ fn parse_tcpr_fill<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<ColorS
         }
         buf.clear();
     }
-    color
+}
+
+/// 把解析出的 `tcPr` 落到单元格:填充/锚定仅在存在时覆盖,内边距与边框直接落
+/// (缺省在终态 IR 回填内边距;边框 `None` 边不画)。
+fn apply_tcpr(cell: &mut Cell, t: TcPr) {
+    if t.fill.is_some() {
+        cell.fill = t.fill;
+    }
+    cell.mar_l = t.mar_l;
+    cell.mar_r = t.mar_r;
+    cell.mar_t = t.mar_t;
+    cell.mar_b = t.mar_b;
+    if t.anchor.is_some() {
+        cell.anchor = t.anchor;
+    }
+    cell.borders = t.borders;
 }
 
 /// 解析 `p:pic`(图片):`p:spPr`(位置 + 旋转/翻转)+ `p:blipFill`(rel id +

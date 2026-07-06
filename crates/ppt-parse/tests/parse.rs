@@ -521,6 +521,51 @@ fn tbl_grid_col_widths_parsed() {
     assert_eq!(t.rows[0].cells.len(), 2);
 }
 
+/// §3.q:`a:tcPr` 的内边距(marL/marR/marT/marB)、锚定(anchor)、逐边框线
+/// (lnL/lnR/lnT/lnB;带 solidFill 与自闭合仅 width 两种形式)落进 Cell。
+#[test]
+fn tcpr_margins_anchor_and_borders_parsed() {
+    let shapes = shapes_of(
+        r#"<p:graphicFrame>
+             <p:xfrm><a:off x="0" y="0"/><a:ext cx="4000000" cy="1000000"/></p:xfrm>
+             <a:graphic>
+               <a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table">
+                 <a:tbl>
+                   <a:tblGrid><a:gridCol w="4000000"/></a:tblGrid>
+                   <a:tr h="1000000">
+                     <a:tc>
+                       <a:txBody><a:p><a:r><a:t>X</a:t></a:r></a:p></a:txBody>
+                       <a:tcPr marL="91440" marR="45720" marT="10000" marB="20000" anchor="ctr">
+                         <a:lnL w="12700"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:lnL>
+                         <a:lnB w="6350"/>
+                       </a:tcPr>
+                     </a:tc>
+                   </a:tr>
+                 </a:tbl>
+               </a:graphicData>
+             </a:graphic>
+           </p:graphicFrame>"#,
+    );
+    let Shape::Table(t) = &shapes[0] else {
+        panic!("expected a table");
+    };
+    let cell = &t.rows[0].cells[0];
+    assert_eq!(cell.mar_l, Some(91440));
+    assert_eq!(cell.mar_r, Some(45720));
+    assert_eq!(cell.mar_t, Some(10000));
+    assert_eq!(cell.mar_b, Some(20000));
+    assert_eq!(cell.anchor.as_deref(), Some("ctr"));
+    // 左边框:solidFill(红)+ width;下边框:自闭合仅 width。
+    let left = cell.borders.left.as_ref().expect("left border parsed");
+    assert_eq!(left.width_emu, Some(12700));
+    assert!(left.color.is_some());
+    let bottom = cell.borders.bottom.as_ref().expect("bottom border parsed");
+    assert_eq!(bottom.width_emu, Some(6350));
+    // 未声明的右 / 上边框为 None。
+    assert!(cell.borders.right.is_none());
+    assert!(cell.borders.top.is_none());
+}
+
 /// B-4(§3.d/§3.j):`a:xfrm` 自身的 rot/flipH/flipV 与 `a:avLst > a:gd`
 /// 调整值落进 `AutoShape`。
 #[test]

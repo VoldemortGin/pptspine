@@ -540,6 +540,49 @@ mod tests {
     }
 
     #[test]
+    fn b7_cell_borders_draw_stroked_lines() {
+        use ppt_core::resolved::{
+            ResolvedCell, ResolvedCellBorders, ResolvedRow, ResolvedStroke, ResolvedTable,
+        };
+        // 红色左边框(width 12700 EMU = 1 pt)。
+        let red_left = ResolvedCellBorders {
+            left: Some(ResolvedStroke {
+                color: Some(ResolvedColor::opaque([255, 0, 0])),
+                width_emu: Some(12_700),
+                dash: None,
+            }),
+            ..ResolvedCellBorders::default()
+        };
+        let cell = ResolvedCell {
+            paragraphs: vec![para("A1")],
+            col_span: 1,
+            row_span: 1,
+            fill: None,
+            merged: false,
+            mar_l: 91_440,
+            mar_r: 91_440,
+            mar_t: 45_720,
+            mar_b: 45_720,
+            anchor: ppt_core::resolved::ResolvedAnchor::Top,
+            borders: red_left,
+        };
+        let table = ResolvedShape::Table(ResolvedTable {
+            rect: Some(Rect::new(0, 0, 4_000_000, 1_500_000)),
+            col_widths: vec![4_000_000],
+            table_style_id: None,
+            rows: vec![ResolvedRow {
+                cells: vec![cell],
+                height: Some(1_500_000),
+            }],
+        });
+        let out = render(&one_slide(vec![table]));
+        let hay = String::from_utf8_lossy(&out.pdf);
+        // 红色描边 + 描线路径(moveto/lineto/stroke)落在内容流。
+        assert!(hay.contains("1 0 0 RG"), "cell border stroke color missing");
+        assert!(hay.contains(" l S"), "cell border line path missing");
+    }
+
+    #[test]
     fn b6_bottom_anchor_places_text_lower() {
         // 底部锚定的文本框:验证渲染不 panic + 产出有效非空 PDF(锚定几何由引擎
         // TS-5 保证,此处只钉住 bodyPr 接线通路)。
