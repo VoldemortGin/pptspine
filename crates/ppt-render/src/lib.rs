@@ -896,7 +896,8 @@ mod tests {
                 }
             }
         };
-        let utf16be = |s: &str| -> Vec<u8> { s.encode_utf16().flat_map(u16::to_be_bytes).collect() };
+        let utf16be =
+            |s: &str| -> Vec<u8> { s.encode_utf16().flat_map(u16::to_be_bytes).collect() };
         replace_all(&mut out, b"Liberation", b"Zephyrmark"); // 各 10 字节
         replace_all(&mut out, &utf16be("Liberation"), &utf16be("Zephyrmark"));
         out
@@ -925,9 +926,13 @@ mod tests {
             .expect("renamed face parses")
             .name()
             .replace(' ', ""); // "Zephyrmark Serif Regular" → "ZephyrmarkSerifRegular"
-        assert!(ps_name.starts_with("ZephyrmarkSerif"), "renamed name: {ps_name}");
+        assert!(
+            ps_name.starts_with("ZephyrmarkSerif"),
+            "renamed name: {ps_name}"
+        );
 
-        let path = std::env::temp_dir().join(format!("ppt_render_fontmap_{}.ttf", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("ppt_render_fontmap_{}.ttf", std::process::id()));
         std::fs::write(&path, &renamed).expect("write temp ttf");
 
         // 请求独有族名 "Zephyrmark Serif" 的单文本框(拉丁文本走 run.font)。
