@@ -1,6 +1,6 @@
 # PRD — Faithful PDF Export (.pptx → PDF)
 
-Status: **draft, code-verified** · Date: 2026-07-02 · Repo: `/Users/linhan/workspace/spine/pptspine`
+Status: **B-1..B-11 已基本实现落地(code-verified)** · Date: 2026-07-02 · Repo: `/Users/linhan/workspace/spine/pptspine`
 Family position: **Phase B** of the spine PDF-export program — Phase A is the shared engine
 `crates/pdf-typeset` in pdfspine (`pdfspine docs/PRD-NEXT.md` §10, tasks TS-1..TS-7); Phase C is docspine.
 pptspine ships first because per-slide absolute positioning avoids pagination entirely.
@@ -302,53 +302,64 @@ chain (B-8/B-9) lands later but **before GA**. Each task: why · effort · engin
   **Green:** pytest exports a deck to non-empty PDF bytes; pdfspine reads it back with
   page count == `slide_count` and every `Page.rect` == `slide_size_points` (`_core.pyi:44`) for both
   16:9 (960×540 pt) and 4:3 fixtures; fmt/clippy `-D warnings`/tests green on the workspace.
+  · **状态**: done。
 - **B-2 · Explicit-geometry text boxes.** Map `TextFrame` with explicit rect + today's five run attrs
   onto TS-5 boxes with TS-2/TS-3 fonts. Effort **M**. Prereq: TS-2, TS-3, TS-5.
   **Green:** single-textbox deck exports; `get_text_words` bbox within **1 pt** of the EMU-derived rect
   (+ inset defaults); token-F1 & order ≥ **0.99** vs `to_text()` (minus separators/notes) scored with
   `score.py`; raster not `_near_blank`; exactly one FontFile2 per used face (subsetted).
+  · **状态**: done。
 - **B-3 · Parse loss-fix batch.** `a:br`/`a:fld` (§3.i), `mc:AlternateContent` Fallback descent (§3.u),
   `p:cxnSp` (§3.t), non-table graphicFrame rect capture (§3.s), `ea`/`cs` fonts + `u`/`strike` (§3.h),
   `ln` width/dash (§3.l), `tblGrid` widths (§3.p). Effort **M** (many S items). Prereq: none (parse-only).
   **Green:** Rust parse tests assert each new field from synthesized XML; a deck with `a:br` round-trips
   both lines through `to_pdf` → `get_text`; a cxnSp deck yields a visible stroked line (drawings
   read-back); CJK run with only `a:ea` typeface resolves a CJK font (no `?` glyphs in read-back).
+  · **状态**: done。
 - **B-4 · Drawing fidelity: autoshapes + pictures.** prstGeom subset via TS-6 + `avLst` adjusts (§3.j),
   `rot`/`flipH`/`flipV` (§3.d), `Fill` enum with `noFill` (§3.m), stroke props, picture `srcRect`/
   stretch (§3.n), chart/SmartArt placeholder boxes. Effort **L**. Prereq: TS-6.
   **Green:** rotated-45° textbox's `get_text_words` center within 1 pt of the rect center; images
   survive via `extractIMGINFO`; roundRect-with-adjust raster differs from default-adjust raster
   (SSIM < 1.0 between them, both non-blank); unknown preset emits exactly one `PresetFallback` warning.
+  · **状态**: done。
 - **B-5 · Group transforms.** `Group{rect, child_rect, …}` + `(child − chOff)·(ext/chExt) + off`
   nested remap in ppt-render (§3.e). Effort **M**.
   **Green:** a grouped-and-scaled textbox deck and its pre-flattened ungrouped twin produce
   `get_text_words` coordinates equal within 1 pt; nested-group fixture included.
+  · **状态**: done。
 - **B-6 · Text-box + paragraph fidelity.** `bodyPr` anchor/insets/wrap/`normAutofit@fontScale`
   applied-as-stored, `spAutoFit` = no-op (§3.f); `pPr` lnSpc (multiple + exact)/spcBef/spcAft/
   marL/indent/bullets/`defRPr` (§3.g). Effort **L**. Prereq: TS-5 props surface.
   **Green:** bottom-anchored box's last-line word baseline within 1 pt of `rect.bottom − bIns`;
   `buChar` bullet glyph and `buAutoNum` "1." both present in read-back text; `lnSpc spcPct=200%`
   doubles inter-line word-y delta within 5%.
+  · **状态**: 基本 done(spcPct 段距已接、纵排降级为水平 + 告警);依赖引擎测量的内容自适应行高
+  (重算式 autofit)未做,留引擎批次。
 - **B-7 · Tables.** Absolute cell x from `tblGrid`, borders as per-side lines, fills, margins, anchor
   (§3.p/q). Effort **M**.
   **Green:** each cell's first word x within 1 pt of accumulated `gridCol` widths + margin; border
   lines present in `get_drawings` read-back at grid coordinates; merged-cell fixture renders no
   interior border inside the span.
+  · **状态**: done(表格网格 / 逐边框线 / 填充 / tcPr 内边距与锚定);按内容自适应增高依赖引擎测量,未做。
 - **B-8 · Theme subsystem.** Theme part parse, `clrScheme` + `clrMap`/`clrMapOvr`, transform math,
   `fontScheme` (+ea), `p:style` fillRef/lnRef/fontRef solid resolution (§3.b/c, §4.1). Effort **L**.
   **Green:** golden table of (schemeClr, transforms) → RGB passes within ±2/255 (values harvested from
   a PowerPoint/LO-rendered reference, sampled via `get_pixmap`); `+mn-lt` run resolves to the theme
   minor font; alpha fill produces an ExtGState (drawings read-back).
+  · **状态**: done(theme / clrScheme / clrMap / clrMapOvr / transforms / fontScheme + fillRef/lnRef/fontRef solid)。
 - **B-9 · Placeholder inheritance chain.** `ph` capture, layout/master part parse (reusing the
   `slide.rs` walker), `resolve()` + `ResolvedPresentation` (§4). Effort **L** (the largest item).
   **Green:** fixture where the slide title has **no xfrm and no rPr**: exported word bbox matches the
   layout's title rect within 1 pt and the read-back font size equals the master `titleStyle` lvl1 size
   (asserted at ResolvedSlide level too); lvl2 body bullet inherits the master bullet char; token-F1 &
   order ≥ 0.99 on the full placeholder deck.
+  · **状态**: done(占位符 `ph` 捕获 + layout/master 部件解析 + `resolve()` 终态 IR)。
 - **B-10 · Backgrounds.** `bg`/`bgPr` solid + picture, chain slide→layout→master, `bgRef` via theme;
   gradient degrades (§3.o). Effort **M**. Prereq: B-8, B-9.
   **Green:** corner-pixel sample of `get_pixmap` equals the background RGB within ±2/255; gradient bg
   emits one `GradientDegraded` warning and a non-blank page.
+  · **状态**: done(背景 slide→layout→master + `bgRef`;gradient 降级告警)。
 - **B-11 · GA hardening + family-stack gate.** Warning-surfacing audit (one `warnings.warn` per unique
   kind), `font_map` override test, README capability rows, local real-deck corpus (gitignored)
   spot-check. Effort **M**.
@@ -360,6 +371,7 @@ chain (B-8/B-9) lands later but **before GA**. Each task: why · effort · engin
   LibreOffice oracle SSIM in the 0.80–0.90 band via `render_diff.py` `ssim`:242-281 (never CI);
   (4) follow-up: committed `.ssimref` refs at `--min-ssim 0.97` per pdfspine
   `.github/workflows/ci.yml:189-194` once renders stabilize.
+  · **状态**: done(告警逐种类上浮、`font_map` 覆盖、README 能力表)。
 
 ---
 

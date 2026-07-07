@@ -25,9 +25,11 @@ Spine 家族成员之一:**纯 Rust 的 PowerPoint(.pptx / OOXML)结构化解析
 
 - **`../pdfspine/` 只读。** 另一个 agent 正在改它。可读它学模式(PyO3 chokepoint / 工作区布局),
   但**绝不**写入或修改 pdfspine 里的**任何**文件。
-- **依赖 `../ocrspine`(path 依赖)。** 在 `[workspace.dependencies]` 里一次性声明
-  `ocrspine = { path = "../ocrspine" }`,`ppt-ocr` 用 `ocrspine.workspace = true`,避免逐 crate
-  算相对路径。
+- **姊妹 crate 走 git dep(非 path)。** 在 `[workspace.dependencies]` 里一次性声明
+  `ocrspine = { git = "https://github.com/VoldemortGin/ocrspine", rev = "732975f0…" }`
+  (pdf-typeset 同理:`{ git = "https://github.com/VoldemortGin/pdfspine", rev = "…" }`);
+  `ppt-ocr` 用 `ocrspine.workspace = true`、`ppt-render` 用 `pdf-typeset.workspace = true`,
+  避免逐 crate 算相对路径。
 
 ## 模块地图(按 crate 定位)
 
@@ -43,6 +45,11 @@ crates/
     src/xml/       quick-xml walker:presentation.rs(尺寸+顺序) slide.rs(spTree -> Shape)
   ppt-ocr/     图片 OCR 桥:把 ocrspine 套到嵌入图片上。本轮薄但可用。#![forbid(unsafe_code)]
     src/lib.rs     ocr_image_bytes / PptOcr{engine} + reconstruct_table_from_image(stub)
+  ppt-render/  终态 IR -> PDF:逐 slide 一页,经共享 pdf-typeset 引擎(pdfspine Phase A)。#![forbid(unsafe_code)]
+    src/lib.rs       render_pdf(pres,media,opts)->ExportResult:逐 slide 装配 / 背景 / 表格网格 / font_map 应用
+    src/text.rs      ResolvedTextFrame 段落/run -> TS-5 绝对定位文本框(锚定/内边距/换行/项目符号/行距)
+    src/shapes.rs    自选图形 / 连接线 / 图片 / 图表占位 -> 引擎 op
+    src/transform.rs 组合仿射(chOff/chExt 重映射,B-5)
   py-bindings/ PyO3 _core 扩展。唯一用 unsafe(经 PyO3)的 crate。#![deny(unsafe_op_in_unsafe_fn)]
     src/lib.rs     open -> Presentation handle;Slide.shapes() -> list[dict];ocr_image;异常层级
 ```
@@ -52,11 +59,11 @@ crates/
 ```bash
 uv venv .venv
 VIRTUAL_ENV="$(pwd)/.venv" uv pip install maturin pytest
-cargo build --workspace --release      # 期望编译干净(ocrspine 一并编译,首次较慢)
+cargo build --workspace --release      # 期望编译干净(ocrspine + pdf-typeset 均 git dep,一并编译,首次较慢)
 OCRSPINE_MODELS="$(cd ../ocrspine && pwd)/models" \
   VIRTUAL_ENV="$(pwd)/.venv" .venv/bin/maturin develop --release
 OCRSPINE_MODELS="$(cd ../ocrspine && pwd)/models" \
-  .venv/bin/python -m pytest python/tests -q   # 解析测试必过;OCR 测试需 models env
+  .venv/bin/python -m pytest python/tests -q   # 解析测试必过;OCR 测试需 models env;PDF 导出读回测试需 venv 里 `pip install pdfspine`
 ```
 
 ## 约定

@@ -129,5 +129,4 @@ crates/
 - Image-table geometry reconstruction from OCR boxes
   (`ppt_ocr::reconstruct_table_from_image`, currently a typed `Unsupported`
   stub).
-- Richer color models (theme/scheme colors, gradients), hyperlinks, charts,
-  SmartArt, comments.
+- Richer color models (gradients), hyperlinks, charts, SmartArt, comments.
