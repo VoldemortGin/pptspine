@@ -82,12 +82,14 @@ fn line_spacing_of(s: Spacing) -> LineSpacing {
     }
 }
 
-/// 段前 / 段后距(pt)。`spcPts` 直用;`spcPct`(行高百分比)缺字号上下文,v1 忽略
-/// (真实 deck 的段距压倒性用 `spcPts`)。
-fn space_pts(s: Option<Spacing>) -> f64 {
+/// 段前 / 段后距(pt)。`spcPts` 直用点值;`spcPct` 按 ECMA-376"相对字号的百分比"
+/// 换算:`space = (spcPct / 100000) * font_size_pt`。代表字号由调用方传入(约定取
+/// 段落首个 run 的字号;详见 [`paragraph_block`])。
+fn space_pts(s: Option<Spacing>, font_size_pt: f32) -> f64 {
     match s {
         Some(Spacing::Pts(p)) => f64::from(p),
-        _ => 0.0,
+        Some(Spacing::Pct(n)) => (n as f64 / 100_000.0) * f64::from(font_size_pt),
+        None => 0.0,
     }
 }
 
@@ -98,8 +100,15 @@ fn paragraph_block(para: &ResolvedParagraph, counters: &mut AutoNumCounters) -> 
     if let Some(s) = para.ln_spc {
         props.spacing = line_spacing_of(s);
     }
-    props.space_before = space_pts(para.spc_bef);
-    props.space_after = space_pts(para.spc_aft);
+    // 代表字号:`spcPct` 段距按"相对字号的百分比"换算,约定用段落首个 run 的
+    // 字号(无 run 时兜底 DEFAULT_FONT_SIZE_PT = 18.0)。
+    let rep_size = para
+        .runs
+        .first()
+        .map(|r| r.size_pt)
+        .unwrap_or(ppt_core::resolved::DEFAULT_FONT_SIZE_PT);
+    props.space_before = space_pts(para.spc_bef, rep_size);
+    props.space_after = space_pts(para.spc_aft, rep_size);
 
     let mar_l = para.mar_l.map(emu_to_points).unwrap_or(0.0);
     let indent = para.indent.map(emu_to_points).unwrap_or(0.0);
@@ -343,6 +352,18 @@ mod tests {
         let mut d = AutoNumCounters::default();
         assert_eq!(d.next(0, Some(5)), 5);
         assert_eq!(d.next(0, Some(5)), 6);
+    }
+
+    #[test]
+    fn space_pct_scales_with_font_size() {
+        let approx = |a: f64, b: f64| (a - b).abs() < 1e-6;
+        // spcPct 相对代表字号换算:50% × 20pt = 10pt;100% × 20pt = 20pt。
+        assert!(approx(space_pts(Some(Spacing::Pct(50_000)), 20.0), 10.0));
+        assert!(approx(space_pts(Some(Spacing::Pct(100_000)), 20.0), 20.0));
+        // spcPts 直用点值,不受字号影响。
+        assert!(approx(space_pts(Some(Spacing::Pts(12.0)), 20.0), 12.0));
+        // 无声明 → 0。
+        assert!(approx(space_pts(None, 20.0), 0.0));
     }
 
     #[test]

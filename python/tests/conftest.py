@@ -1116,3 +1116,194 @@ _NESTED_TWIN_SLIDE = f"""<p:sp>
 def nested_group_pptx() -> tuple[bytes, bytes]:
     """B-5 嵌套门:``(nested_pptx, flattened_twin_pptx)``。"""
     return build_sp_tree_pptx(_NESTED_SLIDE), build_sp_tree_pptx(_NESTED_TWIN_SLIDE)
+
+
+# --- B-6 fixture(PRD-PDF-EXPORT §8 B-6:锚定 / 行距 / 项目符号)-------------------
+#
+# B-6.1 底锚:``anchor="b"`` 单行文本框 + 同尺寸顶锚孪生(内容块底贴内容矩形底)。
+# B-6.2 行距:同段两行(``a:br`` 硬换行),``lnSpc`` 100% 与 200% 两 deck(行距翻倍)。
+# B-6.3 项目符号:``buChar`` '•' + ``buAutoNum`` arabicPeriod '1.' 读回可见。
+
+# 底锚文本框:显式矩形 off(914400,914400)=72,72pt、ext(4572000,1828800)=360,144pt。
+_B6_ANCHOR_RECT_EMU = (914_400, 914_400, 4_572_000, 1_828_800)
+
+
+def _anchored_textbox_slide(anchor: str) -> str:
+    x, y, w, h = _B6_ANCHOR_RECT_EMU
+    # "Anchor" 无降部字形——但 get_text_words 的 bbox 仍取字体行盒(ascent→descent)。
+    return f"""<p:sp>
+        <p:spPr>
+          <a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{w}" cy="{h}"/></a:xfrm>
+        </p:spPr>
+        <p:txBody>
+          <a:bodyPr anchor="{anchor}"/>
+          <a:p><a:r><a:rPr sz="2000"><a:latin typeface="Arial"/></a:rPr><a:t>Anchor</a:t></a:r></a:p>
+        </p:txBody>
+      </p:sp>"""
+
+
+@pytest.fixture(scope="session")
+def anchored_textbox_pptx() -> tuple[bytes, bytes, tuple[int, int, int, int]]:
+    """B-6 锚定门:``(bottom_anchor_pptx, top_anchor_pptx, rect_emu)``。"""
+    return (
+        build_sp_tree_pptx(_anchored_textbox_slide("b")),
+        build_sp_tree_pptx(_anchored_textbox_slide("t")),
+        _B6_ANCHOR_RECT_EMU,
+    )
+
+
+def _line_spacing_slide(pct: str) -> str:
+    # 同一段落两行(a:br 硬换行);Alpha 在行 1、Beta 在行 2,便于逐词测 y。
+    return f"""<p:sp>
+        <p:spPr>
+          <a:xfrm><a:off x="914400" y="914400"/><a:ext cx="4572000" cy="1828800"/></a:xfrm>
+        </p:spPr>
+        <p:txBody>
+          <a:bodyPr/>
+          <a:p>
+            <a:pPr><a:lnSpc><a:spcPct val="{pct}"/></a:lnSpc></a:pPr>
+            <a:r><a:rPr sz="2000"><a:latin typeface="Arial"/></a:rPr><a:t>Alpha</a:t></a:r>
+            <a:br/>
+            <a:r><a:rPr sz="2000"><a:latin typeface="Arial"/></a:rPr><a:t>Beta</a:t></a:r>
+          </a:p>
+        </p:txBody>
+      </p:sp>"""
+
+
+@pytest.fixture(scope="session")
+def line_spacing_pptx() -> tuple[bytes, bytes]:
+    """B-6 行距门:``(lnspc_100_pptx, lnspc_200_pptx)``(同段两行,a:br 硬换行)。"""
+    return (
+        build_sp_tree_pptx(_line_spacing_slide("100000")),
+        build_sp_tree_pptx(_line_spacing_slide("200000")),
+    )
+
+
+# 正文文本框:段 1 buChar '•' + 段 2 buAutoNum arabicPeriod(首号 '1.')。
+_BULLET_TEXTBOX = """<p:sp>
+        <p:spPr>
+          <a:xfrm><a:off x="914400" y="914400"/><a:ext cx="4572000" cy="1828800"/></a:xfrm>
+        </p:spPr>
+        <p:txBody>
+          <a:bodyPr/>
+          <a:p>
+            <a:pPr marL="342900" indent="-342900"><a:buFont typeface="Arial"/><a:buChar char="&#8226;"/></a:pPr>
+            <a:r><a:rPr sz="2000"><a:latin typeface="Arial"/></a:rPr><a:t>First item</a:t></a:r>
+          </a:p>
+          <a:p>
+            <a:pPr marL="342900" indent="-342900"><a:buAutoNum type="arabicPeriod"/></a:pPr>
+            <a:r><a:rPr sz="2000"><a:latin typeface="Arial"/></a:rPr><a:t>Second item</a:t></a:r>
+          </a:p>
+        </p:txBody>
+      </p:sp>"""
+
+
+@pytest.fixture(scope="session")
+def bulleted_textbox_pptx_bytes() -> bytes:
+    """B-6 项目符号门:buChar '•' + buAutoNum arabicPeriod '1.' 两段正文。"""
+    return build_sp_tree_pptx(_BULLET_TEXTBOX)
+
+
+# --- B-7 fixture(PRD-PDF-EXPORT §8 B-7:表格几何 / 边框 / 合并)-------------------
+#
+# 列宽之和 == 表 ext cx(消除比例缩放歧义):列边界 pt = off_x + 累积列宽 pt。
+# B-7.1 每格首词 x;B-7.2 tcBorders 网格线可见;B-7.3 合并格内部无竖直边框。
+
+_B7_TABLE_OFF = (914_400, 1_828_800)  # 72,144 pt
+_B7_TABLE_CY = 741_680  # 58.4 pt(单行占满表高)
+_B7_COL_WIDTHS = (2_286_000, 1_143_000, 1_143_000)  # 180,90,90 pt;和 = ext cx
+_B7_CELL_TEXTS = ("Aaa", "Bbb", "Ccc")
+_B7_MERGE_COLS = (2_286_000, 1_143_000)  # 180,90 pt(合并 / 反衬用)
+
+# 四边红实线 tcBorders(w=12700=1pt、srgbClr FF0000)。
+_B7_TC_BORDER = (
+    "<a:tcPr>"
+    '<a:lnL w="12700"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:lnL>'
+    '<a:lnR w="12700"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:lnR>'
+    '<a:lnT w="12700"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:lnT>'
+    '<a:lnB w="12700"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:lnB>'
+    "</a:tcPr>"
+)
+
+
+def _table_cell(text: str, border: str = "", extra_attr: str = "") -> str:
+    body = (
+        f'<a:txBody><a:p><a:r><a:rPr sz="1400"><a:latin typeface="Arial"/></a:rPr>'
+        f"<a:t>{text}</a:t></a:r></a:p></a:txBody>"
+        if text
+        else "<a:txBody><a:p/></a:txBody>"
+    )
+    return f"<a:tc{extra_attr}>{body}{border}</a:tc>"
+
+
+def _table_frame(
+    off: tuple[int, int], ext_cx: int, ext_cy: int, col_widths: tuple[int, ...], row_inner: str
+) -> str:
+    ox, oy = off
+    grid = "".join(f'<a:gridCol w="{w}"/>' for w in col_widths)
+    return f"""<p:graphicFrame>
+        <p:xfrm><a:off x="{ox}" y="{oy}"/><a:ext cx="{ext_cx}" cy="{ext_cy}"/></p:xfrm>
+        <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table">
+          <a:tbl>
+            <a:tblGrid>{grid}</a:tblGrid>
+            <a:tr h="370840">{row_inner}</a:tr>
+          </a:tbl>
+        </a:graphicData></a:graphic>
+      </p:graphicFrame>"""
+
+
+@pytest.fixture(scope="session")
+def grid_table_pptx() -> tuple[bytes, tuple[int, int], tuple[int, ...], int, tuple[str, ...]]:
+    """B-7.1/B-7.2 表格门:``(pptx, off_emu, col_widths_emu, ext_cy_emu, cell_texts)``。
+
+    单行三列,列宽之和 == 表 ext cx(免比例缩放),每格四边 tcBorders 红实线、首词可区分。
+    """
+    ext_cx = sum(_B7_COL_WIDTHS)
+    row = "".join(_table_cell(t, _B7_TC_BORDER) for t in _B7_CELL_TEXTS)
+    pptx = build_sp_tree_pptx(
+        _table_frame(_B7_TABLE_OFF, ext_cx, _B7_TABLE_CY, _B7_COL_WIDTHS, row)
+    )
+    return pptx, _B7_TABLE_OFF, _B7_COL_WIDTHS, _B7_TABLE_CY, _B7_CELL_TEXTS
+
+
+@pytest.fixture(scope="session")
+def merged_border_table_pptx() -> tuple[bytes, bytes, tuple[int, int], tuple[int, ...], int]:
+    """B-7.3 合并门:``(merged_pptx, plain_pptx, off_emu, col_widths_emu, ext_cy_emu)``。
+
+    merged:一行 gridSpan=2 跨列格(+ 其后 hMerge 延续格),四边 tcBorders;
+    plain:同尺寸不合并双列行(各格四边 tcBorders),反衬合并格内部无竖直分隔线。
+    """
+    ext_cx = sum(_B7_MERGE_COLS)
+    merged_row = _table_cell("Merged", _B7_TC_BORDER, ' gridSpan="2"') + _table_cell(
+        "", extra_attr=' hMerge="1"'
+    )
+    plain_row = _table_cell("Left", _B7_TC_BORDER) + _table_cell("Right", _B7_TC_BORDER)
+    merged = build_sp_tree_pptx(
+        _table_frame(_B7_TABLE_OFF, ext_cx, _B7_TABLE_CY, _B7_MERGE_COLS, merged_row)
+    )
+    plain = build_sp_tree_pptx(
+        _table_frame(_B7_TABLE_OFF, ext_cx, _B7_TABLE_CY, _B7_MERGE_COLS, plain_row)
+    )
+    return merged, plain, _B7_TABLE_OFF, _B7_MERGE_COLS, _B7_TABLE_CY
+
+
+# --- 纵排告警 fixture(Task 4 / PRD §6:bodyPr@vert 水平降级,告警逐种类一次)-----
+
+
+def _vertical_textbox_slide(x: int, text: str) -> str:
+    return f"""<p:sp>
+        <p:spPr><a:xfrm><a:off x="{x}" y="914400"/><a:ext cx="1828800" cy="2743200"/></a:xfrm></p:spPr>
+        <p:txBody>
+          <a:bodyPr vert="vert270"/>
+          <a:p><a:r><a:rPr sz="2000"><a:latin typeface="Arial"/></a:rPr><a:t>{text}</a:t></a:r></a:p>
+        </p:txBody>
+      </p:sp>"""
+
+
+@pytest.fixture(scope="session")
+def vertical_text_pptx_bytes() -> bytes:
+    """两个 ``bodyPr@vert=vert270`` 纵排文本框的合成 ``.pptx``(告警逐种类一次)。"""
+    return build_sp_tree_pptx(
+        _vertical_textbox_slide(914_400, "Vertical one")
+        + _vertical_textbox_slide(3_657_600, "Vertical two")
+    )

@@ -412,3 +412,195 @@ def test_b5_nested_groups_match_flattened_twin(
 ) -> None:
     nested, twin = nested_group_pptx
     _assert_words_match(_export(nested)[0], _export(twin)[0])
+
+
+# --- B-6:文本框锚定 / 行距 / 项目符号 --------------------------------------------
+
+# Liberation Sans 度量(font units,em=2048):ascent 1854、descent 434、hhea lineGap 67。
+_ASCENT, _DESCENT, _LINE_GAP, _EM = 1854, 434, 67, 2048
+
+
+def test_b6_bottom_anchor_content_bottom_aligned(
+    anchored_textbox_pptx: tuple[bytes, bytes, tuple[int, int, int, int]],
+) -> None:
+    """底锚:内容块底(行盒降部线)贴内容矩形底 ≤1pt;基线 = 内容底 − descent。
+
+    实测:get_text_words 的 bbox 底 y1 = 字体行盒降部线(与实际字形无关、恒定),
+    引擎把该行盒底对齐到内容矩形底(rect.bottom − bIns),误差 0。故最后一行**基线**
+    落在内容底上方 descent 处(descent = 434/2048×size)。
+    """
+    bottom_pptx, top_pptx, (ex, ey, ew, eh) = anchored_textbox_pptx
+    size = 20.0
+    descent = _DESCENT / _EM * size  # 4.238 pt @20pt
+    content_bottom = (ey + eh) / EMU_PER_PT - INSET_TB  # rect.bottom − bIns = 212.4
+
+    pdf_b, _ = _export(bottom_pptx)
+    words_b = _open_pdf(pdf_b)[0].get_text("words")
+    assert words_b, "expected extractable words"
+    y1_b = max(w[3] for w in words_b)
+    # 主断言:行盒底(降部线)对齐内容底 ≤1pt。
+    assert y1_b == pytest.approx(content_bottom, abs=1.0)
+    # 度量派生:最后一行基线在内容底上方 descent 处。
+    baseline_b = y1_b - descent
+    assert baseline_b == pytest.approx(content_bottom - descent, abs=1.0)
+
+    # 方向性:底锚词顶明显低于同尺寸顶锚孪生(位移 ≈ 盒内高 − 行高 量级)。
+    pdf_t, _ = _export(top_pptx)
+    words_t = _open_pdf(pdf_t)[0].get_text("words")
+    assert words_t, "expected extractable words"
+    y0_b = min(w[1] for w in words_b)
+    y0_t = min(w[1] for w in words_t)
+    line_h = (_ASCENT + _DESCENT + _LINE_GAP) / _EM * size  # 行盒高(含 lineGap ≈ 23 pt)
+    box_interior = eh / EMU_PER_PT - 2 * INSET_TB           # 136.8 pt
+    assert y0_b - y0_t > box_interior - 2 * line_h, "bottom anchor must drop the line by ~box height"
+
+
+def test_b6_line_spacing_doubles_gap(line_spacing_pptx: tuple[bytes, bytes]) -> None:
+    """lnSpc 200% 的行间词 y 差 ≈ 2× 100%(±5%)。"""
+    pptx_100, pptx_200 = line_spacing_pptx
+
+    def line_gap(pptx: bytes) -> float:
+        words = _open_pdf(_export(pptx)[0])[0].get_text("words")
+        y = {w[4]: w[1] for w in words}
+        assert "Alpha" in y and "Beta" in y, f"missing line words: {sorted(y)}"
+        return y["Beta"] - y["Alpha"]
+
+    delta100 = line_gap(pptx_100)
+    delta200 = line_gap(pptx_200)
+    assert delta100 > 0
+    assert delta200 == pytest.approx(2 * delta100, rel=0.05)
+
+
+def test_b6_bullet_and_autonum_readback(bulleted_textbox_pptx_bytes: bytes) -> None:
+    """buChar '•' 与 buAutoNum arabicPeriod '1.' 均作为可提取文本落在读回里。"""
+    pdf, _ = _export(bulleted_textbox_pptx_bytes)
+    text = _open_pdf(pdf)[0].get_text()
+    assert "•" in text, f"buChar bullet missing: {text!r}"
+    assert "1." in text, f"buAutoNum arabicPeriod first number '1.' missing: {text!r}"
+
+
+# --- B-7:表格几何 / 网格边框 / 合并格 --------------------------------------------
+
+
+def _line_segments(page) -> tuple[list, list]:
+    """从 ``get_drawings()`` 收集水平 / 竖直线段:``(horizontals, verticals)``。
+
+    每条归一为 ``(const_coord, lo, hi)``:水平线 = ``(y, x_lo, x_hi)``、竖直线 = ``(x, y_lo, y_hi)``。
+    """
+    horizontals: list = []
+    verticals: list = []
+    for d in page.get_drawings():
+        for it in d.get("items", []):
+            if it[0] != "l":
+                continue
+            p1, p2 = it[1], it[2]
+            if abs(p1.y - p2.y) < 0.5:
+                horizontals.append((p1.y, min(p1.x, p2.x), max(p1.x, p2.x)))
+            elif abs(p1.x - p2.x) < 0.5:
+                verticals.append((p1.x, min(p1.y, p2.y), max(p1.y, p2.y)))
+    return horizontals, verticals
+
+
+def test_b7_cell_first_word_x_within_1pt(
+    grid_table_pptx: tuple[bytes, tuple[int, int], tuple[int, ...], int, tuple[str, ...]],
+) -> None:
+    """每格首词 x0 = off_x + 累积列宽 + mar_l(缺省 91440 EMU=7.2pt),逐格 ≤1pt 门。"""
+    pptx, (off_x, _off_y), col_widths, _cy, cell_texts = grid_table_pptx
+    pdf, _ = _export(pptx)
+    words = _open_pdf(pdf)[0].get_text("words")
+    first_x = {w[4]: w[0] for w in words}
+
+    off_x_pt = off_x / EMU_PER_PT
+    cum = 0
+    for i, text in enumerate(cell_texts):
+        assert text in first_x, f"cell word {text!r} missing: {sorted(first_x)}"
+        expected = off_x_pt + cum / EMU_PER_PT + INSET_LR  # INSET_LR == mar_l 缺省 7.2pt
+        assert first_x[text] == pytest.approx(expected, abs=1.0), (
+            f"cell {i} {text!r}: x0={first_x[text]} expected≈{expected}"
+        )
+        cum += col_widths[i]
+
+
+def test_b7_grid_borders_visible(
+    grid_table_pptx: tuple[bytes, tuple[int, int], tuple[int, ...], int, tuple[str, ...]],
+) -> None:
+    """tcBorders → get_drawings() 出现落在网格坐标上的红色边框线段(1–2pt 容差)。"""
+    pptx, (off_x, off_y), col_widths, ext_cy, _texts = grid_table_pptx
+    pdf, _ = _export(pptx)
+    page = _open_pdf(pdf)[0]
+    horizontals, verticals = _line_segments(page)
+    assert horizontals and verticals, "expected border line segments"
+
+    row_top = off_y / EMU_PER_PT                # 144
+    row_bottom = (off_y + ext_cy) / EMU_PER_PT  # 202.4
+    left_x = off_x / EMU_PER_PT                  # 首格左界 72
+    boundary_x = left_x + col_widths[0] / EMU_PER_PT  # 首列右界 252
+
+    # 首列右界处存在贯穿整行的竖直边框线。
+    assert any(
+        abs(x - boundary_x) <= 2.0 and lo <= row_top + 2.0 and hi >= row_bottom - 2.0
+        for (x, lo, hi) in verticals
+    ), f"no vertical border at col boundary x={boundary_x}: {sorted(set(verticals))}"
+
+    # 行顶存在覆盖首格 x 区间的水平边框线。
+    assert any(
+        abs(y - row_top) <= 2.0 and lo <= left_x + 2.0 and hi >= boundary_x - 2.0
+        for (y, lo, hi) in horizontals
+    ), f"no horizontal border at row top y={row_top}: {sorted(set(horizontals))}"
+
+    # 边框描边为红色(FF0000)。
+    red = [
+        d
+        for d in page.get_drawings()
+        if d.get("color") and tuple(round(c, 3) for c in d["color"]) == (1.0, 0.0, 0.0)
+    ]
+    assert red, "expected red-stroked border drawings"
+
+
+def test_b7_merged_cell_has_no_internal_border(
+    merged_border_table_pptx: tuple[bytes, bytes, tuple[int, int], tuple[int, ...], int],
+) -> None:
+    """gridSpan=2 跨列格:内部列边界无竖直边框(仅外框);不合并双列行则有内部竖线。"""
+    merged_pptx, plain_pptx, (off_x, off_y), col_widths, ext_cy = merged_border_table_pptx
+    row_top = off_y / EMU_PER_PT
+    row_bottom = (off_y + ext_cy) / EMU_PER_PT
+    left_x = off_x / EMU_PER_PT                                 # 72
+    internal_x = left_x + col_widths[0] / EMU_PER_PT            # 内部列边界 252
+    right_x = left_x + sum(col_widths) / EMU_PER_PT             # 外框右界 342
+
+    def verticals_at(pptx: bytes, x_target: float) -> list:
+        _, verticals = _line_segments(_open_pdf(_export(pptx)[0])[0])
+        return [
+            (x, lo, hi)
+            for (x, lo, hi) in verticals
+            if abs(x - x_target) <= 1.5 and lo <= row_top + 2.0 and hi >= row_bottom - 2.0
+        ]
+
+    # 合并格:内部列边界无竖线,但外框(左 / 右)仍有竖线。
+    assert not verticals_at(merged_pptx, internal_x), "merged span must omit the inner divider"
+    assert verticals_at(merged_pptx, left_x), "merged span keeps its outer left border"
+    assert verticals_at(merged_pptx, right_x), "merged span keeps its outer right border"
+
+    # 反衬:同尺寸不合并双列行在同一内部边界处**有**竖直分隔线。
+    assert verticals_at(plain_pptx, internal_x), "unmerged row must draw the inner divider"
+
+
+# --- 纵排告警(Task 4 / PRD §6:bodyPr@vert 水平降级,逐种类一次)------------------
+
+
+def test_vertical_text_warns_once_and_stays_horizontal(
+    vertical_text_pptx_bytes: bytes,
+) -> None:
+    """两个 bodyPr@vert 纵排框:'vertical-text' 告警恰 1 条;文字仍水平可提取(降级非丢弃)。"""
+    pres = pptspine.open_bytes(vertical_text_pptx_bytes)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        pdf = pres.to_pdf()
+    assert pdf.startswith(b"%PDF-")
+    vertical_warnings = [w for w in caught if "vertical-text" in str(w.message)]
+    # 两个纵排框同种类只上浮一次。
+    assert len(vertical_warnings) == 1
+    # 水平降级:文字仍以水平行可提取(未丢弃)。
+    text = _open_pdf(pdf)[0].get_text()
+    assert "Vertical one" in text
+    assert "Vertical two" in text

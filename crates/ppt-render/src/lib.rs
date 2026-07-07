@@ -10,9 +10,9 @@
 //! 本批覆盖:空白页装配 + 显式几何文本框(B-1/B-2)+ 预设形状底 fill/stroke +
 //! xfrm rot/flip 与 avLst 调整值 + prstDash 虚线 + 图片放置(srcRect/fillRect)
 //! (B-4)+ 组合仿射(B-5)+ 图表/SmartArt 占位框 + bodyPr 锚定/内边距/换行/
-//! normAutofit 字号缩放(B-6)+ 表格网格/填充/文字/逐边框线(B-7)+ 幻灯片背景
-//! 含 layout/master 继承(B-10,继承在 `ppt-parse::resolve` 终态化)。**后续**:
-//! tcPr 边框/内边距解析。
+//! normAutofit 字号缩放(B-6)+ 表格网格/填充/文字/逐边框线(含 tcPr 边框/内边距/
+//! 锚定,B-7)+ 幻灯片背景含 layout/master 继承(B-10,继承在 `ppt-parse::resolve`
+//! 终态化)。
 
 mod shapes;
 mod text;
@@ -66,6 +66,7 @@ pub fn render_pdf(
         media,
         image_ids: BTreeMap::new(),
         warnings: Vec::new(),
+        vertical_warned: false,
     };
     let pages: Vec<PageOps> = pres
         .slides
@@ -90,6 +91,8 @@ struct RenderCtx<'a> {
     media: &'a BTreeMap<String, Vec<u8>>,
     image_ids: BTreeMap<String, Option<usize>>,
     warnings: Vec<ExportWarning>,
+    /// 纵排文字降级告警的一次性开关(整篇 presentation 只发一条)。
+    vertical_warned: bool,
 }
 
 /// 一张 slide 的全部绘制 op(背景先铺,再 spTree 顺序 = 绘制顺序)。
@@ -173,6 +176,7 @@ fn background_ops(
 /// 翻转不镜像文字,PowerPoint 语义)。
 fn text_ops(
     ts: &mut Typesetter,
+    ctx: &mut RenderCtx<'_>,
     rect: Option<ppt_core::geom::Rect>,
     tf: &ppt_core::resolved::ResolvedTextFrame,
     flat: Flatten,
@@ -181,6 +185,15 @@ fn text_ops(
     let Some(rect) = rect else {
         return;
     };
+    // Task 4:纵排文字(bodyPr@vert)v1 仍按水平排版降级(不改 text_box_spec),
+    // 但一次性发出降级告警(整篇只一条)。
+    if tf.body.vertical && !ctx.vertical_warned {
+        ctx.warnings.push(ExportWarning::Custom {
+            kind: "vertical-text".into(),
+            detail: "纵排文字(bodyPr@vert)v1 水平降级".into(),
+        });
+        ctx.vertical_warned = true;
+    }
     let spec = text::text_box_spec(
         flat.map_emu_rect(rect),
         -tf.xfrm.rot_deg(),
@@ -202,11 +215,11 @@ fn shape_ops(
     ops: &mut Vec<Op>,
 ) {
     match shape {
-        ResolvedShape::TextBox(tf) => text_ops(ts, tf.rect, tf, flat, ops),
+        ResolvedShape::TextBox(tf) => text_ops(ts, ctx, tf.rect, tf, flat, ops),
         ResolvedShape::Auto(auto) => {
             shapes::auto_shape_ops(ctx, auto, flat, ops);
             if let Some(tf) = &auto.text {
-                text_ops(ts, tf.rect.or(auto.rect), tf, flat, ops);
+                text_ops(ts, ctx, tf.rect.or(auto.rect), tf, flat, ops);
             }
         }
         ResolvedShape::Connector(conn) => shapes::connector_ops(ctx, conn, flat, ops),
@@ -277,7 +290,9 @@ fn table_ops(
         acc += frac * table_w;
         xs.push(acc);
     }
-    // 行 y 边界:声明行高全在则按比例铺满,否则等分(内容测高属后续)。
+    // 行 y 边界:声明行高全在则按比例铺满,缺声明则等分。"按内容自适应增高"依赖
+    // 引擎文本测量(pdf-typeset 无公开测量 API,消费侧拿不到行高),属引擎批次
+    // (TS 侧),本层不做;此处保持声明值/等分的降级行为。
     let nrows = table.rows.len();
     let table_h = r.y1 - r.y0;
     let declared: Vec<Option<f64>> = table
@@ -328,7 +343,8 @@ fn table_ops(
     }
 }
 
-/// 单元格逐边框线(已解析的边;`tcBorders` 解析属后续,当前恒空)。
+/// 单元格逐边框线:边框已由解析层(`tcPr`/`tcBorders`)填充并终态化进
+/// `ResolvedCellBorders`,这里逐边(上/下/左/右)绘制。
 fn cell_border_ops(b: &ppt_core::resolved::ResolvedCellBorders, r: Rect, ops: &mut Vec<Op>) {
     let mut edge = |s: &Option<ppt_core::resolved::ResolvedStroke>, x1, y1, x2, y2| {
         if let Some(st) = s {
@@ -838,6 +854,145 @@ mod tests {
             "Deep",
         )]);
         assert_eq!(render(&outer).pdf, render(&twin).pdf);
+    }
+
+    /// Task 4:两个纵排文本框仍水平降级渲染,但降级告警**恰好一条**(一次性)。
+    #[test]
+    fn vertical_text_warns_exactly_once() {
+        let vtext = || {
+            ResolvedShape::TextBox(ResolvedTextFrame {
+                rect: Some(Rect::new(0, 0, 4_000_000, 3_000_000)),
+                xfrm: Xfrm::default(),
+                body: ppt_core::resolved::ResolvedBodyProps {
+                    vertical: true,
+                    ..Default::default()
+                },
+                paragraphs: vec![para("纵排")],
+            })
+        };
+        let out = render(&one_slide(vec![vtext(), vtext()]));
+        let n = out
+            .warnings
+            .iter()
+            .filter(|w| matches!(w, ExportWarning::Custom { kind, .. } if kind == "vertical-text"))
+            .count();
+        assert_eq!(n, 1, "纵排降级告警应恰好一条(一次性)");
+    }
+
+    /// 把真实 Liberation Serif TTF 的族名等长改写为独有的 "Zephyrmark Serif",
+    /// 造出一个 bundle/系统里都不存在的字体。改写同时覆盖 name 表的 ASCII 与
+    /// UTF-16BE 记录,长度不变故 offset/length 保持有效,ttf-parser 仍能解析。
+    fn rename_liberation(orig: &[u8]) -> Vec<u8> {
+        let mut out = orig.to_vec();
+        let replace_all = |buf: &mut Vec<u8>, pat: &[u8], rep: &[u8]| {
+            assert_eq!(pat.len(), rep.len());
+            let mut i = 0;
+            while i + pat.len() <= buf.len() {
+                if &buf[i..i + pat.len()] == pat {
+                    buf[i..i + pat.len()].copy_from_slice(rep);
+                    i += pat.len();
+                } else {
+                    i += 1;
+                }
+            }
+        };
+        let utf16be = |s: &str| -> Vec<u8> { s.encode_utf16().flat_map(u16::to_be_bytes).collect() };
+        replace_all(&mut out, b"Liberation", b"Zephyrmark"); // 各 10 字节
+        replace_all(&mut out, &utf16be("Liberation"), &utf16be("Zephyrmark"));
+        out
+    }
+
+    /// B-11 / Task 3:`apply_font_map` **文件路径分支**真的生效。
+    ///
+    /// 用真实 TTF(pdf-fonts 内置 Liberation Serif,族名改写成独有的
+    /// "Zephyrmark Serif")落到临时文件,证明:对照组(无 font_map)因该族缺失而
+    /// `FontSubstituted` 降级;实验组(font_map 指向该文件,走文件分支
+    /// `add_font_data`)请求直接命中——**无**该族的 `FontSubstituted`、PDF 里嵌入了
+    /// 注入字体的 PostScript 名、且与对照组字节不同。
+    ///
+    /// 备注:pdf-typeset 的 `with_system_fonts` **内置**全部 12 个 Liberation 面
+    /// (Sans/Serif/Mono),故原名 "Liberation Serif" 在任何机器上都可解析、注入同名
+    /// 字体是无差别 no-op;改写族名后才能干净地隔离出"文件注入前后"的差异,与本机
+    /// 是否装了某字体无关。
+    #[test]
+    fn font_map_file_branch_injects_and_hits() {
+        use pdf_fonts::liberation::{liberation_face, LiberationFamily};
+
+        let orig = liberation_face(LiberationFamily::Serif, false, false);
+        let renamed = rename_liberation(orig);
+        // 注入字体的自身 PostScript 名(去空格)——将出现在 PDF 的 FontDescriptor。
+        let ps_name = pdf_fonts::Font::from_program(&renamed, "x")
+            .expect("renamed face parses")
+            .name()
+            .replace(' ', ""); // "Zephyrmark Serif Regular" → "ZephyrmarkSerifRegular"
+        assert!(ps_name.starts_with("ZephyrmarkSerif"), "renamed name: {ps_name}");
+
+        let path = std::env::temp_dir().join(format!("ppt_render_fontmap_{}.ttf", std::process::id()));
+        std::fs::write(&path, &renamed).expect("write temp ttf");
+
+        // 请求独有族名 "Zephyrmark Serif" 的单文本框(拉丁文本走 run.font)。
+        let mk = || {
+            let mut r = run("Serif Body Text");
+            r.font = Some("Zephyrmark Serif".into());
+            let p = ResolvedParagraph {
+                level: 0,
+                align: None,
+                mar_l: None,
+                indent: None,
+                ln_spc: None,
+                spc_bef: None,
+                spc_aft: None,
+                bullet: ResolvedBullet::None,
+                runs: vec![r],
+            };
+            one_slide(vec![ResolvedShape::TextBox(ResolvedTextFrame {
+                rect: Some(Rect::new(914_400, 914_400, 4_572_000, 1_828_800)),
+                xfrm: Xfrm::default(),
+                body: ppt_core::resolved::ResolvedBodyProps::default(),
+                paragraphs: vec![p],
+            })])
+        };
+
+        // 对照组:无 font_map → 族缺失 → FontSubstituted 降级(requested 含该族名)。
+        let control = render(&mk());
+        assert!(
+            control.warnings.iter().any(|w| matches!(
+                w,
+                ExportWarning::FontSubstituted { requested, .. }
+                    if requested == "Zephyrmark Serif"
+            )),
+            "对照组应对缺失族发 FontSubstituted 降级,实测: {:?}",
+            control.warnings
+        );
+
+        // 实验组:font_map 指向真实文件 → 走文件分支 add_font_data → 请求命中。
+        let mut font_map = BTreeMap::new();
+        font_map.insert(
+            "Zephyrmark Serif".to_string(),
+            path.to_string_lossy().into_owned(),
+        );
+        let exp = render_pdf(&mk(), &BTreeMap::new(), &RenderOptions { font_map })
+            .expect("render with font_map");
+
+        // 1) 注入后不再对该族降级。
+        assert!(
+            !exp.warnings.iter().any(|w| matches!(
+                w,
+                ExportWarning::FontSubstituted { requested, .. }
+                    if requested == "Zephyrmark Serif"
+            )),
+            "实验组不应对已注入族发 FontSubstituted,实测: {:?}",
+            exp.warnings
+        );
+        // 2) PDF 嵌入了注入字体的 PostScript 名(硬证据:文件里的面真被用来排版)。
+        assert!(
+            String::from_utf8_lossy(&exp.pdf).contains("ZephyrmarkSerif"),
+            "实验组 PDF 应含注入字体的 PostScript 名 ZephyrmarkSerif"
+        );
+        // 3) 文件注入改变了输出(与对照组的 Liberation Sans 兜底不同字节)。
+        assert_ne!(exp.pdf, control.pdf, "文件分支注入应改变 PDF 字节");
+
+        let _ = std::fs::remove_file(&path);
     }
 
     /// 带旋转的组合退回 `Op::Group { transform }`:内容流出现 `cm`,且与不旋转不同。

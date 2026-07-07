@@ -1357,7 +1357,9 @@ fn cell_skeleton(e: &BytesStart) -> Cell {
         row_span,
         fill: None,
         merged,
-        // tcPr 内边距 / 锚定 / 逐边框线的解析属 B-7 后续;缺省在终态 IR 回填。
+        // 无 `a:tcPr` 时的缺省占位:内边距 / 锚定 / 逐边框线均置 None(表示无覆盖),
+        // 缺省在终态 IR 回填。解析本身已实现(tcpr_attrs / parse_tcpr_children);
+        // 有 `a:tcPr` 时由 parse_table_cell 的 apply_tcpr 覆盖这些 None。
         mar_l: None,
         mar_r: None,
         mar_t: None,
