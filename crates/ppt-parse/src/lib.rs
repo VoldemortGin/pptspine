@@ -11,7 +11,7 @@ mod zip_pkg;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use ppt_core::model::{Presentation, Shape, Slide};
+use ppt_core::model::{Background, Presentation, Shape, Slide};
 use ppt_core::style::{TextStyleLevels, TxStyles};
 use ppt_core::theme::{ClrMap, Theme};
 use ppt_core::{PptError, Result};
@@ -48,6 +48,8 @@ pub struct LayoutPart {
     pub clr_map_ovr: Option<ClrMap>,
     /// 所属母版裸名(经 layout rels)。
     pub master_name: Option<String>,
+    /// `p:cSld > p:bg`(B-10 继承链:slide 无 bg 时回退到此)。
+    pub background: Option<Background>,
 }
 
 /// 一个已解析的 slideMaster 部件。
@@ -60,6 +62,8 @@ pub struct MasterPart {
     pub tx_styles: Option<TxStyles>,
     /// 关联主题裸名(经 master rels)。
     pub theme_name: Option<String>,
+    /// `p:cSld > p:bg`(B-10 继承链:slide / layout 皆无 bg 时回退到此)。
+    pub background: Option<Background>,
 }
 
 /// 从磁盘路径解析一个 `.pptx`。
@@ -165,6 +169,7 @@ fn collect_inheritance(
                         shapes: data.shapes,
                         clr_map_ovr: data.clr_map_ovr,
                         master_name: pkg.master_name_for_layout(layout_name),
+                        background: data.background,
                     },
                 );
             }
@@ -186,6 +191,7 @@ fn collect_inheritance(
                         clr_map: data.clr_map,
                         tx_styles: data.tx_styles,
                         theme_name: pkg.theme_name_for_master(&master_name),
+                        background: data.background,
                     },
                 );
             }

@@ -233,6 +233,17 @@ def test_warnings_surface_once_per_kind(unknown_presets_pptx_bytes: bytes) -> No
     assert len(preset_warnings) == 1
 
 
+# --- B-10:背景 layout/master 继承端到端 --------------------------------------
+
+
+def test_b10_master_background_inherited_fills_full_page(
+    master_background_pptx_bytes: bytes,
+) -> None:
+    """slide / layout 均无 `p:bg` → 继承 slideMaster 的纯色背景,导出 PDF 满页填充。"""
+    pdf, _ = _export(master_background_pptx_bytes)
+    assert b"0 1 0 rg" in pdf, "master background green fill missing"
+
+
 # --- 端到端综合 deck:继承链 + 列表 + 预设形状 + 图片 ------------------------------
 
 

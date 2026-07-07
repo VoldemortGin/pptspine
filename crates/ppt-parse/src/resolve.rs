@@ -93,11 +93,15 @@ fn resolve_slide(slide: &Slide, inherit: &InheritanceParts) -> ResolvedSlide {
         tx_styles: master.and_then(|m| m.tx_styles.as_ref()),
         default_text_style: inherit.default_text_style.as_ref(),
     };
+    // B-10:背景继承链 slide → layout → master(第一个存在的赢,不逐字段合并)。
+    let background = slide
+        .background
+        .as_ref()
+        .or_else(|| layout.and_then(|l| l.background.as_ref()))
+        .or_else(|| master.and_then(|m| m.background.as_ref()));
     ResolvedSlide {
         index: slide.index,
-        // B-10:幻灯片自身背景(layout / master 背景继承需 LayoutPart/MasterPart
-        // 携带 background,属后续解析补齐)。
-        background: resolve_background(slide.background.as_ref(), &ctx),
+        background: resolve_background(background, &ctx),
         shapes: slide
             .shapes
             .iter()

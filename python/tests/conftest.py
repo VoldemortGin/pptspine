@@ -838,6 +838,62 @@ def build_e2e_pptx() -> bytes:
     )
 
 
+# --- B-10 背景继承(slide 无 bg → layout → master)端到端 fixture ----------------
+
+_MASTER_BG_SLIDE = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+       xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+       xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld><p:spTree/></p:cSld>
+</p:sld>"""
+
+_MASTER_BG_SLIDE_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+</Relationships>"""
+
+_MASTER_BG_LAYOUT = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldLayout xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+             xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+             xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld><p:spTree/></p:cSld>
+</p:sldLayout>"""
+
+_MASTER_BG_LAYOUT_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="../slideMasters/slideMaster1.xml"/>
+</Relationships>"""
+
+# 纯绿背景(00FF00),留待端到端断言其满页填充(clean 0/1 分量,内容流可直接 grep)。
+_MASTER_BG_MASTER = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldMaster xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+             xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+             xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:cSld>
+    <p:bg><p:bgPr><a:solidFill><a:srgbClr val="00FF00"/></a:solidFill></p:bgPr></p:bg>
+    <p:spTree/>
+  </p:cSld>
+</p:sldMaster>"""
+
+
+@pytest.fixture(scope="session")
+def master_background_pptx_bytes() -> bytes:
+    """slide / layout 均无 `p:bg`,slideMaster 带纯色背景(B-10 layout/master 继承门)。"""
+    return _zip_pptx(
+        {
+            "[Content_Types].xml": _CONTENT_TYPES,
+            "_rels/.rels": _ROOT_RELS,
+            "ppt/presentation.xml": _PRESENTATION,
+            "ppt/_rels/presentation.xml.rels": _PRESENTATION_RELS,
+            "ppt/slides/slide1.xml": _MASTER_BG_SLIDE,
+            "ppt/slides/_rels/slide1.xml.rels": _MASTER_BG_SLIDE_RELS,
+            "ppt/slideLayouts/slideLayout1.xml": _MASTER_BG_LAYOUT,
+            "ppt/slideLayouts/_rels/slideLayout1.xml.rels": _MASTER_BG_LAYOUT_RELS,
+            "ppt/slideMasters/slideMaster1.xml": _MASTER_BG_MASTER,
+        }
+    )
+
+
 # --- B-4 / B-5 fixture(PRD-PDF-EXPORT §8:形状变换 / Group 仿射)-----------------
 #
 # B-4:旋转 45° 文本框(词心 1 pt 门)、roundRect avLst 调整(光栅对照)、

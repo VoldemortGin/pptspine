@@ -11,7 +11,8 @@
 //! xfrm rot/flip 与 avLst 调整值 + prstDash 虚线 + 图片放置(srcRect/fillRect)
 //! (B-4)+ 组合仿射(B-5)+ 图表/SmartArt 占位框 + bodyPr 锚定/内边距/换行/
 //! normAutofit 字号缩放(B-6)+ 表格网格/填充/文字/逐边框线(B-7)+ 幻灯片背景
-//! (B-10)。**后续**:tcPr 边框/内边距解析、layout/master 背景继承。
+//! 含 layout/master 继承(B-10,继承在 `ppt-parse::resolve` 终态化)。**后续**:
+//! tcPr 边框/内边距解析。
 
 mod shapes;
 mod text;
@@ -100,7 +101,7 @@ fn slide_ops(
     height: f64,
 ) -> Vec<Op> {
     let mut ops = Vec::new();
-    // B-10:整页背景(slide 自身 `p:bg`;layout/master 继承属后续)。
+    // B-10:整页背景(`ResolvedSlide.background` 已含 slide → layout → master 继承)。
     if let Some(bg) = &slide.background {
         background_ops(ts, ctx, bg, width, height, &mut ops);
     }

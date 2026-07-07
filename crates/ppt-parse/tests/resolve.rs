@@ -177,6 +177,16 @@ fn slide_with(sp_tree_inner: &str, after_csld: &str) -> String {
 
 /// 把完整继承链部件打成内存 `.pptx`(presentation → slide → layout → master → theme)。
 fn build_deck(slide_xml: &str, presentation_extra: &str) -> Vec<u8> {
+    build_deck_parts(slide_xml, presentation_extra, &layout1(), &master1())
+}
+
+/// 同 [`build_deck`],但 layout / master XML 可自定义(背景继承测试用)。
+fn build_deck_parts(
+    slide_xml: &str,
+    presentation_extra: &str,
+    layout_xml: &str,
+    master_xml: &str,
+) -> Vec<u8> {
     let presentation = format!(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:presentation {XMLNS}>
@@ -222,7 +232,7 @@ fn build_deck(slide_xml: &str, presentation_extra: &str) -> Vec<u8> {
 </Relationships>"#
                 .into(),
         ),
-        ("ppt/slideLayouts/slideLayout1.xml", layout1()),
+        ("ppt/slideLayouts/slideLayout1.xml", layout_xml.into()),
         (
             "ppt/slideLayouts/_rels/slideLayout1.xml.rels",
             r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -231,7 +241,7 @@ fn build_deck(slide_xml: &str, presentation_extra: &str) -> Vec<u8> {
 </Relationships>"#
                 .into(),
         ),
-        ("ppt/slideMasters/slideMaster1.xml", master1()),
+        ("ppt/slideMasters/slideMaster1.xml", master_xml.into()),
         (
             "ppt/slideMasters/_rels/slideMaster1.xml.rels",
             r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -260,6 +270,58 @@ fn resolve_slide(slide_xml: &str, presentation_extra: &str) -> ResolvedSlide {
     let parsed = parse_bytes(&build_deck(slide_xml, presentation_extra)).expect("parse deck");
     let resolved = resolve(&parsed);
     resolved.slides.into_iter().next().expect("one slide")
+}
+
+/// 同 [`resolve_slide`],但 layout / master XML 可自定义(背景继承测试用)。
+fn resolve_slide_parts(slide_xml: &str, layout_xml: &str, master_xml: &str) -> ResolvedSlide {
+    let parsed =
+        parse_bytes(&build_deck_parts(slide_xml, "", layout_xml, master_xml)).expect("parse deck");
+    let resolved = resolve(&parsed);
+    resolved.slides.into_iter().next().expect("one slide")
+}
+
+/// 一个只带 `p:bg` 的最小 slideLayout(背景继承测试用,spTree 留空)。
+fn layout_with_bg(bg_inner: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldLayout {XMLNS}>
+  <p:cSld>
+    <p:bg>{bg_inner}</p:bg>
+    <p:spTree/>
+  </p:cSld>
+</p:sldLayout>"#
+    )
+}
+
+/// 一个只带 `p:bg` 的最小 slideMaster(背景继承测试用,spTree 留空)。
+fn master_with_bg(bg_inner: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldMaster {XMLNS}>
+  <p:cSld>
+    <p:bg>{bg_inner}</p:bg>
+    <p:spTree/>
+  </p:cSld>
+</p:sldMaster>"#
+    )
+}
+
+/// 一个带 `p:bg` 的 slide(sp_tree_inner 通常留空;背景继承优先级测试用)。
+fn slide_with_bg(bg_inner: &str, sp_tree_inner: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld {XMLNS}>
+  <p:cSld>
+    <p:bg>{bg_inner}</p:bg>
+    <p:spTree>{sp_tree_inner}</p:spTree>
+  </p:cSld>
+</p:sld>"#
+    )
+}
+
+/// `p:bgPr > a:solidFill`(纯色背景)片段。
+fn solid_bg(hex: &str) -> String {
+    format!(r#"<p:bgPr><a:solidFill><a:srgbClr val="{hex}"/></a:solidFill></p:bgPr>"#)
 }
 
 fn resolve_default() -> ResolvedSlide {
@@ -321,6 +383,52 @@ fn slide_own_xfrm_wins() {
     let slide = resolve_slide(&slide_xml, "");
     let rect = as_text_box(&slide.shapes[0]).rect.expect("own rect");
     assert_eq!((rect.x, rect.y, rect.w, rect.h), (111, 222, 333, 444));
+}
+
+// ---- 背景继承(slide → layout → master)-------------------------------------
+
+/// slide 无 `p:bg` → 落到 layout 的纯色背景。
+#[test]
+fn background_falls_back_to_layout() {
+    let slide_xml = slide_with("", "");
+    let slide = resolve_slide_parts(&slide_xml, &layout_with_bg(&solid_bg("00FF00")), &master1());
+    let bg = slide.background.expect("background from layout");
+    let ppt_core::resolved::ResolvedBackground::Color(fill) = bg else {
+        panic!("expected color background");
+    };
+    assert_eq!(fill.color().rgb, [0x00, 0xFF, 0x00], "layout bg 回退");
+}
+
+/// slide 与 layout 皆无 `p:bg` → 落到 master 的纯色背景。
+#[test]
+fn background_falls_back_to_master() {
+    let slide_xml = slide_with("", "");
+    let slide = resolve_slide_parts(&slide_xml, &layout1(), &master_with_bg(&solid_bg("FF00FF")));
+    let bg = slide.background.expect("background from master");
+    let ppt_core::resolved::ResolvedBackground::Color(fill) = bg else {
+        panic!("expected color background");
+    };
+    assert_eq!(fill.color().rgb, [0xFF, 0x00, 0xFF], "master bg 回退");
+}
+
+/// slide 自己的 `p:bg` 整体获胜,即便 layout / master 都另有背景。
+#[test]
+fn background_slide_own_wins_over_layout_and_master() {
+    let slide_xml = slide_with_bg(&solid_bg("0000FF"), "");
+    let slide = resolve_slide_parts(
+        &slide_xml,
+        &layout_with_bg(&solid_bg("00FF00")),
+        &master_with_bg(&solid_bg("FF0000")),
+    );
+    let bg = slide.background.expect("slide own background");
+    let ppt_core::resolved::ResolvedBackground::Color(fill) = bg else {
+        panic!("expected color background");
+    };
+    assert_eq!(
+        fill.color().rgb,
+        [0x00, 0x00, 0xFF],
+        "slide bg 优先于 layout/master"
+    );
 }
 
 // ---- 文本样式继承链(逐级合并 + 等价类匹配)---------------------------------
