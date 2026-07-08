@@ -19,15 +19,15 @@
 # the built wheel can't recover text, that wheel job fails and `publish` is
 # skipped — so a broken OCR build can't ship.
 #
-# RUNNER-AVAILABILITY SPLIT: the wheel matrix is split into two jobs. `wheels`
-# (Linux x86_64/aarch64, Apple-Silicon macOS, Windows) is HARD-required by
-# `publish`. `wheels_intel` (the macos-13 / x86_64 Intel wheel) is a separate job
-# that `publish` does NOT `needs`, because GitHub's hosted Intel-mac runners are
-# severely rationed for this account and that leg can sit `queued` for hours
-# without ever being assigned a runner — which would block the entire release.
-# `publish` therefore runs as soon as the core wheels + sdist pass; the Intel
-# wheel is still built, OCR-gated, and merged in WHEN a runner is available, but
-# never holds the release hostage. (See the `wheels_intel` and `publish` jobs.)
+# WHEEL MATRIX: one `wheels` job covers every platform — Linux x86_64/aarch64,
+# Apple-Silicon macOS, Intel macOS (cross-compiled on the arm64 runner, since
+# hosted Intel-mac runners are rationed), and Windows — and is HARD-required by
+# `publish`. An earlier revision split the Intel leg into a separate
+# `continue-on-error` job off `publish`'s `needs`; because `publish` didn't wait
+# for it, the release shipped before the Intel wheel was built and v0.2.0/v0.3.0
+# went out without it. Cross-compiling Intel in the core matrix makes `publish`
+# wait for it, so a missing Intel wheel now fails the release instead of silently
+# dropping the platform.
 #
 # USER-GATED PREREQUISITE (one-time, in the PyPI web UI — OPTIONAL for OIDC):
 #   For tokenless Trusted Publishing, on PyPI -> account -> Publishing -> "Add a
@@ -79,6 +79,12 @@ jobs:
           - { os: ubuntu-latest, target: x86_64, manylinux: auto, ocr_native: true }
           - { os: ubuntu-latest, target: aarch64, manylinux: "2_28" } # cross build → no native OCR run
           - { os: macos-14, target: aarch64, ocr_native: true } # Apple Silicon runner
+          # Intel mac, cross-compiled on the Apple Silicon runner (macos-13 Intel
+          # runners are rationed). No native OCR smoke — an x86_64 wheel can't
+          # `pip install` on the arm64 runner. In the CORE matrix so `publish`
+          # HARD-waits for it (docspine does the same); a missing Intel wheel now
+          # fails the release instead of silently shipping without it.
+          - { os: macos-14, target: x86_64 }
           - { os: windows-latest, target: x64, ocr_native: true }
     steps:
       - uses: actions/checkout@v4
@@ -120,46 +126,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.os }}-${{ matrix.target }}
-          path: dist/*.whl
-
-  # Intel-macOS (x86_64) wheel — cross-compiled on the Apple Silicon `macos-14`
-  # runner (maturin-action adds the x86_64-apple-darwin target). Earlier this ran
-  # natively on `macos-13`, but GitHub's hosted Intel-mac runners are severely
-  # rationed for this account and the leg often sat `queued` for hours and never
-  # produced a wheel. Cross-compiling on the plentiful arm64 runner makes Intel
-  # coverage reliable. Kept as its own job (off `publish`'s `needs`) with
-  # `continue-on-error: true` so a hiccup here never blocks the rest of the release;
-  # `publish` merges its `wheels-macos-13-x86_64` artifact when present.
-  wheels_intel:
-    name: wheels (macos-14 / x86_64 cross)
-    runs-on: macos-14
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Set version from tag
-        if: github.ref_type == 'tag'
-        run: python scripts/set_version_from_tag.py "${{ github.ref_name }}"
-      - name: Build abi3 wheel
-        uses: PyO3/maturin-action@v1
-        with:
-          target: x86_64
-          args: --release --out dist --strip
-          sccache: "true"
-      # 这里**不做** OCR 冒烟:本 job 是在 arm64 的 macos-14 runner 上对 x86_64 的
-      # **交叉**构建,产出的 Intel wheel 无法在本机 arm64 Python 里 pip install/运行——
-      # 硬跑安装会报 “No matching distribution found”,wheel 就死在这步、走不到
-      # upload-artifact(v0.2.0 缺 Intel wheel 正是因此)。因此交叉腿只构建 + 上传,不做
-      # 安装冒烟:与核心矩阵里 ubuntu-latest/aarch64 那条 cross 构建同样跳过原生 OCR
-      # (见上方矩阵注释),也与 docspine release.yml 的做法一致——它对交叉编译目标
-      # (macos-14/x86_64、ubuntu/aarch64)从不做安装冒烟,只 build 后 upload-artifact。
-      # OCR 由原生跑得起来的其它架构(x86_64-Linux / arm64-macOS / Windows)在核心矩阵里
-      # 真机验证:tract 纯 Rust、跨架构一致,无 per-arch kernel 需逐架构复验。
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wheels-macos-13-x86_64
           path: dist/*.whl
 
   sdist:
