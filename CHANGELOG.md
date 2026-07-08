@@ -13,6 +13,8 @@ still change.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-07-08
+
 ### Added
 
 - **Full table fidelity in PDF export (B-7).** `a:tcPr` per-side borders, cell
