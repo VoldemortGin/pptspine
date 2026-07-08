@@ -696,6 +696,7 @@ _E2E_MASTER = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
   <p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2"
             accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6"
             hlink="hlink" folHlink="folHlink"/>
+  <p:sldLayoutIdLst><p:sldLayoutId id="2147483649" r:id="rId2"/></p:sldLayoutIdLst>
   <p:txStyles>
     <p:titleStyle>
       <a:lvl1pPr algn="ctr"><a:buNone/>
@@ -792,6 +793,11 @@ _E2E_CONTENT_TYPES = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
   <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
   <Default Extension="xml" ContentType="application/xml"/>
   <Default Extension="png" ContentType="image/png"/>
+  <Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
+  <Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
+  <Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>
+  <Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/>
+  <Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>
 </Types>"""
 
 _E2E_SLIDE_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -808,6 +814,28 @@ _E2E_LAYOUT_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 _E2E_MASTER_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="../theme/theme1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+</Relationships>"""
+
+# LibreOffice 等严格阅读器经 presentation.xml 的 sldMasterIdLst 实例化占位符继承链;
+# 缺了整条链(标题/正文占位符)都会被丢——oracle 数据点必须补上。
+_E2E_PRESENTATION = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+                xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:sldMasterIdLst>
+    <p:sldMasterId id="2147483648" r:id="rId2"/>
+  </p:sldMasterIdLst>
+  <p:sldIdLst>
+    <p:sldId id="256" r:id="rId1"/>
+  </p:sldIdLst>
+  <p:sldSz cx="{_SLIDE_CX}" cy="{_SLIDE_CY}" type="screen4x3"/>
+</p:presentation>"""
+
+_E2E_PRESENTATION_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="slideMasters/slideMaster1.xml"/>
 </Relationships>"""
 
 
@@ -824,8 +852,8 @@ def build_e2e_pptx() -> bytes:
         {
             "[Content_Types].xml": _E2E_CONTENT_TYPES,
             "_rels/.rels": _ROOT_RELS,
-            "ppt/presentation.xml": _PRESENTATION,
-            "ppt/_rels/presentation.xml.rels": _PRESENTATION_RELS,
+            "ppt/presentation.xml": _E2E_PRESENTATION,
+            "ppt/_rels/presentation.xml.rels": _E2E_PRESENTATION_RELS,
             "ppt/slides/slide1.xml": _E2E_SLIDE,
             "ppt/slides/_rels/slide1.xml.rels": _E2E_SLIDE_RELS,
             "ppt/slideLayouts/slideLayout1.xml": _E2E_LAYOUT,
@@ -873,7 +901,51 @@ _MASTER_BG_MASTER = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
     <p:bg><p:bgPr><a:solidFill><a:srgbClr val="00FF00"/></a:solidFill></p:bgPr></p:bg>
     <p:spTree/>
   </p:cSld>
+  <p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2"
+            accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6"
+            hlink="hlink" folHlink="folHlink"/>
+  <p:sldLayoutIdLst><p:sldLayoutId id="2147483649" r:id="rId1"/></p:sldLayoutIdLst>
 </p:sldMaster>"""
+
+# LibreOffice 等严格阅读器经 presentation.xml 的 sldMasterIdLst 实例化 master,
+# 缺了就按缺省(白底)master 渲染——补上才能拿到真实的 B-10 oracle 数据点。
+_MASTER_BG_MASTER_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="../theme/theme1.xml"/>
+</Relationships>"""
+
+_MASTER_BG_PRESENTATION = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+                xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:sldMasterIdLst>
+    <p:sldMasterId id="2147483648" r:id="rId2"/>
+  </p:sldMasterIdLst>
+  <p:sldIdLst>
+    <p:sldId id="256" r:id="rId1"/>
+  </p:sldIdLst>
+  <p:sldSz cx="{_SLIDE_CX}" cy="{_SLIDE_CY}" type="screen4x3"/>
+</p:presentation>"""
+
+_MASTER_BG_PRESENTATION_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster" Target="slideMasters/slideMaster1.xml"/>
+</Relationships>"""
+
+
+# 带 layout/master Override 的内容类型(LibreOffice 等严格阅读器需要才认继承链部件)。
+_CONTENT_TYPES_CHAIN = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
+  <Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
+  <Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>
+  <Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/>
+  <Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>
+</Types>"""
 
 
 @pytest.fixture(scope="session")
@@ -881,15 +953,17 @@ def master_background_pptx_bytes() -> bytes:
     """slide / layout 均无 `p:bg`,slideMaster 带纯色背景(B-10 layout/master 继承门)。"""
     return _zip_pptx(
         {
-            "[Content_Types].xml": _CONTENT_TYPES,
+            "[Content_Types].xml": _CONTENT_TYPES_CHAIN,
             "_rels/.rels": _ROOT_RELS,
-            "ppt/presentation.xml": _PRESENTATION,
-            "ppt/_rels/presentation.xml.rels": _PRESENTATION_RELS,
+            "ppt/presentation.xml": _MASTER_BG_PRESENTATION,
+            "ppt/_rels/presentation.xml.rels": _MASTER_BG_PRESENTATION_RELS,
             "ppt/slides/slide1.xml": _MASTER_BG_SLIDE,
             "ppt/slides/_rels/slide1.xml.rels": _MASTER_BG_SLIDE_RELS,
             "ppt/slideLayouts/slideLayout1.xml": _MASTER_BG_LAYOUT,
             "ppt/slideLayouts/_rels/slideLayout1.xml.rels": _MASTER_BG_LAYOUT_RELS,
             "ppt/slideMasters/slideMaster1.xml": _MASTER_BG_MASTER,
+            "ppt/slideMasters/_rels/slideMaster1.xml.rels": _MASTER_BG_MASTER_RELS,
+            "ppt/theme/theme1.xml": _E2E_THEME,
         }
     )
 

@@ -585,6 +585,14 @@ def test_b7_merged_cell_has_no_internal_border(
     assert verticals_at(plain_pptx, internal_x), "unmerged row must draw the inner divider"
 
 
+def test_b7_table_without_tblgrid_still_renders(minimal_pptx_bytes: bytes) -> None:
+    """minimal deck 的 2x2 表格无 ``a:tblGrid``:等分列宽降级,单元格文字仍可提取。"""
+    pdf, _ = _export(minimal_pptx_bytes)
+    text = _open_pdf(pdf)[0].get_text()
+    for cell in ("A1", "B1", "A2", "B2"):
+        assert cell in text, f"table cell {cell!r} lost without tblGrid: {text!r}"
+
+
 # --- 纵排告警(Task 4 / PRD §6:bodyPr@vert 水平降级,逐种类一次)------------------
 
 

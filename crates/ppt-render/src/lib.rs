@@ -271,21 +271,33 @@ fn table_ops(
         });
     }
     let r = flat.map_emu_rect(rect);
-    let ncols = table.col_widths.len();
+    // `a:tblGrid` 缺失(非法但需容错)→ 按最大行格数把表宽等分,绝不整表丢弃
+    // (charter:degrade-never-drop)。列数取各行格数最大值(每个 `a:tc` 恰占一列)。
+    let ncols = if table.col_widths.is_empty() {
+        let n = table.rows.iter().map(|r| r.cells.len()).max().unwrap_or(0);
+        if n > 0 {
+            ctx.warnings.push(ExportWarning::Custom {
+                kind: "table-grid".to_string(),
+                detail: "tblGrid 列宽缺失;按最大行格数等分表宽降级".to_string(),
+            });
+        }
+        n
+    } else {
+        table.col_widths.len()
+    };
     if ncols == 0 || table.rows.is_empty() {
         return;
     }
-    // 列 x 边界:按 col_widths 比例铺满表宽。
+    // 列 x 边界:按 col_widths 比例铺满表宽(无声明列宽时等分)。
     let total_w: f64 = table.col_widths.iter().map(|w| emu_to_points(*w)).sum();
     let table_w = r.x1 - r.x0;
     let mut xs = Vec::with_capacity(ncols + 1);
     let mut acc = r.x0;
     xs.push(acc);
-    for w in &table.col_widths {
-        let frac = if total_w > 0.0 {
-            emu_to_points(*w) / total_w
-        } else {
-            1.0 / ncols as f64
+    for i in 0..ncols {
+        let frac = match table.col_widths.get(i) {
+            Some(w) if total_w > 0.0 => emu_to_points(*w) / total_w,
+            _ => 1.0 / ncols as f64,
         };
         acc += frac * table_w;
         xs.push(acc);
@@ -554,6 +566,50 @@ mod tests {
         assert!(hay.contains("0 0 1 rg"), "cell blue fill missing");
         // 单元格文字经引擎排版(BT/ET 文本块存在)。
         assert!(hay.contains("BT"), "table cell text missing");
+    }
+
+    #[test]
+    fn b7_table_without_tbl_grid_degrades_to_even_columns() {
+        use ppt_core::resolved::{ResolvedCell, ResolvedCellBorders, ResolvedRow, ResolvedTable};
+        let mk_cell = |t: &str, fill: Option<ResolvedColor>| ResolvedCell {
+            paragraphs: vec![para(t)],
+            col_span: 1,
+            row_span: 1,
+            fill,
+            merged: false,
+            mar_l: 91_440,
+            mar_r: 91_440,
+            mar_t: 45_720,
+            mar_b: 45_720,
+            anchor: ppt_core::resolved::ResolvedAnchor::Top,
+            borders: ResolvedCellBorders::default(),
+        };
+        // tblGrid 缺失(col_widths 空):按最大行格数等分,绝不整表丢弃 + 一条降级告警。
+        let table = ResolvedShape::Table(ResolvedTable {
+            rect: Some(Rect::new(0, 0, 6_000_000, 2_000_000)),
+            col_widths: vec![],
+            table_style_id: None,
+            rows: vec![ResolvedRow {
+                cells: vec![
+                    mk_cell("A1", Some(ResolvedColor::opaque([0, 0, 255]))),
+                    mk_cell("B1", None),
+                ],
+                height: Some(2_000_000),
+            }],
+        });
+        let out = render(&one_slide(vec![table]));
+        let hay = String::from_utf8_lossy(&out.pdf);
+        assert!(
+            hay.contains("0 0 1 rg"),
+            "cell fill must survive missing tblGrid"
+        );
+        assert!(hay.contains("BT"), "cell text must survive missing tblGrid");
+        assert!(
+            out.warnings
+                .iter()
+                .any(|w| matches!(w, ExportWarning::Custom { kind, .. } if kind == "table-grid")),
+            "even-split degradation must warn once"
+        );
     }
 
     #[test]

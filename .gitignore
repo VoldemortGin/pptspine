@@ -21,3 +21,9 @@ venv/
 dist/
 build/
 wheelhouse/
+
+# LibreOffice oracle advisory 中间产物(local-only,scripts/lo_oracle_ssim.py)
+.lo-oracle/
+
+# 真实 deck 语料(local-only 抽查,PRD B-11)
+corpus/
