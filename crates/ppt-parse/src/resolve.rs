@@ -168,6 +168,7 @@ fn to_resolved_body(b: &BodyProps) -> ResolvedBodyProps {
         wrap: b.wrap.unwrap_or(true),
         font_scale,
         ln_spc_reduction,
+        autofit_normal: matches!(b.autofit, Some(Autofit::Normal { .. })),
         // v1:不裁剪(引擎字形软剪裁已修但保守放行溢出;normAutofit 的 fontScale
         // 已把文字缩小,无需再裁)。
         clip: false,

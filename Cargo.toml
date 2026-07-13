@@ -30,10 +30,10 @@ ocrspine = { git = "https://github.com/VoldemortGin/ocrspine", rev = "732975f023
 # --- sibling family crate: shared PDF typesetting engine (pdfspine Phase A;
 # PRD-PDF-EXPORT §1 locked dependency form, same precedent as ocrspine above.
 # ppt-render uses `pdf-typeset.workspace = true` so no per-crate path math). ---
-pdf-typeset = { git = "https://github.com/VoldemortGin/pdfspine", rev = "93214453167535c424079470aefb13773e79d717" }
+pdf-typeset = { git = "https://github.com/VoldemortGin/pdfspine", rev = "5f1640cb2640132ca3bb49d7e777bdeafe751668" }
 # 同仓姊妹 crate:内置 Liberation 字体字节(仅 ppt-render 的 dev-dep,B-11
 # font_map 文件路径分支测试用真实 TTF;与 pdf-typeset 锁同一 rev)。
-pdf-fonts = { git = "https://github.com/VoldemortGin/pdfspine", rev = "93214453167535c424079470aefb13773e79d717" }
+pdf-fonts = { git = "https://github.com/VoldemortGin/pdfspine", rev = "5f1640cb2640132ca3bb49d7e777bdeafe751668" }
 
 # --- shared third-party deps (pinned to resolve on toolchain 1.96) ---
 thiserror = "2"

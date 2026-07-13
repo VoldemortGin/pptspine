@@ -22,7 +22,8 @@ use ppt_core::resolved::{
 use ppt_core::style::Spacing;
 
 use pdf_typeset::{
-    Align, Block, LineSpacing, ListLabel, ParaProps, Rect, Rgb, Run, RunStyle, TextBoxSpec, VAnchor,
+    Align, Block, LineSpacing, ListLabel, ParaProps, Rect, Rgb, Run, RunStyle, TextBoxSpec,
+    Typesetter, VAnchor,
 };
 
 /// 项目符号标签右缘到正文起点的间距(pt;引擎 `ListLabel::gutter`)。
@@ -72,6 +73,85 @@ pub(crate) fn text_box_spec(
     spec.wrap = body.wrap;
     spec.font_scale = body.font_scale.map(f64::from);
     spec
+}
+
+/// B-6 重算式 autofit 的缩放下限(25%)——低于此不再收缩(PowerPoint 下限量级)。
+const AUTOFIT_MIN_SCALE: f64 = 0.25;
+/// fontScale 逐档步长(每档降 5%,从 95% 起)。
+const AUTOFIT_SCALE_STEP_PCT: i32 = 5;
+/// `lnSpcReduction` 逐档:0% → 10% → 20%(PowerPoint 上限 20%)。
+const AUTOFIT_LN_REDUCTIONS: [f64; 3] = [0.0, 0.10, 0.20];
+/// 判定「落入框内」的容差(pt)。
+const AUTOFIT_FIT_EPS: f64 = 1e-3;
+
+/// B-6 重算式 autofit:`a:normAutofit` 生效但**未存** `fontScale` 时,按内容重算缩放。
+///
+/// 用引擎 TS-10 测量 API([`Typesetter::measure_text_box`],与真实排版逐点一致)迭代:
+/// 先在 100% 度量,内容不超框则原样返回;否则按 PowerPoint 语义逐档收缩——外层
+/// `fontScale` 从 95% 每档降 5% 至 [`AUTOFIT_MIN_SCALE`] 下限,内层 `lnSpcReduction`
+/// 0 → 10% → 20%,取**首个**落入框内的组合(字号尽量大、行距压缩尽量小)。缩放**烘进
+/// 段落**(返回 spec 的 `font_scale` 保持 `None`),避免引擎再做一轮二分。
+///
+/// 已存 `fontScale`(stored normAutofit)不走本路径,由 [`text_box_spec`] 原样透传
+/// (行为不回归,PRD §9 风险 3)。
+pub(crate) fn autofit_text_box_spec(
+    ts: &mut Typesetter,
+    rect: Rect,
+    rotation_deg: f64,
+    body: &ResolvedBodyProps,
+    paragraphs: &[ResolvedParagraph],
+) -> TextBoxSpec {
+    let base = text_box_spec(rect, rotation_deg, body, paragraphs);
+    let inner_h = (base.rect.y1 - base.rect.y0).abs();
+    if ts.measure_text_box(&base).height <= inner_h + AUTOFIT_FIT_EPS {
+        return base; // 100% 即落入框内,无需 autofit
+    }
+    let mut scale_pct = 100 - AUTOFIT_SCALE_STEP_PCT;
+    while f64::from(scale_pct) / 100.0 >= AUTOFIT_MIN_SCALE - 1e-9 {
+        let scale = f64::from(scale_pct) / 100.0;
+        for &red in &AUTOFIT_LN_REDUCTIONS {
+            let scaled = scale_paragraphs(paragraphs, scale, red);
+            let spec = text_box_spec(rect, rotation_deg, body, &scaled);
+            if ts.measure_text_box(&spec).height <= inner_h + AUTOFIT_FIT_EPS {
+                return spec;
+            }
+        }
+        scale_pct -= AUTOFIT_SCALE_STEP_PCT;
+    }
+    // 下限仍溢出:用最小缩放 + 最大行距压缩(内容尽量塞入;残余溢出交引擎裁剪逻辑)。
+    let scaled = scale_paragraphs(paragraphs, AUTOFIT_MIN_SCALE, 0.20);
+    text_box_spec(rect, rotation_deg, body, &scaled)
+}
+
+/// 按 `scale` 缩放各 run 字号、按 `ln_reduction` 压缩行距,返回段落副本。
+fn scale_paragraphs(
+    paragraphs: &[ResolvedParagraph],
+    scale: f64,
+    ln_reduction: f64,
+) -> Vec<ResolvedParagraph> {
+    paragraphs
+        .iter()
+        .map(|p| {
+            let mut np = p.clone();
+            for r in &mut np.runs {
+                r.size_pt = (f64::from(r.size_pt) * scale) as f32;
+            }
+            if ln_reduction > 0.0 {
+                np.ln_spc = Some(reduce_line_spacing(p.ln_spc, ln_reduction));
+            }
+            np
+        })
+        .collect()
+}
+
+/// `lnSpcReduction` 语义:百分比行距按 `(1 - red)` 收缩;缺省(单倍)折成 `(1 - red)`
+/// 倍;定值(`spcPts`)行距 PowerPoint 不压缩,原样保留。
+fn reduce_line_spacing(base: Option<Spacing>, red: f64) -> Spacing {
+    match base {
+        Some(Spacing::Pts(p)) => Spacing::Pts(p),
+        Some(Spacing::Pct(n)) => Spacing::Pct(((n as f64) * (1.0 - red)).round() as i64),
+        None => Spacing::Pct(((1.0 - red) * 100_000.0).round() as i64),
+    }
 }
 
 /// B-6:pptx `a:spcPct`(千分之一百分点)/ `a:spcPts`(点)→ 引擎行距。

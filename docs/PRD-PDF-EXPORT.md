@@ -334,14 +334,16 @@ chain (B-8/B-9) lands later but **before GA**. Each task: why · effort · engin
   **Green:** bottom-anchored box's last-line word baseline within 1 pt of `rect.bottom − bIns`;
   `buChar` bullet glyph and `buAutoNum` "1." both present in read-back text; `lnSpc spcPct=200%`
   doubles inter-line word-y delta within 5%.
-  · **状态**: 基本 done(spcPct 段距已接、纵排降级为水平 + 告警);依赖引擎测量的内容自适应行高
-  (重算式 autofit)未做,留引擎批次。
+  · **状态**: done(spcPct 段距、纵排降级 + 告警;**重算式 autofit** 已接——`normAutofit`
+  生效但未存 fontScale 时,用引擎 TS-10 `measure_text_box` 逐档收缩 fontScale/lnSpcReduction
+  至内容落框,stored fontScale 路径不回归)。
 - **B-7 · Tables.** Absolute cell x from `tblGrid`, borders as per-side lines, fills, margins, anchor
   (§3.p/q). Effort **M**.
   **Green:** each cell's first word x within 1 pt of accumulated `gridCol` widths + margin; border
   lines present in `get_drawings` read-back at grid coordinates; merged-cell fixture renders no
   interior border inside the span.
-  · **状态**: done(表格网格 / 逐边框线 / 填充 / tcPr 内边距与锚定);按内容自适应增高依赖引擎测量,未做。
+  · **状态**: done(表格网格 / 逐边框线 / 填充 / tcPr 内边距与锚定;**按内容自适应增高**已接——
+  用引擎 TS-10 `measure_text_box` 算每行内容高,取 `max(基线行高, 内容高)`,rowSpan 高度跨行均摊)。
 - **B-8 · Theme subsystem.** Theme part parse, `clrScheme` + `clrMap`/`clrMapOvr`, transform math,
   `fontScheme` (+ea), `p:style` fillRef/lnRef/fontRef solid resolution (§3.b/c, §4.1). Effort **L**.
   **Green:** golden table of (schemeClr, transforms) → RGB passes within ±2/255 (values harvested from

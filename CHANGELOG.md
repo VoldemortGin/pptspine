@@ -15,6 +15,21 @@ still change.
 
 ### Added
 
+- **Recompute autofit for text boxes (B-6).** When `a:normAutofit` is on but no
+  `fontScale` was stored, the exported text now shrinks to fit its box: driven by
+  the engine's TS-10 `measure_text_box`, it steps `fontScale` down (95%→25%) and
+  escalates `lnSpcReduction` (0→10→20%), taking the first combination whose
+  measured content height fits — the scale is baked into the runs so the engine
+  does not re-shrink. A **stored** `normAutofit@fontScale` keeps its
+  applied-as-stored behavior (no regression).
+- **Content-adaptive table row height (B-7).** Each row now grows to
+  `max(declared/frame-derived height, measured content height)` via TS-10
+  `measure_blocks`, so long cell text is no longer clipped; `rowSpan` cells
+  distribute their content height evenly across the rows they span. Rows whose
+  content fits render byte-identically to before (no unintended drift).
+- Bumped the pinned `pdf-typeset` / `pdf-fonts` engine rev to pdfspine v0.3.1
+  (`5f1640c`), which adds the public TS-10 measurement API both features consume.
+
 - **Self-render SSIM regression gate (B-11 gate (4)).** Committed grayscale
   references (`python/tests/ssim_refs/*.ssimref`) captured from our own
   `to_pdf()` output on a pinned-font runner; CI re-renders the full synthetic

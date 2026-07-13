@@ -194,12 +194,15 @@ fn text_ops(
         });
         ctx.vertical_warned = true;
     }
-    let spec = text::text_box_spec(
-        flat.map_emu_rect(rect),
-        -tf.xfrm.rot_deg(),
-        &tf.body,
-        &tf.paragraphs,
-    );
+    let mapped = flat.map_emu_rect(rect);
+    let rot = -tf.xfrm.rot_deg();
+    // B-6:`normAutofit` 生效但**未存** fontScale → 用引擎 TS-10 测量按内容重算缩放;
+    // 已存 fontScale(stored)走既有 `text_box_spec` 透传路径,行为不回归。
+    let spec = if tf.body.autofit_normal && tf.body.font_scale.is_none() {
+        text::autofit_text_box_spec(ts, mapped, rot, &tf.body, &tf.paragraphs)
+    } else {
+        text::text_box_spec(mapped, rot, &tf.body, &tf.paragraphs)
+    };
     ops.extend(ts.layout_text_box(&spec));
 }
 
@@ -302,28 +305,15 @@ fn table_ops(
         acc += frac * table_w;
         xs.push(acc);
     }
-    // 行 y 边界:声明行高全在则按比例铺满,缺声明则等分。"按内容自适应增高"依赖
-    // 引擎文本测量(pdf-typeset 无公开测量 API,消费侧拿不到行高),属引擎批次
-    // (TS 侧),本层不做;此处保持声明值/等分的降级行为。
+    // 行 y 边界:B-7 按内容自适应增高——每行取 `max(声明行高, 内容所需高)`,内容高
+    // 经引擎 TS-10 测量(与真实排版逐点一致);表格顶端锚定,内容超声明则向下增长。
     let nrows = table.rows.len();
-    let table_h = r.y1 - r.y0;
-    let declared: Vec<Option<f64>> = table
-        .rows
-        .iter()
-        .map(|r| r.height.map(emu_to_points))
-        .collect();
-    let all_known = declared.iter().all(Option::is_some);
-    let sum_known: f64 = declared.iter().flatten().sum();
+    let heights = row_heights(ts, table, &xs, ncols, r);
     let mut ys = Vec::with_capacity(nrows + 1);
     let mut yacc = r.y0;
     ys.push(yacc);
-    for (i, _) in table.rows.iter().enumerate() {
-        let hpt = if all_known && sum_known > 0.0 {
-            declared[i].unwrap() / sum_known * table_h
-        } else {
-            table_h / nrows as f64
-        };
-        yacc += hpt;
+    for h in &heights {
+        yacc += h;
         ys.push(yacc);
     }
 
@@ -353,6 +343,82 @@ fn table_ops(
             }
         }
     }
+}
+
+/// B-7:按内容自适应行高——每行取 `max(声明行高, 内容所需高)`。内容高经引擎 TS-10
+/// 测量([`Typesetter::measure_text_box`],与真实排版逐点一致):单元格内容按列宽换行
+/// 度量,加 `tcPr` 上下内边距即该单元格所需外高。`rowSpan` 单元格的内容高在其纵跨的
+/// 各行间**均摊**补足(单行单元格先定基,再看跨行格是否需要在跨行总高上补差)。
+fn row_heights(
+    ts: &mut Typesetter,
+    table: &ppt_core::resolved::ResolvedTable,
+    xs: &[f64],
+    ncols: usize,
+    r: Rect,
+) -> Vec<f64> {
+    let nrows = table.rows.len();
+    let table_h = r.y1 - r.y0;
+    let declared: Vec<Option<f64>> = table
+        .rows
+        .iter()
+        .map(|row| row.height.map(emu_to_points))
+        .collect();
+    // 基线行高(B-7 之前的既有几何):声明全在 → 按比例铺满声明表高;否则等分。
+    // 自适应只在内容**超过**基线时增高,内容放得下则与旧输出逐点一致(不无谓漂移)。
+    let all_known = declared.iter().all(Option::is_some);
+    let sum_known: f64 = declared.iter().flatten().sum();
+    let base = |i: usize| -> f64 {
+        if all_known && sum_known > 0.0 {
+            declared[i].unwrap() / sum_known * table_h
+        } else if nrows > 0 {
+            table_h / nrows as f64
+        } else {
+            0.0
+        }
+    };
+    let mut needed = vec![0.0_f64; nrows];
+    // (起始行, 纵跨行数, 所需外高)——rowSpan 单元格留待第二遍在跨行间均摊。
+    let mut spans: Vec<(usize, usize, f64)> = Vec::new();
+    for (ri, row) in table.rows.iter().enumerate() {
+        for (c, cell) in row.cells.iter().enumerate() {
+            if c >= ncols {
+                break;
+            }
+            if cell.merged {
+                continue;
+            }
+            let cspan = (cell.col_span.max(1) as usize).min(ncols - c);
+            let rspan = (cell.row_span.max(1) as usize).min(nrows - ri);
+            let cell_w = xs[c + cspan] - xs[c];
+            // 任意占位高度(measure 只取宽度换行);内容高 = 度量高 + tcPr 上下内边距。
+            let body = cell_body(cell);
+            let spec = text::text_box_spec(
+                Rect::new(xs[c], r.y0, xs[c] + cell_w, r.y0 + 1.0e6),
+                0.0,
+                &body,
+                &cell.paragraphs,
+            );
+            let outer =
+                ts.measure_text_box(&spec).height + emu_to_points(cell.mar_t + cell.mar_b);
+            if rspan <= 1 {
+                needed[ri] = needed[ri].max(outer);
+            } else {
+                spans.push((ri, rspan, outer));
+            }
+        }
+    }
+    let mut heights: Vec<f64> = (0..nrows).map(|i| base(i).max(needed[i])).collect();
+    // rowSpan:跨行格所需外高超过其纵跨各行之和时,把差额均摊到这些行。
+    for (ri, rspan, outer) in spans {
+        let sum: f64 = heights[ri..ri + rspan].iter().sum();
+        if outer > sum {
+            let add = (outer - sum) / rspan as f64;
+            for h in &mut heights[ri..ri + rspan] {
+                *h += add;
+            }
+        }
+    }
+    heights
 }
 
 /// 单元格逐边框线:边框已由解析层(`tcPr`/`tcBorders`)填充并终态化进
@@ -655,6 +721,101 @@ mod tests {
         assert!(hay.contains(" l S"), "cell border line path missing");
     }
 
+    /// B-7 按内容自适应行高:列窄、字大的长文单元格,行高**超过**声明值(内容撑高)。
+    #[test]
+    fn b7_row_grows_to_fit_long_cell_content() {
+        use ppt_core::resolved::{ResolvedCell, ResolvedCellBorders, ResolvedRow, ResolvedTable};
+        let long = "word ".repeat(80);
+        let cell = ResolvedCell {
+            paragraphs: vec![para(&long)],
+            col_span: 1,
+            row_span: 1,
+            fill: None,
+            merged: false,
+            mar_l: 0,
+            mar_r: 0,
+            mar_t: 0,
+            mar_b: 0,
+            anchor: ppt_core::resolved::ResolvedAnchor::Top,
+            borders: ResolvedCellBorders::default(),
+        };
+        let table = ResolvedTable {
+            rect: Some(Rect::new(0, 0, 2_540_000, 127_000)), // 200 × 10 pt
+            col_widths: vec![2_540_000],
+            table_style_id: None,
+            rows: vec![ResolvedRow {
+                cells: vec![cell],
+                height: Some(127_000), // 声明仅 10pt
+            }],
+        };
+        let mut ts = Typesetter::with_system_fonts();
+        let xs = [0.0, 200.0];
+        let r = pdf_typeset::Rect::new(0.0, 0.0, 200.0, 10.0);
+        let heights = row_heights(&mut ts, &table, &xs, 1, r);
+        assert!(
+            heights[0] > 10.0,
+            "行高应随内容增高、超过声明的 10pt,实测 {}",
+            heights[0]
+        );
+        // 200pt 宽、20pt 字的长文必然折多行 → 行高远超单行。
+        assert!(heights[0] > 60.0, "长文应撑出多行行高,实测 {}", heights[0]);
+    }
+
+    /// B-7 rowSpan 高度分摊:纵跨 2 行的长内容格,两行无声明高 → 内容高**均摊**到两行。
+    #[test]
+    fn b7_rowspan_distributes_content_height_across_rows() {
+        use ppt_core::resolved::{
+            ResolvedAnchor, ResolvedCell, ResolvedCellBorders, ResolvedRow, ResolvedTable,
+        };
+        let mk = |paras: Vec<ResolvedParagraph>, rspan: u32, merged: bool| ResolvedCell {
+            paragraphs: paras,
+            col_span: 1,
+            row_span: rspan,
+            fill: None,
+            merged,
+            mar_l: 0,
+            mar_r: 0,
+            mar_t: 0,
+            mar_b: 0,
+            anchor: ResolvedAnchor::Top,
+            borders: ResolvedCellBorders::default(),
+        };
+        let long = "word ".repeat(40);
+        let table = ResolvedTable {
+            rect: Some(Rect::new(0, 0, 2_540_000, 254_000)),
+            col_widths: vec![2_540_000],
+            table_style_id: None,
+            rows: vec![
+                // 行 0:rowSpan=2 的长内容格;行 1:合并延续格(跳过)。两行均无声明高。
+                ResolvedRow {
+                    cells: vec![mk(vec![para(&long)], 2, false)],
+                    height: None,
+                },
+                ResolvedRow {
+                    cells: vec![mk(vec![], 1, true)],
+                    height: None,
+                },
+            ],
+        };
+        let mut ts = Typesetter::with_system_fonts();
+        let xs = [0.0, 200.0];
+        let r = pdf_typeset::Rect::new(0.0, 0.0, 200.0, 20.0);
+        let heights = row_heights(&mut ts, &table, &xs, 1, r);
+        assert_eq!(heights.len(), 2);
+        assert!(
+            heights[0] > 0.0 && heights[1] > 0.0,
+            "跨行内容高应均摊到两行,实测 {heights:?}"
+        );
+        assert!(
+            (heights[0] - heights[1]).abs() < 1e-6,
+            "两行应等额均摊,实测 {heights:?}"
+        );
+        assert!(
+            heights[0] + heights[1] > 40.0,
+            "跨行合计应容纳多行内容,实测 {heights:?}"
+        );
+    }
+
     #[test]
     fn b6_bottom_anchor_places_text_lower() {
         // 底部锚定的文本框:验证渲染不 panic + 产出有效非空 PDF(锚定几何由引擎
@@ -672,6 +833,61 @@ mod tests {
         let out = render(&one_slide(vec![ResolvedShape::TextBox(tf)]));
         assert!(out.pdf.starts_with(b"%PDF-"));
         assert!(String::from_utf8_lossy(&out.pdf).contains("BT"));
+    }
+
+    /// B-6 重算式 autofit:超框长文启用 `normAutofit`(未存 fontScale)后**完整落入
+    /// 框内**且**字号缩小**——用引擎 TS-10 测量验收(与真实排版逐点一致)。
+    #[test]
+    fn b6_recompute_autofit_shrinks_long_text_into_box() {
+        // 小框(200×60 pt);normAutofit 生效但未存 fontScale → 走重算路径。
+        let body = ppt_core::resolved::ResolvedBodyProps {
+            autofit_normal: true,
+            ..Default::default()
+        };
+        // 6 段短文(20pt,单倍行距 ~24pt/行 → 100% 需 ~144pt,远超框高 → 必溢出;
+        // 缩到 ~55% 可落入,恰在 25% 下限之上)。
+        let paras: Vec<ResolvedParagraph> = (0..6).map(|i| para(&format!("Line {i}"))).collect();
+        let box_rect = pdf_typeset::Rect::new(0.0, 0.0, 200.0, 90.0);
+
+        let mut ts = Typesetter::with_system_fonts();
+        // 基线(100%,text_box_spec)在该小框内确实溢出。
+        let base = text::text_box_spec(box_rect, 0.0, &body, &paras);
+        let inner_h = (base.rect.y1 - base.rect.y0).abs();
+        assert!(
+            ts.measure_text_box(&base).height > inner_h,
+            "长文在 100% 应溢出小框"
+        );
+
+        // 重算 autofit 后:内容高度落入框内。
+        let fitted = text::autofit_text_box_spec(&mut ts, box_rect, 0.0, &body, &paras);
+        assert!(
+            ts.measure_text_box(&fitted).height <= inner_h + 1.0,
+            "autofit 后内容应完整落入框内(inner_h={inner_h})"
+        );
+        // 且字号确实缩小(< 原始 20pt)。
+        let size = match &fitted.blocks[0] {
+            pdf_typeset::Block::Paragraph(_, runs) => runs[0].style.size,
+            _ => panic!("首块应为段落"),
+        };
+        assert!(size < 20.0, "autofit 应缩小字号,实测 {size}pt");
+    }
+
+    /// B-6:normAutofit 生效但内容**本就**放得下时,不缩放(字号保持原值)。
+    #[test]
+    fn b6_autofit_noop_when_content_fits() {
+        let body = ppt_core::resolved::ResolvedBodyProps {
+            autofit_normal: true,
+            ..Default::default()
+        };
+        let paras = vec![para("short")];
+        let box_rect = pdf_typeset::Rect::new(0.0, 0.0, 400.0, 300.0);
+        let mut ts = Typesetter::with_system_fonts();
+        let fitted = text::autofit_text_box_spec(&mut ts, box_rect, 0.0, &body, &paras);
+        let size = match &fitted.blocks[0] {
+            pdf_typeset::Block::Paragraph(_, runs) => runs[0].style.size,
+            _ => panic!("首块应为段落"),
+        };
+        assert_eq!(size, 20.0, "放得下时不应缩放字号");
     }
 
     #[test]

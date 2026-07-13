@@ -131,6 +131,9 @@ pub struct ResolvedBodyProps {
     pub font_scale: Option<f32>,
     /// `normAutofit@lnSpcReduction` 折成的分数(0.1 = 减 10%)。
     pub ln_spc_reduction: Option<f32>,
+    /// `a:normAutofit` 是否生效(文字缩放适配)。区分「无 autofit」与「有
+    /// normAutofit 但未存 fontScale」——后者需消费侧按内容**重算**缩放(B-6)。
+    pub autofit_normal: bool,
     /// 是否裁剪到形状矩形(normAutofit 语义;PRD §9 风险 3 的锁定行为)。
     pub clip: bool,
     /// 纵排文字(`vert` ≠ `horz`;渲染水平降级 + 告警,PRD §1)。
@@ -150,6 +153,7 @@ impl Default for ResolvedBodyProps {
             wrap: true,
             font_scale: None,
             ln_spc_reduction: None,
+            autofit_normal: false,
             clip: false,
             vertical: false,
         }
