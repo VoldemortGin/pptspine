@@ -13,6 +13,8 @@ still change.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-07-13
+
 ### Added
 
 - **Recompute autofit for text boxes (B-6).** When `a:normAutofit` is on but no
