@@ -13,6 +13,21 @@ still change.
 
 ## [Unreleased]
 
+### Added
+
+- **Self-render SSIM regression gate (B-11 gate (4)).** Committed grayscale
+  references (`python/tests/ssim_refs/*.ssimref`) captured from our own
+  `to_pdf()` output on a pinned-font runner; CI re-renders the full synthetic
+  fixture matrix, rasterises through pdfspine and asserts per-page
+  SSIM ≥ 0.97 (plus size-match and no near-blank regression). Unlike the
+  LibreOffice oracle (advisory, never-CI), this is a **CI-blocking** gate that
+  turns any unintended render drift into a red build. Regenerate deliberately
+  after an intended render change with
+  `python scripts/ssim_baseline.py --make-references`. The pytest gate is
+  font-runner-sensitive, so it enforces on ubuntu / py3.12 only (gated by
+  `PPTSPINE_SSIM_GATE`); the rest of the matrix skips it. CI now installs
+  `pdfspine>=0.3` for the read-back gates.
+
 ## [0.3.0] — 2026-07-08
 
 ### Added

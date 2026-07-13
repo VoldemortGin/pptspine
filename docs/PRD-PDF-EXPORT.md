@@ -369,9 +369,12 @@ chain (B-8/B-9) lands later but **before GA**. Each task: why · effort · engin
   `slide_size_points`, `get_text_words` EMU→pt coordinate asserts (1 pt tolerance), image survival via
   `extractIMGINFO`, no page `_near_blank` (`render_diff.py:463-469`); (3) local-only advisory:
   LibreOffice oracle SSIM in the 0.80–0.90 band via `render_diff.py` `ssim`:242-281 (never CI);
-  (4) follow-up: committed `.ssimref` refs at `--min-ssim 0.97` per pdfspine
-  `.github/workflows/ci.yml:189-194` once renders stabilize.
-  · **状态**: done(告警逐种类上浮、`font_map` 覆盖、README 能力表)。
+  (4) committed `.ssimref` refs at `--min-ssim 0.97` per pdfspine
+  `.github/workflows/ci.yml:189-194` — a **self-render** regression gate (our own
+  `to_pdf()` raster vs committed grayscale references), not the LO oracle.
+  · **状态**: done(告警逐种类上浮、`font_map` 覆盖、README 能力表;门(4) 落地——
+  `scripts/ssim_baseline.py` + `python/tests/ssim_refs/*.ssimref` + `test_ssim_gate.py`,
+  固定字体 runner 上 `--min-ssim 0.97` 强制,`--make-references` 有意重生成)。
 
 ---
 

@@ -78,8 +78,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      # `pdfspine` is the PyMuPDF-compatible read-back engine the PDF-export gates
+      # rasterize + score against (page count / rect / get_text_words / SSIM). It
+      # ships no `conformance/` source, so the gates replicate its scoring math
+      # in-repo; the pip package supplies only the reader.
       - name: Install maturin + test deps
-        run: pip install "maturin>=1.12,<2" pytest
+        run: pip install "maturin>=1.12,<2" pytest "pdfspine>=0.3"
       # Editable install builds the extension WITH OCR compiled in (ppt-ocr is a
       # non-optional workspace member) and ships the in-repo `pptspine/_models`
       # weights, so the OCR test recognizes the bundled fixture offline.
@@ -87,6 +91,16 @@ jobs:
         run: pip install -e .
       - name: pytest
         run: pytest
+      # Self-render SSIM gate (PRD-PDF-EXPORT B-11 gate (4)): our `to_pdf()` raster
+      # vs committed `.ssimref` references, per-page SSIM >= 0.97. Font-substitution
+      # variance makes it runner-sensitive (PRD §9 risk 5), so it is committed on a
+      # pinned-font runner and enforced on ONE (ubuntu / py3.12) only — the default
+      # `pytest` run above skips it unless PPTSPINE_SSIM_GATE is set.
+      - name: Self-render SSIM gate (pinned-font runner only)
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        env:
+          PPTSPINE_SSIM_GATE: "1"
+        run: pytest python/tests/test_ssim_gate.py -q
 
   # ----------------------------------------------------------------- wheels
   wheels:
