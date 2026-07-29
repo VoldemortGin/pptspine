@@ -13,6 +13,14 @@ still change.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-07-29
+
+### Changed
+
+- **BREAKING: 仅支持 Python 3.14。** `requires-python` 收紧为 `>=3.14,<3.15`，
+  classifiers 只保留 3.14；CI 测试矩阵与 release 工作流全部固定在 3.14。
+  wheel 仍是 abi3-py311 构建，但元数据层面只允许安装到 Python 3.14。
+
 ## [0.4.0] — 2026-07-13
 
 ### Added

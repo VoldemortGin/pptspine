@@ -68,7 +68,7 @@ OCRSPINE_MODELS="$(cd ../ocrspine && pwd)/models" \
 
 ## 约定
 
-- Python **3.11+**;Rust **2021** 边缘;import 顺序 **stdlib > 三方 > 本地**;简体中文 docstring/注释,
+- Python **3.14**;Rust **2021** 边缘;import 顺序 **stdlib > 三方 > 本地**;简体中文 docstring/注释,
   匹配家族风格。
 - **TDD**——测试即规格(`python/tests/conftest.py` 用纯 Python `zipfile` 合成最小 .pptx,不落二进制 fixture)。
 - **最小改动**——只改需求要求的部分。
