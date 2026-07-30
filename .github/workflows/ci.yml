@@ -31,7 +31,7 @@ jobs:
       # `cargo` (clippy/test) link path.
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.14"
+          python-version: "3.12"
       - name: rustfmt
         run: cargo fmt --all --check
       - name: clippy (-D warnings)
@@ -53,7 +53,7 @@ jobs:
       # `CARGO_MANIFEST_DIR/models` weights, fetched by cargo.
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.14"
+          python-version: "3.12"
       # Exclude `py-bindings`: it's a PyO3 `extension-module` cdylib that has no
       # `#[test]`s and cannot link a test binary without an interpreter (macOS's
       # linker rejects the undefined `Py*` symbols; Linux tolerates them). It's
@@ -69,7 +69,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        python: ["3.14"]
+        python: ["3.12", "3.13", "3.14"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -94,10 +94,10 @@ jobs:
       # Self-render SSIM gate (PRD-PDF-EXPORT B-11 gate (4)): our `to_pdf()` raster
       # vs committed `.ssimref` references, per-page SSIM >= 0.97. Font-substitution
       # variance makes it runner-sensitive (PRD §9 risk 5), so it is committed on a
-      # pinned-font runner and enforced on ONE (ubuntu / py3.14) only — the default
+      # pinned-font runner and enforced on ONE (ubuntu / py3.12) only — the default
       # `pytest` run above skips it unless PPTSPINE_SSIM_GATE is set.
       - name: Self-render SSIM gate (pinned-font runner only)
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.14'
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         env:
           PPTSPINE_SSIM_GATE: "1"
         run: pytest python/tests/test_ssim_gate.py -q
@@ -115,7 +115,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.96.0
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.14"
+          python-version: "3.12"
       - name: Build abi3 wheel
         uses: PyO3/maturin-action@v1
         with:

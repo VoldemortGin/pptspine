@@ -13,6 +13,15 @@ still change.
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-07-30
+
+### Changed
+
+- **重新放宽 Python 支持到 3.12+。** `requires-python` 从 `>=3.14,<3.15` 放宽为
+  `>=3.12`（无上界），classifiers 恢复 3.12 / 3.13 / 3.14；CI pytest 矩阵覆盖
+  3.12–3.14，固定版 setup-python 与 SSIM 门改用 3.12。wheel 仍是 abi3-py311
+  构建，二进制不变。
+
 ## [0.5.0] — 2026-07-29
 
 ### Changed
