@@ -55,13 +55,18 @@ ships no models. To build from source instead, see below.
 ## Build (from the package root)
 
 ```bash
-uv venv .venv
-VIRTUAL_ENV="$(pwd)/.venv" uv pip install maturin pytest
-# Structural parsing needs no models. The OCR path resolves models from
-# ../ocrspine/models by default (or set OCRSPINE_MODELS).
-OCRSPINE_MODELS="$(cd ../ocrspine && pwd)/models" \
-  VIRTUAL_ENV="$(pwd)/.venv" .venv/bin/maturin develop --release
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python maturin
+VIRTUAL_ENV="$(pwd)/.venv" .venv/bin/maturin develop --release --locked --uv --extras test
 ```
+
+The `test` extra installs pytest and the pdfspine PDF read-back engine. Cargo
+fetches `pdf-typeset` and test-only `pdf-fonts` from the same official pdfspine
+v0.8.0 commit, `f1f6ab4208876b0ba867edd76cc4e5da7ad8add2`; no sibling checkout
+is required. Installation may access the network; export and OCR run locally,
+with model weights supplied by the installed `ocrspine-models` package.
+See [migration validation](docs/pdfspine-v080-validation.md) for the actual
+wheel, export/SSIM results and coverage limits.
 
 ## Use from Python
 

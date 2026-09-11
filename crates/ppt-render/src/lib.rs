@@ -398,8 +398,7 @@ fn row_heights(
                 &body,
                 &cell.paragraphs,
             );
-            let outer =
-                ts.measure_text_box(&spec).height + emu_to_points(cell.mar_t + cell.mar_b);
+            let outer = ts.measure_text_box(&spec).height + emu_to_points(cell.mar_t + cell.mar_b);
             if rspan <= 1 {
                 needed[ri] = needed[ri].max(outer);
             } else {

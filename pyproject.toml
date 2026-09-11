@@ -43,7 +43,7 @@ Repository = "https://github.com/VoldemortGin/pptspine"
 Issues = "https://github.com/VoldemortGin/pptspine/issues"
 
 [project.optional-dependencies]
-test = ["pytest>=8"]
+test = ["pytest>=8", "pdfspine>=0.8,<0.9"]
 # OCR 已**全功能内建**。只有一个发布的 `pptspine` wheel,它**编进**了纯 Rust 的
 # PaddleOCR 引擎(`ppt-ocr` 是非可选的 workspace 成员,经 py-bindings 无条件链入);
 # ~28 MB 的 PP-OCRv5 ONNX 权重来自共享数据包 `ocrspine-models`(见上方 base
