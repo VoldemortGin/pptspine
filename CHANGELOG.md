@@ -13,8 +13,15 @@ still change.
 
 ## [Unreleased]
 
+### Added
+
+- Run-level `a:rPr@spc` (signed character spacing), `@baseline` (superscript/subscript using the document's own offset; glyph ×0.65) and `@cap` are parsed, inherited through `txStyles`/`lstStyle`, exposed in the run dict (`char_spacing_pt` / `baseline` / `cap`) and rendered via pdf-typeset `CharacterSpacing` / `ResolvedScriptPlacement`. Over-condensed paragraphs fall back with a `SignedSpacingFallback` warning; `cap=small` is approximated as all caps with a one-time `small-caps` warning. Default decks render byte-identical PDFs.
+- PDF export draws line ends `a:headEnd` / `a:tailEnd` (triangle / stealth / diamond / oval / arrow; sm/med/lg sized per LibreOffice ratios) on open outlines, shortening the stroke to the arrow base; inherited via `lnRef` → theme `lnStyleLst`. Unsupported kinds degrade with a `line-end-degraded` warning.
+
 ### Changed
 
+- `a:custGeom` is no longer silently drawn as a rectangle — it is approximated by its bounding box (connectors as a straight line) with a `custom-geometry-approximated` warning; custGeom colored only via `p:style` is now drawn too.
+- Python export warnings of the `Custom` kind now surface once per kind (previously collapsed into one).
 - Align PDF export dependencies with pdfspine v0.8.0 (2026-09-10, `91e0255`;
   previously unrecorded): `pdf-typeset` / `pdf-fonts` git deps and the
   validation notes in `docs/pdfspine-v080-validation.md`.
