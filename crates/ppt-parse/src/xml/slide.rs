@@ -64,6 +64,8 @@ pub struct PartData {
     pub tx_styles: Option<TxStyles>,
     /// `p:cSld > p:bg`(slide / layout / master 皆可有,B-10)。
     pub background: Option<Background>,
+    /// 根元素 `p:sld@showMasterSp` / `p:sldLayout@showMasterSp`;`None` = 缺省(显示)。
+    pub show_master_sp: Option<bool>,
 }
 
 /// 解析一个形部件。`rels_xml` 是该部件的 `.rels` 文本(用于把图片 `r:embed` 映射到
@@ -97,6 +99,9 @@ pub fn parse_part(
                     b"clrMapOvr" => out.clr_map_ovr = parse_clr_map_ovr(&mut reader),
                     b"txStyles" => out.tx_styles = Some(parse_tx_styles(&mut reader)),
                     b"bg" => out.background = parse_bg(&mut reader, &ctx),
+                    b"sld" | b"sldLayout" => {
+                        out.show_master_sp = attr_of(&e, b"showMasterSp").map(ooxml_bool);
+                    }
                     // 其余容器(sld / cSld / sldMaster …)继续下钻。
                     _ => {}
                 }

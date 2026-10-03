@@ -323,6 +323,7 @@ mod tests {
             notes: notes.map(|s| s.to_string()),
             clr_map_ovr: None,
             background: None,
+            show_master_sp: true,
         }
     }
 

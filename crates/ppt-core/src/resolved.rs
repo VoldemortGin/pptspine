@@ -31,6 +31,11 @@ pub struct ResolvedSlide {
     /// 背景(slide → layout → master 链第一个获胜;`bgRef` 已经主题终端化,
     /// B-10);`None` = 不铺背景。
     pub background: Option<ResolvedBackground>,
+    /// 继承自 slideMaster / slideLayout 的**非占位符**形状(logo、装饰条、页脚线等):
+    /// master 层在前、layout 层在后,层内按文档顺序;绘制在背景之上、`shapes` 之下。
+    /// 已按 `showMasterSp`(slide / layout)过滤;占位符(`p:ph`)是模板,从不进这里。
+    pub inherited_shapes: Vec<ResolvedShape>,
+    /// slide 自身的形状。
     pub shapes: Vec<ResolvedShape>,
 }
 

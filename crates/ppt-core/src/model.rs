@@ -35,6 +35,8 @@ pub struct Slide {
     pub clr_map_ovr: Option<ClrMap>,
     /// 幻灯片自身的背景(`p:bg`,§3.o);`None` = 沿 layout → master 链继承。
     pub background: Option<Background>,
+    /// `p:sld@showMasterSp`(缺省 true):为 false 时不画 layout / master 的非占位符形状。
+    pub show_master_sp: bool,
 }
 
 /// 幻灯片背景(`p:bg`,§3.o,B-10)。

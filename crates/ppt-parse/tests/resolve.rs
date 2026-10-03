@@ -1104,3 +1104,182 @@ fn resolve_without_inheritance_parts_is_safe() {
     assert!(run.bold);
     assert_eq!(run.color.rgb, [0x00, 0x00, 0x00], "链上全缺兜底黑");
 }
+
+// ---- master / layout 非占位符形状继承(showMasterSp)--------------------------
+
+/// master:title 占位符(模板,不画)+ accent1 装饰矩形 + 无字号的页脚文本框
+/// (字号 / 字体应来自 master `otherStyle`)。
+fn master_with_graphics() -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldMaster {XMLNS}>
+  <p:cSld>
+    <p:spTree>
+      <p:sp>
+        <p:nvSpPr><p:cNvPr id="2" name="Title Placeholder 1"/><p:cNvSpPr/>
+          <p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
+        <p:spPr><a:xfrm><a:off x="838200" y="365125"/><a:ext cx="7772400" cy="1325563"/></a:xfrm></p:spPr>
+        <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Click to edit Master title style</a:t></a:r></a:p></p:txBody>
+      </p:sp>
+      <p:sp>
+        <p:nvSpPr><p:cNvPr id="4" name="Bar"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+        <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="9144000" cy="254000"/></a:xfrm>
+          <a:prstGeom prst="rect"/><a:solidFill><a:schemeClr val="accent1"/></a:solidFill></p:spPr>
+      </p:sp>
+      <p:sp>
+        <p:nvSpPr><p:cNvPr id="5" name="Footer Text"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>
+        <p:spPr><a:xfrm><a:off x="254000" y="6350000"/><a:ext cx="3000000" cy="300000"/></a:xfrm></p:spPr>
+        <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>ACME Confidential</a:t></a:r></a:p></p:txBody>
+      </p:sp>
+    </p:spTree>
+  </p:cSld>
+  <p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2"
+            accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6"
+            hlink="hlink" folHlink="folHlink"/>
+  <p:txStyles>
+    <p:titleStyle><a:lvl1pPr><a:defRPr sz="4400"/></a:lvl1pPr></p:titleStyle>
+    <p:bodyStyle><a:lvl1pPr><a:defRPr sz="2800"/></a:lvl1pPr></p:bodyStyle>
+    <p:otherStyle><a:lvl1pPr><a:defRPr sz="1100"><a:latin typeface="+mn-lt"/></a:defRPr></a:lvl1pPr></p:otherStyle>
+  </p:txStyles>
+</p:sldMaster>"#
+    )
+}
+
+/// layout:body 占位符(模板,不画)+ 一条页脚分隔线;`root_attrs` 注入根元素属性。
+fn layout_with_line(root_attrs: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldLayout {XMLNS}{root_attrs}>
+  <p:cSld>
+    <p:spTree>
+      <p:sp>
+        <p:nvSpPr><p:cNvPr id="3" name="Content 2"/><p:cNvSpPr/>
+          <p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr>
+        <p:spPr/>
+        <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>layout body prompt</a:t></a:r></a:p></p:txBody>
+      </p:sp>
+      <p:cxnSp>
+        <p:nvCxnSpPr><p:cNvPr id="6" name="Rule"/><p:cNvCxnSpPr/><p:nvPr/></p:nvCxnSpPr>
+        <p:spPr><a:xfrm><a:off x="254000" y="6300000"/><a:ext cx="8636000" cy="0"/></a:xfrm>
+          <a:prstGeom prst="line"/><a:ln w="12700"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:ln></p:spPr>
+      </p:cxnSp>
+    </p:spTree>
+  </p:cSld>
+</p:sldLayout>"#
+    )
+}
+
+fn slide_body_with_root(root_attrs: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld {XMLNS}{root_attrs}>
+  <p:cSld><p:spTree>
+    <p:sp>
+      <p:nvSpPr><p:cNvPr id="3" name="Content 2"/><p:cNvSpPr/><p:nvPr><p:ph idx="1"/></p:nvPr></p:nvSpPr>
+      <p:spPr/>
+      <p:txBody><a:bodyPr/><a:p><a:r><a:t>slide body</a:t></a:r></a:p></p:txBody>
+    </p:sp>
+  </p:spTree></p:cSld>
+</p:sld>"#
+    )
+}
+
+fn inherited_kinds(slide: &ResolvedSlide) -> Vec<&'static str> {
+    slide
+        .inherited_shapes
+        .iter()
+        .map(|s| match s {
+            ResolvedShape::Auto(_) => "auto",
+            ResolvedShape::TextBox(_) => "text",
+            ResolvedShape::Connector(_) => "connector",
+            _ => "other",
+        })
+        .collect()
+}
+
+/// 非占位符继承形状:master 层在前(文档顺序)、layout 层在后;占位符模板不进;
+/// slide 自身形状仍只在 `shapes`。
+#[test]
+fn master_and_layout_graphics_are_inherited_in_order() {
+    let slide = resolve_slide_parts(
+        &slide_body_with_root(""),
+        &layout_with_line(""),
+        &master_with_graphics(),
+    );
+    assert_eq!(inherited_kinds(&slide), ["auto", "text", "connector"]);
+    assert_eq!(slide.shapes.len(), 1, "slide.shapes 只含 slide 自身形状");
+    let ResolvedShape::Auto(bar) = &slide.inherited_shapes[0] else {
+        unreachable!()
+    };
+    let fill = bar.fill.expect("bar fill").color();
+    assert_eq!(
+        fill.rgb,
+        [0x44, 0x72, 0xC4],
+        "accent1 经 clrMap + theme 终端化"
+    );
+    let ResolvedShape::Connector(rule) = &slide.inherited_shapes[2] else {
+        unreachable!()
+    };
+    assert_eq!(
+        rule.stroke.as_ref().and_then(|s| s.color).map(|c| c.rgb),
+        Some([255, 0, 0])
+    );
+}
+
+/// 母版文本框文字走 master `otherStyle`(字号 11pt、`+mn-lt` 展开为主题 minor 字体)。
+#[test]
+fn master_text_uses_master_other_style() {
+    let slide = resolve_slide_parts(
+        &slide_body_with_root(""),
+        &layout_with_line(""),
+        &master_with_graphics(),
+    );
+    let run = &as_text_box(&slide.inherited_shapes[1]).paragraphs[0].runs[0];
+    assert_eq!(run.text, "ACME Confidential");
+    assert_eq!(run.size_pt, 11.0);
+    assert_eq!(run.font.as_deref(), Some("Calibri"));
+}
+
+/// slide `showMasterSp="0"`(隐藏背景图形):master 与 layout 图形都不画。
+#[test]
+fn slide_show_master_sp_false_hides_all_inherited() {
+    let slide = resolve_slide_parts(
+        &slide_body_with_root(r#" showMasterSp="0""#),
+        &layout_with_line(""),
+        &master_with_graphics(),
+    );
+    assert!(
+        slide.inherited_shapes.is_empty(),
+        "{:?}",
+        inherited_kinds(&slide)
+    );
+    assert_eq!(slide.shapes.len(), 1);
+}
+
+/// layout `showMasterSp="0"`:只隐藏 master 图形,layout 自身图形照画。
+#[test]
+fn layout_show_master_sp_false_hides_master_only() {
+    let slide = resolve_slide_parts(
+        &slide_body_with_root(""),
+        &layout_with_line(r#" showMasterSp="0""#),
+        &master_with_graphics(),
+    );
+    assert_eq!(inherited_kinds(&slide), ["connector"]);
+}
+
+/// 显式 `showMasterSp="1"` 与缺省同义。
+#[test]
+fn show_master_sp_true_is_default() {
+    let slide = resolve_slide_parts(
+        &slide_body_with_root(r#" showMasterSp="1""#),
+        &layout_with_line(r#" showMasterSp="true""#),
+        &master_with_graphics(),
+    );
+    assert_eq!(inherited_kinds(&slide), ["auto", "text", "connector"]);
+}
+
+/// 只有占位符的 master / layout(既有 fixture 的形态)→ 无继承形状。
+#[test]
+fn placeholder_only_parts_inherit_nothing() {
+    assert!(resolve_default().inherited_shapes.is_empty());
+}

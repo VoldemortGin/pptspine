@@ -123,6 +123,7 @@ Every row: verdict + evidence + effort + model growth needed. PARSED rows are in
 | s | non-table `graphicFrame` rect (charts/SmartArt/OLE) | **MISSING — rect lost** | `table.map(...)` returns `None` `slide.rs:494-500` | **S** | `Shape::Placeholder{rect, kind}` variant |
 | t | connectors `p:cxnSp` | **DROPPED** | not in container match `slide.rs:71-93` (verified) | **S–M** | `Shape::Connector` (≈ AutoShape minus txBody) |
 | u | `mc:AlternateContent` | **DROPPED WHOLESALE — shape loss in newer decks** | unknown name → skip `slide.rs:92` | **S** | none — walker descends into `mc:Fallback` |
+| v | slideMaster / slideLayout **non-placeholder** shapes (logos, decorative bars, footer rules, fixed footer text) + `showMasterSp` | **IMPLEMENTED** (2026-10) — `resolve.rs` `resolve_inherited`: master shapes then layout shapes (document order within each part), placeholders (`p:ph`) skipped as templates; `p:sld@showMasterSp="0"` hides both master and layout graphics (PowerPoint "Hide background graphics"), `p:sldLayout@showMasterSp="0"` hides master graphics only. Layout / master parts are now parsed with their own rels, so their pictures (and picture backgrounds) resolve `r:embed`. Text in those shapes uses the non-placeholder chain (master `otherStyle` + `defaultTextStyle`); colors use the slide's effective clrMap. `to_text` / `to_markdown` / `Slide.shapes()` stay slide-only. `p:hf` auto footer placeholders (`dt`/`ftr`/`sldNum` not copied onto the slide) are **not** rendered — follow-up | — | `Slide.show_master_sp`, `LayoutPart.show_master_sp`, `ResolvedSlide.inherited_shapes` |
 
 ---
 
@@ -139,6 +140,12 @@ and `p:clrMapOvr` (slide/layout).
 2. Else match by `type`, with the PowerPoint equivalence classes: `title ↔ ctrTitle`,
    `body ↔ subTitle ↔ (obj-ish placeholders holding text)`; `dt`/`ftr`/`sldNum` match by type only.
 3. Layout → master falls back to type-only matching (a master has one title ph + one body ph).
+
+**Inherited graphics:** non-placeholder shapes on the master and the layout are drawn on every slide
+that uses them — above the background, below the slide's own shapes (master → layout → slide, document
+order within each part). Placeholders on master/layout are templates and are never drawn.
+`p:sld@showMasterSp="0"` hides master *and* layout graphics; `p:sldLayout@showMasterSp="0"` hides
+the master's only (§3.v).
 
 **Geometry resolution:** first `a:xfrm` found walking slide ph → layout ph → master ph wins whole
 (no per-field merge — matches PowerPoint). Non-placeholder shapes keep their own xfrm (required on them).
@@ -183,7 +190,9 @@ types in `ppt-core` (new `resolved` module, plain data).** Rationale:
 ### 4.3 The "resolved slide" IR (handed to ppt-render)
 
 `ResolvedPresentation{ slide_size, slides: Vec<ResolvedSlide> }`;
-`ResolvedSlide{ background: Option<Fill>, shapes: Vec<ResolvedShape> }` in spTree z-order.
+`ResolvedSlide{ background: Option<Fill>, inherited_shapes: Vec<ResolvedShape>, shapes: Vec<ResolvedShape> }`
+in z-order (`inherited_shapes` = master then layout non-placeholder shapes, already filtered by
+`showMasterSp`; `shapes` = the slide's own spTree).
 Every `ResolvedShape` carries: a **materialized rect** (placeholder geometry filled in), `rot`/flips,
 terminal RGB colors (no scheme refs survive), resolved font names, fully-merged para/run/body props
 (no `Option`-inheritance left), and for groups a `Transform` (offset/scale from `(child−chOff)·(ext/chExt)+off`,

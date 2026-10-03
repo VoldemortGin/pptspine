@@ -1499,3 +1499,163 @@ def caps_pptx_bytes() -> bytes:
             + _run_xml("plain")
         )
     )
+
+
+# --- master / layout 非占位符形状继承(logo / 装饰条 / 页脚线;showMasterSp)--------
+
+_MS_NS = """xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+             xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+             xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main\""""
+
+# master:title / body 空占位符(模板,不应出现在输出)+ logo 图片(经 master rels)
+# + 蓝色顶部装饰条 + 无直接格式的页脚文字(字号 / 颜色应来自 master otherStyle)。
+_MS_MASTER = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldMaster {_MS_NS}>
+  <p:cSld>
+    <p:spTree>
+      <p:sp>
+        <p:nvSpPr><p:cNvPr id="2" name="Title Placeholder 1"/><p:cNvSpPr/>
+          <p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
+        <p:spPr><a:xfrm><a:off x="838200" y="365125"/><a:ext cx="7772400" cy="1325563"/></a:xfrm></p:spPr>
+        <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Master title prompt</a:t></a:r></a:p></p:txBody>
+      </p:sp>
+      <p:sp>
+        <p:nvSpPr><p:cNvPr id="3" name="Body Placeholder 2"/><p:cNvSpPr/>
+          <p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr>
+        <p:spPr><a:xfrm><a:off x="838200" y="1825625"/><a:ext cx="7772400" cy="3000000"/></a:xfrm></p:spPr>
+        <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Master body prompt</a:t></a:r></a:p></p:txBody>
+      </p:sp>
+      <p:pic>
+        <p:nvPicPr><p:cNvPr id="4" name="Logo"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+        <p:blipFill><a:blip r:embed="rId3"/></p:blipFill>
+        <p:spPr><a:xfrm><a:off x="7620000" y="381000"/><a:ext cx="1270000" cy="635000"/></a:xfrm>
+          <a:prstGeom prst="rect"/></p:spPr>
+      </p:pic>
+      <p:sp>
+        <p:nvSpPr><p:cNvPr id="5" name="Top Bar"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+        <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="9144000" cy="254000"/></a:xfrm>
+          <a:prstGeom prst="rect"/><a:solidFill><a:srgbClr val="0000FF"/></a:solidFill></p:spPr>
+      </p:sp>
+      <p:sp>
+        <p:nvSpPr><p:cNvPr id="6" name="Footer Text"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>
+        <p:spPr><a:xfrm><a:off x="254000" y="6350000"/><a:ext cx="4000000" cy="400000"/></a:xfrm></p:spPr>
+        <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>ACME Confidential</a:t></a:r></a:p></p:txBody>
+      </p:sp>
+    </p:spTree>
+  </p:cSld>
+  <p:clrMap bg1="lt1" tx1="dk1" bg2="lt2" tx2="dk2" accent1="accent1" accent2="accent2"
+            accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6"
+            hlink="hlink" folHlink="folHlink"/>
+  <p:sldLayoutIdLst><p:sldLayoutId id="2147483649" r:id="rId2"/></p:sldLayoutIdLst>
+  <p:txStyles>
+    <p:titleStyle><a:lvl1pPr><a:defRPr sz="4400"/></a:lvl1pPr></p:titleStyle>
+    <p:bodyStyle><a:lvl1pPr><a:defRPr sz="2400"/></a:lvl1pPr></p:bodyStyle>
+    <p:otherStyle>
+      <a:lvl1pPr><a:defRPr sz="1100"><a:solidFill><a:srgbClr val="7F007F"/></a:solidFill>
+        <a:latin typeface="+mn-lt"/></a:defRPr></a:lvl1pPr>
+    </p:otherStyle>
+  </p:txStyles>
+</p:sldMaster>"""
+
+_MS_MASTER_RELS = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="../theme/theme1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/>
+</Relationships>"""
+
+
+def _ms_layout(root_attrs: str) -> str:
+    """layout:body 空占位符(模板)+ 红色页脚分隔线。"""
+    return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sldLayout {_MS_NS}{root_attrs}>
+  <p:cSld>
+    <p:spTree>
+      <p:sp>
+        <p:nvSpPr><p:cNvPr id="2" name="Content 1"/><p:cNvSpPr/>
+          <p:nvPr><p:ph type="body" idx="1"/></p:nvPr></p:nvSpPr>
+        <p:spPr/>
+        <p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Layout body prompt</a:t></a:r></a:p></p:txBody>
+      </p:sp>
+      <p:cxnSp>
+        <p:nvCxnSpPr><p:cNvPr id="7" name="Footer Rule"/><p:cNvCxnSpPr/><p:nvPr/></p:nvCxnSpPr>
+        <p:spPr><a:xfrm><a:off x="254000" y="6223000"/><a:ext cx="8636000" cy="0"/></a:xfrm>
+          <a:prstGeom prst="line"/><a:ln w="25400"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:ln></p:spPr>
+      </p:cxnSp>
+    </p:spTree>
+  </p:cSld>
+</p:sldLayout>"""
+
+
+def _ms_slide(root_attrs: str) -> str:
+    """slide:body 占位符正文 + 一个绿色矩形(z 序应在所有继承图形之上)。"""
+    return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld {_MS_NS}{root_attrs}>
+  <p:cSld>
+    <p:spTree>
+      <p:sp>
+        <p:nvSpPr><p:cNvPr id="2" name="Content 1"/><p:cNvSpPr/>
+          <p:nvPr><p:ph idx="1"/></p:nvPr></p:nvSpPr>
+        <p:spPr/>
+        <p:txBody><a:bodyPr/><a:p><a:r><a:t>Slide body text</a:t></a:r></a:p></p:txBody>
+      </p:sp>
+      <p:sp>
+        <p:nvSpPr><p:cNvPr id="3" name="Slide Box"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+        <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1270000" cy="1270000"/></a:xfrm>
+          <a:prstGeom prst="rect"/><a:solidFill><a:srgbClr val="00FF00"/></a:solidFill></p:spPr>
+      </p:sp>
+    </p:spTree>
+  </p:cSld>
+</p:sld>"""
+
+
+_MS_CONTENT_TYPES = _CONTENT_TYPES_CHAIN.replace(
+    '<Default Extension="xml" ContentType="application/xml"/>',
+    '<Default Extension="xml" ContentType="application/xml"/>\n'
+    '  <Default Extension="png" ContentType="image/png"/>',
+)
+
+
+def build_master_graphics_pptx(
+    slide_attrs: str = "", layout_attrs: str = "", master_xml: str = _MS_MASTER
+) -> bytes:
+    """master(logo + 装饰条 + 页脚字)/ layout(分隔线)/ slide(正文 + 绿框)三层 deck;
+    ``slide_attrs`` / ``layout_attrs`` 注入根元素属性(如 `` showMasterSp="0"``)。"""
+    return _zip_pptx(
+        {
+            "[Content_Types].xml": _MS_CONTENT_TYPES,
+            "_rels/.rels": _ROOT_RELS,
+            "ppt/presentation.xml": _MASTER_BG_PRESENTATION,
+            "ppt/_rels/presentation.xml.rels": _MASTER_BG_PRESENTATION_RELS,
+            "ppt/slides/slide1.xml": _ms_slide(slide_attrs),
+            "ppt/slides/_rels/slide1.xml.rels": _MASTER_BG_SLIDE_RELS,
+            "ppt/slideLayouts/slideLayout1.xml": _ms_layout(layout_attrs),
+            "ppt/slideLayouts/_rels/slideLayout1.xml.rels": _MASTER_BG_LAYOUT_RELS,
+            "ppt/slideMasters/slideMaster1.xml": master_xml,
+            "ppt/slideMasters/_rels/slideMaster1.xml.rels": _MS_MASTER_RELS,
+            "ppt/theme/theme1.xml": _E2E_THEME,
+            "ppt/media/image1.png": _OCR_SAMPLE_PNG.read_bytes(),
+        }
+    )
+
+
+@pytest.fixture(scope="session")
+def master_graphics_pptx() -> tuple[bytes, bytes, bytes]:
+    """``(default, slide_hidden, layout_hidden)``:缺省 / slide ``showMasterSp="0"`` /
+    layout ``showMasterSp="0"``。"""
+    return (
+        build_master_graphics_pptx(),
+        build_master_graphics_pptx(slide_attrs=' showMasterSp="0"'),
+        build_master_graphics_pptx(layout_attrs=' showMasterSp="0"'),
+    )
+
+
+@pytest.fixture(scope="session")
+def master_picture_bg_pptx_bytes() -> bytes:
+    """master 带图片背景(``r:embed`` 走 master rels);slide ``showMasterSp="0"`` 隐去 logo,
+    页面上只剩背景图。"""
+    bg = '<p:bg><p:bgPr><a:blipFill><a:blip r:embed="rId3"/></a:blipFill></p:bgPr></p:bg>'
+    return build_master_graphics_pptx(
+        slide_attrs=' showMasterSp="0"',
+        master_xml=_MS_MASTER.replace("<p:cSld>", "<p:cSld>" + bg, 1),
+    )
