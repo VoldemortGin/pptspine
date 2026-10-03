@@ -79,6 +79,7 @@ pub fn parse_part(
     let ctx = Ctx {
         rels: &rels,
         media_index,
+        depth: std::cell::Cell::new(0),
     };
 
     let mut out = PartData::default();
@@ -271,10 +272,16 @@ fn parse_bg_pr<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Option
     bg
 }
 
-/// 解析期的只读上下文。
+/// 形状容器(`p:grpSp` / `mc:AlternateContent`)的最大嵌套深度。超过的子树整体跳过
+/// (与"未知元素跳过"同一降级口径),防恶意深嵌套把递归下降解析压爆栈;下游
+/// resolve / render / export 对组合的递归也因此有界。
+const MAX_NEST_DEPTH: u32 = 64;
+
+/// 解析期的上下文(`depth` 为当前形状容器嵌套深度)。
 struct Ctx<'a> {
     rels: &'a BTreeMap<String, Relationship>,
     media_index: &'a BTreeMap<String, usize>,
+    depth: std::cell::Cell<u32>,
 }
 
 /// 经部件 rels 把一个 `r:embed` 关系 id 折成 media 裸文件名(如 `image1.png`)。
@@ -343,8 +350,21 @@ fn dispatch_shape<R: std::io::BufRead>(
             }
         }
         b"cxnSp" => out.push(parse_cxn_sp(reader)),
-        b"grpSp" => out.push(Shape::Group(parse_grp_sp(reader, ctx))),
-        b"AlternateContent" => parse_alternate_content(reader, ctx, out),
+        b"grpSp" | b"AlternateContent" => {
+            let depth = ctx.depth.get();
+            if depth >= MAX_NEST_DEPTH {
+                // 嵌套过深:整棵子树跳过(skip_element 是迭代的,不吃栈)。
+                skip_element(reader, name);
+                return true;
+            }
+            ctx.depth.set(depth + 1);
+            if name == b"grpSp" {
+                out.push(Shape::Group(parse_grp_sp(reader, ctx)));
+            } else {
+                parse_alternate_content(reader, ctx, out);
+            }
+            ctx.depth.set(depth);
+        }
         _ => return false,
     }
     true

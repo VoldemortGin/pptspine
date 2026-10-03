@@ -1,13 +1,76 @@
 //! pptx zip 容器读取。
 //!
 //! `.pptx` = OOXML = 一个 zip 包。这里把整个包**一次性读进内存**(演示文稿通常不大),
-//! 然后按名取用各 XML 部件与 media 字节。所有失败收敛成 [`PptError::Zip`]。
+//! 然后按名取用各 XML 部件与 media 字节。容器层失败收敛成 [`PptError::Zip`];
+//! 资源限额([`ZipLimits`])命中收敛成 [`PptError::LimitExceeded`]。
 
 use std::collections::BTreeMap;
 use std::io::{Cursor, Read};
 
-use ppt_core::{PptError, Result};
+use ppt_core::{LimitKind, PptError, Result};
 use zip::ZipArchive;
+
+/// 读取 zip 包时的资源限额(防 zip 炸弹 / 伪造头字段 / 恶意条目名)。
+///
+/// 任何一项超限都返回 [`PptError::LimitExceeded`],绝不 panic、绝不按声明值巨量预分配。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ZipLimits {
+    /// 最大条目数(含目录条目)。
+    pub max_entries: usize,
+    /// 单个条目的最大解压字节数(先比声明值,再以实际读出量兜底)。
+    pub max_entry_bytes: u64,
+    /// 全部条目的累计实际解压字节上限。
+    pub max_total_bytes: u64,
+    /// 最大压缩比(解压 / 压缩);仅当解压量 > 1 MiB 时才判定(避免误伤小文件)。
+    pub max_compression_ratio: u32,
+    /// 条目名最大字节长度。
+    pub max_name_len: usize,
+}
+
+/// 压缩比检查的起判门槛:解压量不超过 1 MiB 的条目不做压缩比判定(避免误伤小文件)。
+const RATIO_MIN_BYTES: u64 = 1024 * 1024;
+
+impl Default for ZipLimits {
+    fn default() -> Self {
+        ZipLimits {
+            max_entries: 10_000,
+            max_entry_bytes: 256 * 1024 * 1024,
+            max_total_bytes: 1024 * 1024 * 1024,
+            max_compression_ratio: 1000,
+            max_name_len: 1024,
+        }
+    }
+}
+
+fn limit_err(kind: LimitKind, limit: u64, actual: u64) -> PptError {
+    PptError::LimitExceeded {
+        kind,
+        limit,
+        actual,
+    }
+}
+
+/// `uncompressed / compressed > max_ratio` 且 `uncompressed > RATIO_MIN_BYTES` 时报错。
+fn check_ratio(uncompressed: u64, compressed: u64, limits: &ZipLimits) -> Result<()> {
+    if uncompressed <= RATIO_MIN_BYTES {
+        return Ok(());
+    }
+    let max = u128::from(limits.max_compression_ratio);
+    if u128::from(uncompressed) > max * u128::from(compressed) {
+        let actual = uncompressed.checked_div(compressed).unwrap_or(u64::MAX);
+        return Err(limit_err(
+            LimitKind::CompressionRatio,
+            u64::from(limits.max_compression_ratio),
+            actual,
+        ));
+    }
+    Ok(())
+}
+
+/// 条目名是否安全:非绝对路径、无 `..` 段、无 NUL(复用 zip 的 `enclosed_name` 再加严)。
+fn is_safe_name(file: &zip::read::ZipFile<'_>) -> bool {
+    file.enclosed_name().is_some() && !file.name().split(['/', '\\']).any(|seg| seg == "..")
+}
 
 /// 解包后的 pptx 原始部件集合(尚未解析 XML)。
 pub struct Package {
@@ -16,25 +79,77 @@ pub struct Package {
 }
 
 impl Package {
-    /// 从内存字节打开一个 pptx 包,读出全部条目。
-    pub fn open_bytes(bytes: &[u8]) -> Result<Package> {
+    /// 从内存字节打开一个 pptx 包,在 `limits` 约束下读出全部条目。
+    pub fn open_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Package> {
         let reader = Cursor::new(bytes);
         let mut archive =
             ZipArchive::new(reader).map_err(|e| PptError::Zip(format!("open archive: {e}")))?;
+        if archive.len() > limits.max_entries {
+            return Err(limit_err(
+                LimitKind::Entries,
+                limits.max_entries as u64,
+                archive.len() as u64,
+            ));
+        }
         let mut parts = BTreeMap::new();
+        let mut total: u64 = 0;
         for i in 0..archive.len() {
-            let mut file = archive
+            let file = archive
                 .by_index(i)
                 .map_err(|e| PptError::Zip(format!("entry {i}: {e}")))?;
+            let name_len = file.name_raw().len();
+            if name_len > limits.max_name_len {
+                return Err(limit_err(
+                    LimitKind::NameLength,
+                    limits.max_name_len as u64,
+                    name_len as u64,
+                ));
+            }
+            if !is_safe_name(&file) {
+                return Err(PptError::Zip(format!(
+                    "unsafe entry path: {:?}",
+                    file.name()
+                )));
+            }
             // 跳过目录条目。
             if file.is_dir() {
                 continue;
             }
             // 用 zip 规范化的名字(始终是 `/` 分隔)。
             let name = file.name().to_string();
-            let mut buf = Vec::with_capacity(file.size() as usize);
-            file.read_to_end(&mut buf)
+            let compressed = file.compressed_size();
+            let declared = file.size();
+            if declared > limits.max_entry_bytes {
+                return Err(limit_err(
+                    LimitKind::EntryBytes,
+                    limits.max_entry_bytes,
+                    declared,
+                ));
+            }
+            check_ratio(declared, compressed, limits)?;
+
+            // 不信任声明大小:不按它预分配,按"本条目 / 总量剩余"二者较小者 +1 截断读取,
+            // 读满即判超限(声明值造假也逃不掉)。
+            let remaining_total = limits.max_total_bytes.saturating_sub(total);
+            let cap = limits.max_entry_bytes.min(remaining_total);
+            let mut buf = Vec::new();
+            file.take(cap.saturating_add(1))
+                .read_to_end(&mut buf)
                 .map_err(|e| PptError::Zip(format!("read {name}: {e}")))?;
+            let actual = buf.len() as u64;
+            if actual > cap {
+                return Err(if actual > limits.max_entry_bytes {
+                    limit_err(LimitKind::EntryBytes, limits.max_entry_bytes, actual)
+                } else {
+                    limit_err(
+                        LimitKind::TotalBytes,
+                        limits.max_total_bytes,
+                        total + actual,
+                    )
+                });
+            }
+            check_ratio(actual, compressed, limits)?;
+            total += actual;
             parts.insert(name, buf);
         }
         Ok(Package { parts })

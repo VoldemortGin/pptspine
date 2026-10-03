@@ -14,7 +14,7 @@ pub mod style;
 pub mod theme;
 
 pub use color::{apply_transforms, ColorSpec, ColorTransform, ResolvedColor};
-pub use error::{PptError, Result};
+pub use error::{LimitKind, PptError, Result};
 pub use export::{presentation_markdown, presentation_text, slide_text};
 pub use geom::{emu_to_points, Emu, Point, Rect, EMU_PER_INCH, EMU_PER_POINT};
 pub use model::{
