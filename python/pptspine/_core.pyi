@@ -1,14 +1,27 @@
 """``pptspine._core`` —— Rust 扩展模块的类型存根(PEP 561)。
 
 形状 / OCR 结果以 ``dict[str, Any]`` 返回(可自省);键见 README。
+图表占位(``kind == "placeholder"``)的 ``chart`` 键形如 :class:`ChartDict`(非图表为 ``None``)。
 """
 
 from __future__ import annotations
 
 from os import PathLike
-from typing import Any, Literal
+from typing import Any, Literal, TypedDict
 
 __version__: str
+
+class ChartSeriesDict(TypedDict):
+    name: str | None
+    values: list[float | None]
+    format_code: str | None
+
+class ChartDict(TypedDict):
+    kind: str
+    title: str | None
+    categories: list[str]
+    series: list[ChartSeriesDict]
+    warnings: list[str]
 
 class PptError(Exception):
     """pptspine 异常层级的根。"""

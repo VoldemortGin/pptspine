@@ -95,7 +95,7 @@ fn show_jump(jump: &str, current: usize, count: usize) -> Option<usize> {
 
 /// 把相对某部件的 rels `Target` 解析成包内绝对部件路径(处理 `../` 与 `./`;
 /// 以 `/` 开头的视为包根绝对路径)。
-fn resolve_part_path(base_part: &str, target: &str) -> String {
+pub(crate) fn resolve_part_path(base_part: &str, target: &str) -> String {
     if let Some(abs) = target.strip_prefix('/') {
         return abs.to_string();
     }

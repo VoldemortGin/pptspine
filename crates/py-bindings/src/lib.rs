@@ -22,9 +22,9 @@ use ppt_core::export::{
 };
 use ppt_core::geom::emu_to_points;
 use ppt_core::model::{
-    AutoShape, Cell, Color, Connector, Fill, GraphicPlaceholder, Hyperlink, Paragraph, Picture,
-    Presentation as CorePresentation, Row, RunKind, Shape, Slide as CoreSlide, Stroke, Table,
-    TextFrame, TextRun,
+    AutoShape, Cell, Chart, Color, Connector, Fill, GraphicPlaceholder, Hyperlink, Paragraph,
+    Picture, Presentation as CorePresentation, Row, RunKind, Shape, Slide as CoreSlide, Stroke,
+    Table, TextFrame, TextRun,
 };
 use ppt_core::resolved::ResolvedPresentation;
 use ppt_core::style::{Caps, PlaceholderRef};
@@ -367,7 +367,30 @@ fn placeholder_dict<'py>(py: Python<'py>, p: &GraphicPlaceholder) -> PyResult<Bo
     d.set_item("rect", rect_emu)?;
     d.set_item("rect_points", rect_pts)?;
     d.set_item("uri", p.kind.as_deref())?;
+    match &p.chart {
+        Some(c) => d.set_item("chart", chart_dict(py, c)?)?,
+        None => d.set_item("chart", py.None())?,
+    }
     d.set_item("placeholder", py.None())?;
+    Ok(d)
+}
+
+/// 图表缓存数据 [`Chart`] -> dict(`kind` / `title` / `categories` / `series` / `warnings`)。
+fn chart_dict<'py>(py: Python<'py>, c: &Chart) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("kind", c.kind.name())?;
+    d.set_item("title", c.title.as_deref())?;
+    d.set_item("categories", &c.categories)?;
+    let series = PyList::empty(py);
+    for s in &c.series {
+        let sd = PyDict::new(py);
+        sd.set_item("name", s.name.as_deref())?;
+        sd.set_item("values", &s.values)?;
+        sd.set_item("format_code", s.format_code.as_deref())?;
+        series.append(sd)?;
+    }
+    d.set_item("series", series)?;
+    d.set_item("warnings", &c.warnings)?;
     Ok(d)
 }
 

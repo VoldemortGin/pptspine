@@ -10,7 +10,7 @@ mod markdown;
 pub mod reading_order;
 mod view;
 
-use crate::model::{Cell, Paragraph, Presentation, Slide, Table, TextFrame};
+use crate::model::{Cell, Chart, ChartKind, Paragraph, Presentation, Slide, Table, TextFrame};
 
 pub use markdown::presentation_markdown_with;
 pub use view::{presentation_text_with, slide_text_with, ExportOptions, TextOrder};
@@ -72,6 +72,133 @@ fn notes_text(slide: &Slide) -> Option<String> {
     match &slide.notes {
         Some(n) if !n.trim().is_empty() => Some(n.clone()),
         _ => None,
+    }
+}
+
+// ---- 图表辅助 -----------------------------------------------------------
+
+/// 图表标题行文字:有标题用标题,否则 `Chart (<kind>)`。
+fn chart_label(c: &Chart) -> String {
+    match &c.title {
+        Some(t) => format!("Chart: {}", one_line_text(t)),
+        None => format!("Chart ({})", c.kind.name()),
+    }
+}
+
+fn one_line_text(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// 图表还原成表格:表头(首列类别 / X,其余各系列名)+ 数据行(首列类别,其余为
+/// 按 `format_code` 格式化的值;缺点为空串)。无系列时为 `None`。
+fn chart_table(c: &Chart) -> Option<(Vec<String>, Vec<Vec<String>>)> {
+    if c.series.is_empty() {
+        return None;
+    }
+    let first = if matches!(c.kind, ChartKind::Scatter | ChartKind::Bubble) {
+        "X"
+    } else {
+        "Category"
+    };
+    let mut header = vec![first.to_string()];
+    header.extend(c.series.iter().enumerate().map(|(i, s)| {
+        s.name
+            .as_deref()
+            .map(one_line_text)
+            .unwrap_or_else(|| format!("Series {}", i + 1))
+    }));
+    let n = c
+        .series
+        .iter()
+        .map(|s| s.values.len())
+        .max()
+        .unwrap_or(0)
+        .max(c.categories.len());
+    let rows = (0..n)
+        .map(|i| {
+            let cat = match c.categories.get(i) {
+                Some(s) => one_line_text(s),
+                None if c.categories.is_empty() => (i + 1).to_string(),
+                None => String::new(),
+            };
+            let mut row = vec![cat];
+            row.extend(c.series.iter().map(|s| {
+                s.values
+                    .get(i)
+                    .copied()
+                    .flatten()
+                    .map(|v| format_number(v, s.format_code.as_deref()))
+                    .unwrap_or_default()
+            }));
+            row
+        })
+        .collect();
+    Some((header, rows))
+}
+
+/// 按 Excel 数字格式粗略格式化:`General` / 无格式 / 非数字格式 → 最短往返表示(整数不带
+/// `.0`);含 `0`/`#` 占位的格式按小数位数、千分位(`#,##0`)与百分号(`0.0%`)格式化。
+fn format_number(v: f64, code: Option<&str>) -> String {
+    let general = || {
+        if v.fract() == 0.0 && v.abs() < 1e15 {
+            format!("{v:.0}")
+        } else {
+            v.to_string()
+        }
+    };
+    let Some(code) = code else {
+        return general();
+    };
+    // 只看正数段;去掉 `"…"` 字面量与 `[…]` 修饰(颜色 / 区域)。
+    let section = code.split(';').next().unwrap_or("");
+    let mut fmt = String::new();
+    let (mut in_quote, mut in_bracket) = (false, false);
+    for ch in section.chars() {
+        match ch {
+            '"' => in_quote = !in_quote,
+            '[' if !in_quote => in_bracket = true,
+            ']' if !in_quote => in_bracket = false,
+            _ if !in_quote && !in_bracket => fmt.push(ch),
+            _ => {}
+        }
+    }
+    if section.eq_ignore_ascii_case("general") || !fmt.contains(['0', '#']) {
+        return general();
+    }
+    let percent = fmt.contains('%');
+    let decimals = fmt
+        .split_once('.')
+        .map(|(_, frac)| frac.chars().take_while(|c| matches!(c, '0' | '#')).count())
+        .unwrap_or(0);
+    let int_part = fmt.split('.').next().unwrap_or("");
+    let grouping = int_part.contains(",#") || int_part.contains(",0");
+    let x = if percent { v * 100.0 } else { v };
+    let mut s = format!("{x:.decimals$}");
+    if grouping {
+        s = group_thousands(&s);
+    }
+    if percent {
+        s.push('%');
+    }
+    s
+}
+
+/// 给定点数字串的整数部分加千分位逗号。
+fn group_thousands(s: &str) -> String {
+    let (sign, rest) = s.strip_prefix('-').map_or(("", s), |r| ("-", r));
+    let (int, frac) = rest
+        .split_once('.')
+        .map_or((rest, None), |(i, f)| (i, Some(f)));
+    let mut grouped = String::new();
+    for (i, ch) in int.chars().enumerate() {
+        if i > 0 && (int.len() - i) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(ch);
+    }
+    match frac {
+        Some(f) => format!("{sign}{grouped}.{f}"),
+        None => format!("{sign}{grouped}"),
     }
 }
 
@@ -158,6 +285,19 @@ fn escape_html(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numbers_follow_format_code_roughly() {
+        assert_eq!(format_number(3.0, None), "3");
+        assert_eq!(format_number(2.5, Some("General")), "2.5");
+        assert_eq!(format_number(-12.0, Some("General")), "-12");
+        assert_eq!(format_number(0.125, Some("0.0%")), "12.5%");
+        assert_eq!(format_number(1234.5, Some("#,##0.00")), "1,234.50");
+        assert_eq!(format_number(-1234567.0, Some("#,##0")), "-1,234,567");
+        assert_eq!(format_number(1.23456, Some("0.00")), "1.23");
+        assert_eq!(format_number(45000.0, Some("m/d/yyyy")), "45000");
+        assert_eq!(format_number(7.0, Some("[Red]\"$\"0.0")), "7.0");
+    }
     use crate::model::{Row, Shape, TextRun};
 
     fn run(text: &str) -> TextRun {

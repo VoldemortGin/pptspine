@@ -1,10 +1,12 @@
 //! quick-xml walker —— 按职责拆分:
 //! - [`presentation`]:解析 `presentation.xml`(画布尺寸 + 幻灯片顺序)。
 //! - [`slide`]:解析单张幻灯片 -> `Vec<Shape>`。
+//! - [`chart`]:解析图表部件 `c:chartSpace` -> `Chart`(只读缓存数据)。
 //!
 //! 本模块根放**关系(`.rels`)解析**这类被多处复用的小工具。所有 walker 都遵循家族约定:
 //! 未知元素跳过、缺失属性 → `None`、**绝不 panic**。
 
+pub mod chart;
 pub mod doc_props;
 pub mod notes;
 pub mod presentation;

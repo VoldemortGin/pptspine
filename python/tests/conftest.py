@@ -1852,3 +1852,124 @@ def master_picture_bg_pptx_bytes() -> bytes:
         slide_attrs=' showMasterSp="0"',
         master_xml=_MS_MASTER.replace("<p:cSld>", "<p:cSld>" + bg, 1),
     )
+
+
+# --- 图表数据抽取(``graphicFrame`` > ``c:chart`` → ``ppt/charts/chartN.xml`` 缓存)---------
+#
+# 每张 slide 一个图表帧,经 slide rels(rId5)指向各自的 ``chartN.xml``;图表 XML 只含缓存
+# (``strCache`` / ``numCache`` / 字面量),不带外部工作簿。
+
+_REL_CHART = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart"
+
+
+def _chart_frame(rid: str = "rId5", y: int = 1_600_000) -> str:
+    return f"""<p:graphicFrame>
+        <p:nvGraphicFramePr><p:cNvPr id="7" name="Chart 6"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>
+        <p:xfrm><a:off x="600000" y="{y}"/><a:ext cx="6000000" cy="3600000"/></p:xfrm>
+        <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">
+          <c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="{rid}"/>
+        </a:graphicData></a:graphic>
+      </p:graphicFrame>"""
+
+
+def _chart_space(plot: str, title: str = "") -> str:
+    return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
+              xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+              xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <c:chart>{title}<c:plotArea><c:layout/>{plot}</c:plotArea></c:chart>
+  <c:externalData r:id="rId1"><c:autoUpdate val="0"/></c:externalData>
+</c:chartSpace>"""
+
+
+def _pts(values: list[str | None]) -> str:
+    return "".join(
+        f'<c:pt idx="{i}"><c:v>{v}</c:v></c:pt>' for i, v in enumerate(values) if v is not None
+    )
+
+
+def _str_ref(values: list[str], ref: str = "Sheet1!$A$2") -> str:
+    return (
+        f"<c:strRef><c:f>{ref}</c:f><c:strCache><c:ptCount val=\"{len(values)}\"/>"
+        f"{_pts(list(values))}</c:strCache></c:strRef>"
+    )
+
+
+def _num_ref(values: list[str | None], fmt: str = "General", ref: str = "Sheet1!$B$2") -> str:
+    return (
+        f"<c:numRef><c:f>{ref}</c:f><c:numCache><c:formatCode>{fmt}</c:formatCode>"
+        f'<c:ptCount val="{len(values)}"/>{_pts(values)}</c:numCache></c:numRef>'
+    )
+
+
+def _ser(name: str, cats: str, vals: str, cat_tag: str = "cat", val_tag: str = "val") -> str:
+    return (
+        f"<c:ser><c:idx val=\"0\"/><c:order val=\"0\"/><c:tx>{_str_ref([name], 'Sheet1!$B$1')}</c:tx>"
+        f"<c:{cat_tag}>{cats}</c:{cat_tag}><c:{val_tag}>{vals}</c:{val_tag}></c:ser>"
+    )
+
+
+_BAR_CATS = _str_ref(["Q1", "Q2", "Q3"])
+_CHART_BAR = _chart_space(
+    '<c:barChart><c:barDir val="col"/><c:grouping val="clustered"/>'
+    + _ser("North", _BAR_CATS, _num_ref(["10", "20.5", "30"]))
+    + _ser("South", _BAR_CATS, _num_ref(["4", "5", "6"]))
+    + '<c:axId val="1"/><c:axId val="2"/></c:barChart><c:catAx><c:axId val="1"/></c:catAx>',
+    '<c:title><c:tx><c:rich><a:bodyPr/><a:p><a:r><a:t>Quarterly Sales</a:t></a:r></a:p>'
+    "</c:rich></c:tx></c:title><c:autoTitleDeleted val=\"0\"/>",
+)
+_CHART_PIE = _chart_space(
+    '<c:pieChart><c:varyColors val="1"/>'
+    + _ser("Share", _str_ref(["Apples", "Pears", "Plums"]), _num_ref(["0.25", "0.5", "0.25"], "0%"))
+    + "</c:pieChart>",
+    '<c:title><c:tx><c:strRef><c:f>Sheet1!$B$1</c:f><c:strCache><c:ptCount val="1"/>'
+    '<c:pt idx="0"><c:v>Fruit Mix</c:v></c:pt></c:strCache></c:strRef></c:tx></c:title>',
+)
+_CHART_SCATTER = _chart_space(
+    '<c:scatterChart><c:scatterStyle val="lineMarker"/>'
+    + _ser(
+        "Growth",
+        '<c:numLit><c:formatCode>General</c:formatCode><c:ptCount val="3"/>'
+        + _pts(["1", "2", "4"])
+        + "</c:numLit>",
+        _num_ref(["1.5", "3", "6.25"]),
+        cat_tag="xVal",
+        val_tag="yVal",
+    )
+    + "</c:scatterChart>",
+    '<c:autoTitleDeleted val="1"/>',
+)
+# 稀疏 ``pt``(ptCount=4,只给 idx 0 / 2)+ 缺 cache 的系列(只有 ``c:f``)。
+_CHART_SPARSE = _chart_space(
+    "<c:lineChart>"
+    + _ser("Dense", _str_ref(["Jan", "Feb", "Mar", "Apr"]), _num_ref(["1", None, "3", None]))
+    + '<c:ser><c:idx val="1"/><c:tx><c:v>Linked</c:v></c:tx>'
+    "<c:cat><c:strRef><c:f>Ext!$A$2:$A$5</c:f></c:strRef></c:cat>"
+    "<c:val><c:numRef><c:f>Ext!$B$2:$B$5</c:f></c:numRef></c:val></c:ser>"
+    "</c:lineChart>",
+)
+
+
+def build_chart_pptx() -> bytes:
+    """四张 slide:柱状(2 系列 × 3 类别,有标题,上方一段说明文字)/ 饼图(单系列,strRef
+    标题,``0%`` 格式)/ 散点(xVal numLit + yVal numRef,无标题)/ 折线(稀疏 pt + 缺 cache)。"""
+    slides = [
+        _chain_slide(_text_sp("Intro text", 600_000, 600_000) + _chart_frame()),
+        _chain_slide(_chart_frame()),
+        _chain_slide(_chart_frame()),
+        _chain_slide(_chart_frame()),
+    ]
+    charts = [_CHART_BAR, _CHART_PIE, _CHART_SCATTER, _CHART_SPARSE]
+    extra: dict[str, bytes | str] = {}
+    for i, chart in enumerate(charts, start=1):
+        extra[f"ppt/charts/chart{i}.xml"] = chart
+    return build_chain_pptx(
+        [(xml, [("rId5", _REL_CHART, f"../charts/chart{i + 1}.xml", False)]) for i, xml in enumerate(slides)],
+        extra_parts=extra,
+    )
+
+
+@pytest.fixture(scope="session")
+def chart_pptx_bytes() -> bytes:
+    """图表数据抽取验收 deck(见 :func:`build_chart_pptx`)。"""
+    return build_chart_pptx()

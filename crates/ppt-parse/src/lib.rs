@@ -4,6 +4,7 @@
 //! 把一个 `.pptx`(zip + XML)解析成 [`ParsedPptx`]:一个 [`Presentation`] 结构化模型,
 //! 外加一份 `media` 字节表(`裸文件名 -> 原始图片字节`)。解析全程容错,失败收敛成 [`PptError`]。
 
+mod charts;
 mod links;
 pub mod resolve;
 mod xml;
@@ -149,7 +150,8 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
         });
     }
 
-    // 5b) 超链接后处理:外链目标 + 内部跳转目标序号(需全量"部件 → 序号"映射)。
+    // 5b) 超链接后处理:外链目标 + 内部跳转目标序号(需全量"部件 → 序号"映射);
+    //     图表占位经 rels 读图表部件回填缓存数据。
     let part_index: BTreeMap<String, usize> = slide_parts
         .iter()
         .enumerate()
@@ -165,6 +167,7 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
             count,
         };
         links::resolve_links(&mut slide.shapes, &ctx);
+        charts::resolve_charts(&mut slide.shapes, rels, part, &pkg);
     }
 
     if slides.is_empty() && !ordered_parts.is_empty() {
