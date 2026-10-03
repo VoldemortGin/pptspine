@@ -205,6 +205,7 @@ mod tests {
             clr_map_ovr: None,
             background: None,
             hidden: false,
+            show_master_sp: true,
         }
     }
 

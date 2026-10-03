@@ -36,7 +36,7 @@ use ppt_core::style::{
 };
 use ppt_core::theme::{ClrMap, FontSet, Theme};
 
-use crate::{InheritanceParts, ParsedPptx};
+use crate::{InheritanceParts, LayoutPart, ParsedPptx};
 
 /// 把解析输出整体解析成终态 IR。纯函数、绝不 panic;缺失的链级按缺省兜底。
 pub fn resolve(parsed: &ParsedPptx) -> ResolvedPresentation {
@@ -103,12 +103,36 @@ fn resolve_slide(slide: &Slide, inherit: &InheritanceParts) -> ResolvedSlide {
     ResolvedSlide {
         index: slide.index,
         background: resolve_background(background, &ctx),
+        inherited_shapes: resolve_inherited(slide, layout, &ctx),
         shapes: slide
             .shapes
             .iter()
             .map(|sh| resolve_shape(sh, &ctx))
             .collect(),
     }
+}
+
+/// master / layout 上的非占位符形状(绘制顺序:master → layout,层内文档顺序)。
+///
+/// `showMasterSp`(ECMA-376 §19.3.1.38 `sld` / §19.3.1.39 `sldLayout`):
+/// - slide 设 `0`:不画任何继承图形(layout 与 master 都隐藏,= PowerPoint「隐藏背景图形」);
+/// - layout 设 `0`:只隐藏 master 图形,layout 自身图形照画。
+///
+/// 占位符(`p:ph`)只是模板,从不画。非占位符形状无占位符链,文字走 master
+/// `otherStyle` + `defaultTextStyle` 基链(与 slide 上的非占位符文本框同口径);
+/// 颜色沿用本 slide 的有效 clrMap(PowerPoint 按所在 slide 的映射着色继承图形)。
+fn resolve_inherited(slide: &Slide, layout: Option<&LayoutPart>, ctx: &Ctx) -> Vec<ResolvedShape> {
+    if !slide.show_master_sp {
+        return Vec::new();
+    }
+    let show_master = layout.and_then(|l| l.show_master_sp).unwrap_or(true);
+    let master_shapes = if show_master { ctx.master_shapes } else { &[] };
+    master_shapes
+        .iter()
+        .chain(ctx.layout_shapes)
+        .filter(|sh| ph_of(sh).is_none())
+        .map(|sh| resolve_shape(sh, ctx))
+        .collect()
 }
 
 /// B-10:`p:bg` → 终态背景(纯色 / 图片 / 主题引用降级为代表色)。

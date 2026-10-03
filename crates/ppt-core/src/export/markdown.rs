@@ -361,6 +361,7 @@ mod tests {
                 clr_map_ovr: None,
                 background: None,
                 hidden: false,
+                show_master_sp: true,
             }],
             slide_size: (9_144_000, 6_858_000),
             sections: Vec::new(),

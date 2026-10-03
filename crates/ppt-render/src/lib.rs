@@ -118,7 +118,8 @@ impl RenderCtx<'_> {
     }
 }
 
-/// 一张 slide 的全部绘制 op(背景先铺,再 spTree 顺序 = 绘制顺序)。
+/// 一张 slide 的全部绘制 op(背景先铺,再 master → layout 继承形状,最后 slide
+/// spTree;各层内文档顺序 = 绘制顺序)。
 fn slide_ops(
     ts: &mut Typesetter,
     ctx: &mut RenderCtx<'_>,
@@ -131,7 +132,7 @@ fn slide_ops(
     if let Some(bg) = &slide.background {
         background_ops(ts, ctx, bg, width, height, &mut ops);
     }
-    for shape in &slide.shapes {
+    for shape in slide.inherited_shapes.iter().chain(&slide.shapes) {
         shape_ops(ts, ctx, shape, Flatten::IDENTITY, &mut ops);
     }
     ops
@@ -574,6 +575,7 @@ mod tests {
         pres(vec![ResolvedSlide {
             index: 0,
             background: None,
+            inherited_shapes: vec![],
             shapes,
         }])
     }
@@ -621,6 +623,7 @@ mod tests {
             background: Some(ResolvedBackground::Color(ResolvedFill::Solid(
                 ResolvedColor::opaque([255, 0, 0]),
             ))),
+            inherited_shapes: vec![],
             shapes: vec![],
         };
         let out = render(&pres(vec![slide]));
@@ -929,11 +932,13 @@ mod tests {
             ResolvedSlide {
                 index: 0,
                 background: None,
+                inherited_shapes: vec![],
                 shapes: vec![],
             },
             ResolvedSlide {
                 index: 1,
                 background: None,
+                inherited_shapes: vec![],
                 shapes: vec![],
             },
         ]);

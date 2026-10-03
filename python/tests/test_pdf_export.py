@@ -722,3 +722,92 @@ def test_caps_render_uppercase_and_small_caps_warns_once(caps_pptx_bytes: bytes)
     words = [w[4] for w in _open_pdf(pdf)[0].get_text("words")]
     assert words == ["ALL", "CAPS", "SMALL", "CAPS", "plain"], words
     assert len([w for w in caught if "small-caps" in str(w.message)]) == 1
+
+
+# --- master / layout 非占位符形状继承(logo / 装饰条 / 页脚线;showMasterSp)--------
+
+_BLUE, _RED, _GREEN = (0.0, 0.0, 1.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)
+
+
+def _paint_summary(pdf: bytes) -> tuple[list[tuple[str, tuple]], list, str]:
+    """``(drawings, images, text)``:drawings 按绘制顺序取 ``(fill|stroke, 颜色)``。"""
+    page = _open_pdf(pdf)[0]
+    drawings = [
+        ("fill", tuple(d["fill"])) if d["fill"] is not None else ("stroke", tuple(d["color"]))
+        for d in page.get_drawings()
+    ]
+    return drawings, page.get_image_info(), page.get_text()
+
+
+def test_master_layout_graphics_drawn_below_slide_content(
+    master_graphics_pptx: tuple[bytes, bytes, bytes],
+) -> None:
+    """master logo 图片 + 蓝条、layout 红线都画出,且绘制顺序 master → layout → slide。"""
+    pdf, _ = _export(master_graphics_pptx[0])
+    drawings, images, text = _paint_summary(pdf)
+    assert drawings == [("fill", _BLUE), ("stroke", _RED), ("fill", _GREEN)], drawings
+    assert len(images) == 1, "master logo 经 master rels 解析并绘制"
+    assert tuple(images[0]["bbox"]) == pytest.approx((600.0, 30.0, 700.0, 80.0), abs=0.01)
+    # 内容流顺序:logo(Do)→ 蓝条 → 红线 → slide 绿框(z 序在正文 / slide 形状之下)。
+    pos = [pdf.index(op) for op in (b" Do", b"0 0 1 rg", b"1 0 0 RG", b"0 1 0 rg")]
+    assert pos == sorted(pos), pos
+    assert "Slide body text" in text and "ACME Confidential" in text
+
+
+def test_master_placeholders_are_not_drawn(
+    master_graphics_pptx: tuple[bytes, bytes, bytes],
+) -> None:
+    """master / layout 上的空占位符只是模板:提示文字不出现在 PDF。"""
+    pdf, _ = _export(master_graphics_pptx[0])
+    text = _paint_summary(pdf)[2]
+    for prompt in ("Master title prompt", "Master body prompt", "Layout body prompt"):
+        assert prompt not in text
+
+
+def test_master_text_styled_by_master_other_style(
+    master_graphics_pptx: tuple[bytes, bytes, bytes],
+) -> None:
+    """master 页脚文字无直接格式 → 字号 11pt、颜色 7F007F 来自 master ``otherStyle``。"""
+    pdf, _ = _export(master_graphics_pptx[0])
+    span = _spans(pdf)["ACME Confidential"]
+    assert span["size"] == pytest.approx(11.0, abs=0.01)
+    assert span["color"] == 0x7F007F
+
+
+def test_slide_show_master_sp_false_hides_master_and_layout_graphics(
+    master_graphics_pptx: tuple[bytes, bytes, bytes],
+) -> None:
+    """slide ``showMasterSp="0"``(隐藏背景图形)→ master 与 layout 图形都不画。"""
+    drawings, images, text = _paint_summary(_export(master_graphics_pptx[1])[0])
+    assert drawings == [("fill", _GREEN)], drawings
+    assert images == []
+    assert "ACME Confidential" not in text and "Slide body text" in text
+
+
+def test_layout_show_master_sp_false_hides_master_graphics_only(
+    master_graphics_pptx: tuple[bytes, bytes, bytes],
+) -> None:
+    """layout ``showMasterSp="0"`` → 只隐藏 master 图形;layout 红线照画。"""
+    drawings, images, text = _paint_summary(_export(master_graphics_pptx[2])[0])
+    assert drawings == [("stroke", _RED), ("fill", _GREEN)], drawings
+    assert images == []
+    assert "ACME Confidential" not in text
+
+
+def test_inherited_graphics_stay_out_of_shapes_and_text(
+    master_graphics_pptx: tuple[bytes, bytes, bytes],
+) -> None:
+    """``Slide.shapes()`` / ``to_text`` / ``to_markdown`` 只含 slide 自身内容(API 不变)。"""
+    pres = pptspine.open_bytes(master_graphics_pptx[0])
+    assert len(pres.slides()[0].shapes()) == 2
+    assert "ACME Confidential" not in pres.to_text()
+    assert "ACME Confidential" not in pres.to_markdown()
+
+
+def test_master_picture_background_resolves_through_master_rels(
+    master_picture_bg_pptx_bytes: bytes,
+) -> None:
+    """master 图片背景的 ``r:embed`` 经 master 自身 rels 解析(此前 master / layout 部件
+    不读 rels,图片背景静默丢失)→ 满页图片。"""
+    images = _paint_summary(_export(master_picture_bg_pptx_bytes)[0])[1]
+    assert [tuple(i["bbox"]) for i in images] == [pytest.approx((0.0, 0.0, 720.0, 540.0))]

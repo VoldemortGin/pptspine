@@ -53,6 +53,8 @@ pub struct LayoutPart {
     pub master_name: Option<String>,
     /// `p:cSld > p:bg`(B-10 继承链:slide 无 bg 时回退到此)。
     pub background: Option<Background>,
+    /// `p:sldLayout@showMasterSp`;`None` = 缺省(显示 master 非占位符形状)。
+    pub show_master_sp: Option<bool>,
 }
 
 /// 一个已解析的 slideMaster 部件。
@@ -143,6 +145,7 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
             clr_map_ovr: data.clr_map_ovr,
             background: data.background,
             hidden: data.hidden,
+            show_master_sp: data.show_master_sp.unwrap_or(true),
         });
     }
 
@@ -170,7 +173,7 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
     }
 
     // 6) 继承链部件:slide 引用的 layout -> master -> theme(按裸名去重,B-8/B-9)。
-    let inherit = collect_inheritance(&pkg, &slides, meta.default_text_style);
+    let inherit = collect_inheritance(&pkg, &slides, meta.default_text_style, &media_index);
 
     // 7) 节(`sldId@id` → 幻灯片序号)与文档属性。
     let sections = resolve_sections(&meta.sections, &meta.slide_ids, &pres_rels, &part_index);
@@ -193,8 +196,8 @@ fn collect_inheritance(
     pkg: &Package,
     slides: &[Slide],
     default_text_style: Option<TextStyleLevels>,
+    media_index: &BTreeMap<String, usize>,
 ) -> InheritanceParts {
-    let empty_media = BTreeMap::new();
     let mut inherit = InheritanceParts {
         default_text_style,
         ..InheritanceParts::default()
@@ -206,7 +209,9 @@ fn collect_inheritance(
         };
         if !inherit.layouts.contains_key(layout_name) {
             if let Some(xml_text) = pkg.layout_part_str(layout_name) {
-                let data = xml::slide::parse_part(&xml_text, None, &empty_media);
+                // 经部件自身 rels 解析图片 `r:embed`(版式上的 logo / 图片背景)。
+                let rels = pkg.slide_rels_str(&format!("ppt/slideLayouts/{layout_name}"));
+                let data = xml::slide::parse_part(&xml_text, rels.as_deref(), media_index);
                 inherit.layouts.insert(
                     layout_name.to_string(),
                     LayoutPart {
@@ -214,6 +219,7 @@ fn collect_inheritance(
                         clr_map_ovr: data.clr_map_ovr,
                         master_name: pkg.master_name_for_layout(layout_name),
                         background: data.background,
+                        show_master_sp: data.show_master_sp,
                     },
                 );
             }
@@ -227,7 +233,8 @@ fn collect_inheritance(
         };
         if !inherit.masters.contains_key(&master_name) {
             if let Some(xml_text) = pkg.master_part_str(&master_name) {
-                let data = xml::slide::parse_part(&xml_text, None, &empty_media);
+                let rels = pkg.slide_rels_str(&format!("ppt/slideMasters/{master_name}"));
+                let data = xml::slide::parse_part(&xml_text, rels.as_deref(), media_index);
                 inherit.masters.insert(
                     master_name.clone(),
                     MasterPart {

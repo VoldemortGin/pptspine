@@ -102,6 +102,8 @@ pub struct Slide {
     pub background: Option<Background>,
     /// 隐藏页(`p:sld@show="0"`);导出侧缺省跳过。
     pub hidden: bool,
+    /// `p:sld@showMasterSp`(缺省 true):为 false 时不画 layout / master 的非占位符形状。
+    pub show_master_sp: bool,
 }
 
 /// 幻灯片背景(`p:bg`,§3.o,B-10)。
