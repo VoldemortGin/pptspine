@@ -523,6 +523,59 @@ fn run_direct_formatting_wins() {
     assert_rgb_within(run.color.rgb, [0xFF, 0x00, 0x00], "run 直接颜色");
 }
 
+/// `spc` / `baseline` / `cap` 与其它 run 属性一样沿继承链逐属性合并:master
+/// `bodyStyle` 给 spc + cap,layout 占位符 `lstStyle` 给 baseline;slide run 未设则继承,
+/// 显式设置则逐属性覆盖;链上全缺为 0 / 0 / `Caps::None`。
+#[test]
+fn spc_baseline_cap_inherit_through_chain() {
+    use ppt_core::style::Caps;
+    let master = master1().replace(
+        r#"<a:defRPr sz="2800"/>"#,
+        r#"<a:defRPr sz="2800" spc="200" cap="small"/>"#,
+    );
+    let layout = layout1().replace(
+        "<a:lstStyle/>",
+        r#"<a:lstStyle><a:lvl1pPr><a:defRPr baseline="30000"/></a:lvl1pPr></a:lstStyle>"#,
+    );
+    let slide_xml = slide_with(
+        r#"<p:sp>
+        <p:nvSpPr><p:cNvPr id="3" name="C"/><p:cNvSpPr/><p:nvPr><p:ph idx="1"/></p:nvPr></p:nvSpPr>
+        <p:spPr/>
+        <p:txBody><a:bodyPr/>
+          <a:p>
+            <a:r><a:t>inherited</a:t></a:r>
+            <a:r><a:rPr spc="-100" baseline="0" cap="none"/><a:t>direct</a:t></a:r>
+            <a:r><a:rPr spc="50"/><a:t>partial</a:t></a:r>
+          </a:p>
+        </p:txBody>
+      </p:sp>
+      <p:sp>
+        <p:nvSpPr><p:cNvPr id="4" name="T"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>
+        <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="100" cy="100"/></a:xfrm></p:spPr>
+        <p:txBody><a:bodyPr/><a:p><a:r><a:t>none</a:t></a:r></a:p></p:txBody>
+      </p:sp>"#,
+        "",
+    );
+    let slide = resolve_slide_parts(&slide_xml, &layout, &master);
+    let runs = &as_text_box(&slide.shapes[0]).paragraphs[0].runs;
+    assert_eq!(runs[0].char_spacing_pt, 2.0, "master bodyStyle spc=200");
+    assert_eq!(runs[0].baseline, 0.30, "layout lstStyle baseline=30000");
+    assert_eq!(runs[0].cap, Caps::Small, "master bodyStyle cap=small");
+
+    assert_eq!(runs[1].char_spacing_pt, -1.0, "run 显式负间距覆盖");
+    assert_eq!(runs[1].baseline, 0.0, "run 显式 baseline=0 覆盖上标");
+    assert_eq!(runs[1].cap, Caps::None, "run 显式 cap=none 覆盖");
+
+    assert_eq!(runs[2].char_spacing_pt, 0.5, "只覆盖 spc");
+    assert_eq!(runs[2].baseline, 0.30, "未指定属性仍继承");
+    assert_eq!(runs[2].cap, Caps::Small);
+
+    let plain = &as_text_box(&slide.shapes[1]).paragraphs[0].runs[0];
+    assert_eq!(plain.char_spacing_pt, 0.0);
+    assert_eq!(plain.baseline, 0.0);
+    assert_eq!(plain.cap, Caps::None);
+}
+
 /// slide txBody 自带 lstStyle 覆盖 layout/master;更近层 buNone **压制**继承符号。
 #[test]
 fn slide_lst_style_overrides_and_bu_none_suppresses() {

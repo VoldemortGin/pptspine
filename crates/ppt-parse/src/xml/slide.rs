@@ -1167,6 +1167,9 @@ fn parse_run_like<R: std::io::BufRead>(reader: &mut Reader<R>, kind: RunKind) ->
         underline: rs.underline,
         strike: rs.strike,
         color: rs.color,
+        char_spacing_pt: rs.char_spacing_pt,
+        baseline: rs.baseline,
+        cap: rs.cap,
     }
 }
 

@@ -6,7 +6,7 @@
 use crate::color::ResolvedColor;
 use crate::geom::{Emu, Rect};
 use crate::model::{GraphicPlaceholder, Picture, RunKind, Xfrm};
-use crate::style::Spacing;
+use crate::style::{Caps, Spacing};
 
 /// 继承链全无字号时的兜底字号(PowerPoint 默认 18 磅)。
 pub const DEFAULT_FONT_SIZE_PT: f32 = 18.0;
@@ -300,4 +300,10 @@ pub struct ResolvedRun {
     pub strike: bool,
     /// 终端文字色(链上全缺时黑)。
     pub color: ResolvedColor,
+    /// 字符间距(磅,可负;链上全缺为 0)。
+    pub char_spacing_pt: f32,
+    /// 上下标基线偏移(相对字号的比例,正上标负下标;链上全缺为 0)。
+    pub baseline: f32,
+    /// 大写变换(链上全缺为 [`Caps::None`])。
+    pub cap: Caps,
 }

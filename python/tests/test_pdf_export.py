@@ -612,3 +612,66 @@ def test_vertical_text_warns_once_and_stays_horizontal(
     text = _open_pdf(pdf)[0].get_text()
     assert "Vertical one" in text
     assert "Vertical two" in text
+
+
+# --- run 级上下标 / 字符间距(§3.h:a:rPr@baseline / @spc)------------------------
+
+
+def _spans(pdf: bytes) -> dict[str, dict]:
+    """首页 span 按去空白文本索引(``origin`` = 基线起点,PDF 页坐标 y 向下)。"""
+    out: dict[str, dict] = {}
+    for block in _open_pdf(pdf)[0].get_text("dict")["blocks"]:
+        for line in block.get("lines", []):
+            for span in line["spans"]:
+                key = span["text"].strip()
+                if key:
+                    out[key] = span
+    return out
+
+
+def test_baseline_script_offsets_follow_document_value(script_pptx_bytes: bytes) -> None:
+    """上标 ``baseline=30000`` → 基线上抬 30% × 20pt = 6pt;下标 -25% → 下沉 5pt(≤1pt);
+    字形缩小(×0.65);读回文本顺序不变。"""
+    pdf, _ = _export(script_pptx_bytes)
+    spans = _spans(pdf)
+    base_y = spans["Base"]["origin"][1]
+    assert abs(spans["mid"]["origin"][1] - base_y) <= 0.01, "基线文字同一基线"
+    sup_y = spans["Sup"]["origin"][1]
+    sub_y = spans["Sub"]["origin"][1]
+    assert sup_y < base_y, "上标高于基线(PDF 读回 y 向下)"
+    assert abs((base_y - sup_y) - 6.0) <= 1.0, f"上标偏移 {base_y - sup_y:.2f}pt ≠ 6pt"
+    assert abs((sub_y - base_y) - 5.0) <= 1.0, f"下标偏移 {sub_y - base_y:.2f}pt ≠ 5pt"
+    assert spans["Sup"]["size"] < spans["Base"]["size"] * 0.8, "上标字形缩小"
+    words = [w[4] for w in _open_pdf(pdf)[0].get_text("words")]
+    assert words == ["Base", "Sup", "mid", "Sub"], words
+
+
+def _word_widths(pdf: bytes) -> dict[str, float]:
+    return {w[4]: w[2] - w[0] for w in _open_pdf(pdf)[0].get_text("words")}
+
+
+def test_char_spacing_positive_and_negative(
+    char_spacing_pptx: tuple[bytes, bytes, bytes],
+) -> None:
+    """``spc=200``(lstStyle 继承)每字加宽 2pt、``spc=-100`` 每字收紧 1pt:词宽差 ≈ 间距 ×
+    (字数 - 1)(≤1pt);读回词序不变。"""
+    plain_pdf, wide_pdf, tight_pdf = (_export(b)[0] for b in char_spacing_pptx)
+    plain, wide, tight = (_word_widths(p) for p in (plain_pdf, wide_pdf, tight_pdf))
+    for word in ("Spacing", "test", "order"):
+        gaps = len(word) - 1
+        assert abs((wide[word] - plain[word]) - 2.0 * gaps) <= 1.0, (word, wide, plain)
+        assert abs((plain[word] - tight[word]) - 1.0 * gaps) <= 1.0, (word, tight, plain)
+    for pdf in (plain_pdf, wide_pdf, tight_pdf):
+        words = [w[4] for w in _open_pdf(pdf)[0].get_text("words")]
+        assert words == ["Spacing", "test", "order"], words
+
+
+def test_caps_render_uppercase_and_small_caps_warns_once(caps_pptx_bytes: bytes) -> None:
+    """``cap=all`` / ``cap=small`` 渲染为大写(small 近似),``small-caps`` 降级告警恰 1 条。"""
+    pres = pptspine.open_bytes(caps_pptx_bytes)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        pdf = pres.to_pdf()
+    words = [w[4] for w in _open_pdf(pdf)[0].get_text("words")]
+    assert words == ["ALL", "CAPS", "SMALL", "CAPS", "plain"], words
+    assert len([w for w in caught if "small-caps" in str(w.message)]) == 1

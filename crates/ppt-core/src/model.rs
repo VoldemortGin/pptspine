@@ -5,7 +5,7 @@
 
 use crate::color::ColorSpec;
 use crate::geom::{Emu, Rect};
-use crate::style::{PlaceholderRef, ShapeStyle, TextLevelStyle, TextStyleLevels};
+use crate::style::{Caps, PlaceholderRef, ShapeStyle, TextLevelStyle, TextStyleLevels};
 use crate::theme::ClrMap;
 
 /// 一份解析好的演示文稿。
@@ -259,6 +259,13 @@ pub struct TextRun {
     pub strike: Option<bool>,
     /// 纯色填充(`a:solidFill`;srgb / scheme + 变换,见 [`ColorSpec`])。
     pub color: Option<ColorSpec>,
+    /// 字符间距(磅,可负;`a:rPr@spc` 以百分之一磅存储,解析时已除以 100)。
+    pub char_spacing_pt: Option<f32>,
+    /// 上下标基线偏移(相对字号的比例,正上标负下标;`a:rPr@baseline`
+    /// 千分之一百分点,解析时已除以 100000)。
+    pub baseline: Option<f32>,
+    /// 大写变换(`a:rPr@cap`)。
+    pub cap: Option<Caps>,
 }
 
 /// 一张表格(`a:tbl`)。

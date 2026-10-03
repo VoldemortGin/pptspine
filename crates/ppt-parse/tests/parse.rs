@@ -431,6 +431,59 @@ fn ea_cs_fonts_and_underline_strike() {
     assert_eq!(plain.ea_font, None);
 }
 
+/// §3.h:`@spc`(百分之一磅,可负)/ `@baseline`(千分之一百分点,正上负下)/ `@cap`
+/// 落进 run;非法、非有限、越界值降级为 `None`(继承),不 panic。
+#[test]
+fn spc_baseline_cap_parsed_and_invalid_values_degrade() {
+    use ppt_core::style::Caps;
+    let shapes = shapes_of(
+        r#"<p:sp><p:txBody>
+             <a:p>
+               <a:r><a:rPr spc="300" baseline="30000" cap="all"/><a:t>wide</a:t></a:r>
+               <a:r><a:rPr spc="-150" baseline="-25000" cap="small"><a:latin typeface="Arial"/></a:rPr><a:t>tight</a:t></a:r>
+               <a:r><a:rPr spc="abc" baseline="x" cap="bogus"/><a:t>junk</a:t></a:r>
+               <a:r><a:rPr spc="NaN" baseline="inf" cap="none"/><a:t>nonfinite</a:t></a:r>
+               <a:r><a:rPr spc="500000" baseline="30%"/><a:t>range</a:t></a:r>
+               <a:r><a:t>plain</a:t></a:r>
+             </a:p>
+           </p:txBody></p:sp>"#,
+    );
+    let Shape::TextBox(tf) = &shapes[0] else {
+        panic!("expected a text box");
+    };
+    let runs = &tf.paragraphs[0].runs;
+    assert_eq!(runs[0].char_spacing_pt, Some(3.0));
+    assert_eq!(runs[0].baseline, Some(0.30));
+    assert_eq!(runs[0].cap, Some(Caps::All));
+
+    assert_eq!(runs[1].char_spacing_pt, Some(-1.5), "负间距保真");
+    assert_eq!(runs[1].baseline, Some(-0.25), "负 baseline = 下标");
+    assert_eq!(runs[1].cap, Some(Caps::Small));
+    assert_eq!(
+        runs[1].font.as_deref(),
+        Some("Arial"),
+        "非自闭合 rPr 同样解析"
+    );
+
+    assert_eq!(runs[2].char_spacing_pt, None, "非数字 spc 降级");
+    assert_eq!(runs[2].baseline, None, "非数字 baseline 降级");
+    assert_eq!(runs[2].cap, None, "未知 cap 取值降级");
+
+    assert_eq!(runs[3].char_spacing_pt, None, "NaN 不进模型");
+    assert_eq!(runs[3].baseline, None, "inf 不进模型");
+    assert_eq!(runs[3].cap, Some(Caps::None), "显式 cap=none");
+
+    assert_eq!(
+        runs[4].char_spacing_pt, None,
+        "越出 ST_TextPoint ±400000 降级"
+    );
+    assert_eq!(runs[4].baseline, Some(0.30), "strict 百分号写法");
+
+    assert_eq!(runs[5].char_spacing_pt, None);
+    assert_eq!(runs[5].baseline, None);
+    assert_eq!(runs[5].cap, None);
+}
+
 /// §3.l:`a:ln` 线宽 / 虚线预设落进 `Stroke`;空 `a:ln` 仍不产生描边
 /// (保持旧的文本框 / 自选图形分类行为)。
 #[test]

@@ -195,3 +195,27 @@ def test_b3_legacy_table_has_empty_col_widths(minimal_pptx_bytes):
     pres = pptspine.open_bytes(minimal_pptx_bytes)
     table = [s for s in pres.slides()[0].shapes() if s["kind"] == "table"][0]
     assert table["col_widths"] == []
+
+
+def test_run_spacing_baseline_and_caps_in_run_dict(
+    script_pptx_bytes, char_spacing_pptx, caps_pptx_bytes
+):
+    """``@spc``(磅,可负)/ ``@baseline``(字号比例,正上负下)/ ``@cap`` 落进 run dict;
+    缺失为 ``None``(继承)。"""
+
+    def runs(pptx: bytes) -> list[dict]:
+        shapes = pptspine.open_bytes(pptx).slides()[0].shapes()
+        return shapes[0]["paragraphs"][0]["runs"]
+
+    base, sup, _, sub = runs(script_pptx_bytes)
+    assert base["baseline"] is None
+    assert sup["baseline"] == pytest.approx(0.30)
+    assert sub["baseline"] == pytest.approx(-0.25)
+
+    plain, _, tight = char_spacing_pptx
+    assert runs(plain)[0]["char_spacing_pt"] is None
+    assert runs(tight)[0]["char_spacing_pt"] == pytest.approx(-1.0)
+
+    caps = runs(caps_pptx_bytes)
+    assert [r["cap"] for r in caps] == ["all", "small", None]
+    assert caps[0]["text"] == "All caps ", "抽取文本保留原文大小写"

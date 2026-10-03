@@ -1381,3 +1381,65 @@ def vertical_text_pptx_bytes() -> bytes:
         _vertical_textbox_slide(914_400, "Vertical one")
         + _vertical_textbox_slide(3_657_600, "Vertical two")
     )
+
+
+# --- run 级字符间距 / 上下标 fixture(§3.h:a:rPr@spc / @baseline / @cap)------------
+
+# 文本框外框(EMU):左上 (1 in, 1 in),宽 8 in、高 1.5 in;单段 Arial 20pt、左对齐。
+_RUN_STYLE_RECT_EMU = (914_400, 914_400, 7_315_200, 1_371_600)
+
+
+def _run_style_slide(runs_xml: str, lst_style: str = "") -> str:
+    x, y, w, h = _RUN_STYLE_RECT_EMU
+    return f"""<p:sp>
+        <p:spPr><a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{w}" cy="{h}"/></a:xfrm></p:spPr>
+        <p:txBody>
+          <a:bodyPr/>{lst_style}
+          <a:p>{runs_xml}</a:p>
+        </p:txBody>
+      </p:sp>"""
+
+
+def _run_xml(text: str, attrs: str = "") -> str:
+    return (
+        f'<a:r><a:rPr sz="2000"{attrs}><a:latin typeface="Arial"/></a:rPr>'
+        f"<a:t xml:space=\"preserve\">{text}</a:t></a:r>"
+    )
+
+
+@pytest.fixture(scope="session")
+def script_pptx_bytes() -> bytes:
+    """上标 ``baseline=30000``(+30%)与下标 ``baseline=-25000``(-25%)夹在基线文字之间。"""
+    return build_sp_tree_pptx(
+        _run_style_slide(
+            _run_xml("Base ")
+            + _run_xml("Sup", ' baseline="30000"')
+            + _run_xml(" mid ")
+            + _run_xml("Sub", ' baseline="-25000"')
+        )
+    )
+
+
+@pytest.fixture(scope="session")
+def char_spacing_pptx() -> tuple[bytes, bytes, bytes]:
+    """``(plain, wide, tight)``:同一句 ``Spacing test order``,间距 0 / +2pt(``spc=200``,
+    经 txBody ``lstStyle`` 继承)/ -1pt(``spc=-100``,run 直接设置)。"""
+    text = "Spacing test order"
+    wide_lst = '<a:lstStyle><a:lvl1pPr><a:defRPr spc="200"/></a:lvl1pPr></a:lstStyle>'
+    return (
+        build_sp_tree_pptx(_run_style_slide(_run_xml(text))),
+        build_sp_tree_pptx(_run_style_slide(_run_xml(text), wide_lst)),
+        build_sp_tree_pptx(_run_style_slide(_run_xml(text, ' spc="-100"'))),
+    )
+
+
+@pytest.fixture(scope="session")
+def caps_pptx_bytes() -> bytes:
+    """``cap=all`` / ``cap=small`` / 缺省三个 run(``cap`` 进抽取模型;渲染大写化)。"""
+    return build_sp_tree_pptx(
+        _run_style_slide(
+            _run_xml("All caps ", ' cap="all"')
+            + _run_xml("Small caps ", ' cap="small"')
+            + _run_xml("plain")
+        )
+    )
