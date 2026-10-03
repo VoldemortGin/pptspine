@@ -7,7 +7,7 @@
 //! 容错同家族约定:未知元素跳过、缺失属性 → `None`、绝不 panic。
 
 use ppt_core::color::{ColorSpec, ColorTransform};
-use ppt_core::model::Color;
+use ppt_core::model::{Color, Hyperlink};
 use ppt_core::style::{Bullet, Caps, RunStyle, Spacing, TextLevelStyle, TextStyleLevels};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
@@ -188,7 +188,17 @@ pub fn parse_run_style<R: std::io::BufRead>(
     reader: &mut Reader<R>,
     start: &BytesStart,
 ) -> RunStyle {
+    parse_run_props(reader, start).0
+}
+
+/// 同 [`parse_run_style`],另捕获 run 级超链接(`a:rPr > a:hlinkClick`;
+/// `url` / `slide_index` 留待部件 rels 后处理回填)。
+pub fn parse_run_props<R: std::io::BufRead>(
+    reader: &mut Reader<R>,
+    start: &BytesStart,
+) -> (RunStyle, Option<Hyperlink>) {
     let mut rs = run_style_attrs(start);
+    let mut link = None;
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
@@ -203,13 +213,19 @@ pub fn parse_run_style<R: std::io::BufRead>(
                         let c = parse_solid_fill(reader);
                         rs.color = c.or(rs.color);
                     }
+                    b"hlinkClick" => {
+                        link = link.or_else(|| Some(hyperlink_from(&e)));
+                        skip_element(reader, &name);
+                    }
                     _ => skip_element(reader, &name),
                 }
             }
             Ok(Event::Empty(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
-                if matches!(name.as_slice(), b"latin" | b"ea" | b"cs") {
-                    set_typeface(&mut rs, &name, &e);
+                match name.as_slice() {
+                    b"latin" | b"ea" | b"cs" => set_typeface(&mut rs, &name, &e),
+                    b"hlinkClick" => link = link.or_else(|| Some(hyperlink_from(&e))),
+                    _ => {}
                 }
             }
             Ok(Event::End(_)) => break,
@@ -219,7 +235,18 @@ pub fn parse_run_style<R: std::io::BufRead>(
         }
         buf.clear();
     }
-    rs
+    (rs, link)
+}
+
+/// 从 `a:hlinkClick` 起始标签取 `r:id` / `action` / `tooltip`(空串按缺失)。
+pub fn hyperlink_from(e: &BytesStart) -> Hyperlink {
+    let get = |k: &[u8]| attr_of(e, k).filter(|v| !v.is_empty());
+    Hyperlink {
+        rel_id: get(b"id"),
+        action: get(b"action"),
+        tooltip: get(b"tooltip"),
+        ..Hyperlink::default()
+    }
 }
 
 /// 把 `a:latin`/`a:ea`/`a:cs` 的 `@typeface` 填进对应槽位(已有值不覆盖;空串按缺省)。

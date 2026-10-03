@@ -4,6 +4,7 @@
 //! 把一个 `.pptx`(zip + XML)解析成 [`ParsedPptx`]:一个 [`Presentation`] 结构化模型,
 //! 外加一份 `media` 字节表(`裸文件名 -> 原始图片字节`)。解析全程容错,失败收敛成 [`PptError`]。
 
+mod links;
 pub mod resolve;
 mod xml;
 mod zip_pkg;
@@ -11,7 +12,7 @@ mod zip_pkg;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use ppt_core::model::{Background, Presentation, Shape, Slide};
+use ppt_core::model::{Background, DocProperties, Presentation, Section, Shape, Slide};
 use ppt_core::style::{TextStyleLevels, TxStyles};
 use ppt_core::theme::{ClrMap, Theme};
 use ppt_core::{PptError, Result};
@@ -107,14 +108,19 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
     // 4) 按 presentation.xml 的 r:id 顺序确定 slide 部件;拿不到关系时回退到 slideN 数字序。
     let ordered_parts = resolve_slide_order(&meta.slide_rids, &pres_rels, &pkg);
 
-    // 5) 逐张解析 slide。
+    // 5) 逐张解析 slide(`slide_parts[i]` = `slides[i]` 的部件路径与 rels,供链接后处理)。
     let mut slides = Vec::with_capacity(ordered_parts.len());
+    let mut slide_parts: Vec<(&str, BTreeMap<String, xml::Relationship>)> = Vec::new();
     for (index, part) in ordered_parts.iter().enumerate() {
         let Some(slide_xml) = pkg.part_str(part) else {
             continue;
         };
         let rels_xml = pkg.slide_rels_str(part);
         let data = xml::slide::parse_part(&slide_xml, rels_xml.as_deref(), &media_index);
+        slide_parts.push((
+            part.as_str(),
+            rels_xml.as_deref().map(xml::parse_rels).unwrap_or_default(),
+        ));
 
         let layout_name = pkg.layout_name_for(part);
         let master_name = layout_name
@@ -136,7 +142,26 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
             notes,
             clr_map_ovr: data.clr_map_ovr,
             background: data.background,
+            hidden: data.hidden,
         });
+    }
+
+    // 5b) 超链接后处理:外链目标 + 内部跳转目标序号(需全量"部件 → 序号"映射)。
+    let part_index: BTreeMap<String, usize> = slide_parts
+        .iter()
+        .enumerate()
+        .map(|(i, (part, _))| ((*part).to_string(), i))
+        .collect();
+    let count = slides.len();
+    for (i, (slide, (part, rels))) in slides.iter_mut().zip(&slide_parts).enumerate() {
+        let ctx = links::LinkCtx {
+            rels,
+            part,
+            part_index: &part_index,
+            current: i,
+            count,
+        };
+        links::resolve_links(&mut slide.shapes, &ctx);
     }
 
     if slides.is_empty() && !ordered_parts.is_empty() {
@@ -147,10 +172,16 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
     // 6) 继承链部件:slide 引用的 layout -> master -> theme(按裸名去重,B-8/B-9)。
     let inherit = collect_inheritance(&pkg, &slides, meta.default_text_style);
 
+    // 7) 节(`sldId@id` → 幻灯片序号)与文档属性。
+    let sections = resolve_sections(&meta.sections, &meta.slide_ids, &pres_rels, &part_index);
+    let properties = collect_doc_props(&pkg);
+
     Ok(ParsedPptx {
         presentation: Presentation {
             slides,
             slide_size: meta.slide_size,
+            sections,
+            properties,
         },
         media,
         inherit,
@@ -223,6 +254,56 @@ fn collect_inheritance(
         }
     }
     inherit
+}
+
+/// 节的 `sldId@id` 列表 → 幻灯片序号(经 `@id → r:id → 部件 → 序号`;解析不出的 id 丢弃)。
+fn resolve_sections(
+    sections: &[(String, Vec<u32>)],
+    slide_ids: &[(u32, String)],
+    pres_rels: &BTreeMap<String, xml::Relationship>,
+    part_index: &BTreeMap<String, usize>,
+) -> Vec<Section> {
+    let id_to_index: BTreeMap<u32, usize> = slide_ids
+        .iter()
+        .filter_map(|(id, rid)| {
+            let target = xml::normalize_target(&pres_rels.get(rid)?.target);
+            Some((*id, *part_index.get(&target)?))
+        })
+        .collect();
+    sections
+        .iter()
+        .map(|(name, ids)| Section {
+            name: name.clone(),
+            slide_indices: ids
+                .iter()
+                .filter_map(|id| id_to_index.get(id).copied())
+                .collect(),
+        })
+        .collect()
+}
+
+/// 文档属性:经包根 rels 找 core / extended properties 部件(缺失回退到惯例路径
+/// `docProps/core.xml` / `docProps/app.xml`);部件缺失则对应字段全 `None`。
+fn collect_doc_props(pkg: &Package) -> DocProperties {
+    let root_rels = pkg
+        .part_str("_rels/.rels")
+        .map(|s| xml::parse_rels(&s))
+        .unwrap_or_default();
+    let target_of = |suffix: &str, fallback: &str| {
+        root_rels
+            .values()
+            .find(|r| r.rel_type.ends_with(suffix))
+            .map(|r| r.target.trim_start_matches('/').to_string())
+            .unwrap_or_else(|| fallback.to_string())
+    };
+    let mut props = DocProperties::default();
+    if let Some(core) = pkg.part_str(&target_of("/core-properties", "docProps/core.xml")) {
+        xml::doc_props::parse_core(&core, &mut props);
+    }
+    if let Some(app) = pkg.part_str(&target_of("/extended-properties", "docProps/app.xml")) {
+        xml::doc_props::parse_app(&app, &mut props);
+    }
+    props
 }
 
 /// 把 presentation.xml 的 `r:id` 顺序解析成具体 slide 部件路径列表。

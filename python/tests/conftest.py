@@ -1499,3 +1499,196 @@ def caps_pptx_bytes() -> bytes:
             + _run_xml("plain")
         )
     )
+
+
+# --- 语义抽取 fixture:视觉阅读顺序 / 标题占位符 / 列表标记 / 图片 alt / 超链接 /
+# --- 隐藏页 / 节 / 文档属性(复用 e2e 继承链 layout / master / theme)---------------
+
+_REL_SLIDE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide"
+_REL_LAYOUT = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout"
+_REL_IMAGE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+_REL_LINK = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink"
+
+
+def _rels_xml(entries: list[tuple[str, str, str, bool]]) -> str:
+    body = "".join(
+        f'<Relationship Id="{rid}" Type="{ty}" Target="{target}"'
+        + (' TargetMode="External"' if external else "")
+        + "/>"
+        for rid, ty, target, external in entries
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        f"{body}</Relationships>"
+    )
+
+
+def _chain_slide(sp_tree_inner: str, sld_attrs: str = "") -> str:
+    return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+       xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+       xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"{sld_attrs}>
+  <p:cSld><p:spTree>{sp_tree_inner}</p:spTree></p:cSld>
+</p:sld>"""
+
+
+def build_chain_pptx(
+    slides: list[tuple[str, list[tuple[str, str, str, bool]]]],
+    presentation_ext: str = "",
+    extra_parts: dict[str, bytes | str] | None = None,
+) -> bytes:
+    """多 slide deck,共用 e2e 继承链(layout / master / theme)。``slides`` 每项为
+    ``(slide XML, 额外 rels)``;layout 关系自动补上(rId1)。"""
+    n = len(slides)
+    sld_ids = "".join(f'<p:sldId id="{256 + i}" r:id="rId{10 + i}"/>' for i in range(n))
+    presentation = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+                xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+                xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId2"/></p:sldMasterIdLst>
+  <p:sldIdLst>{sld_ids}</p:sldIdLst>
+  <p:sldSz cx="{_SLIDE_CX}" cy="{_SLIDE_CY}" type="screen4x3"/>
+  {presentation_ext}
+</p:presentation>"""
+    pres_rels = [("rId2", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideMaster", "slideMasters/slideMaster1.xml", False)]
+    pres_rels += [(f"rId{10 + i}", _REL_SLIDE, f"slides/slide{i + 1}.xml", False) for i in range(n)]
+    parts: dict[str, bytes | str] = {
+        "[Content_Types].xml": _E2E_CONTENT_TYPES,
+        "_rels/.rels": _ROOT_RELS,
+        "ppt/presentation.xml": presentation,
+        "ppt/_rels/presentation.xml.rels": _rels_xml(pres_rels),
+        "ppt/slideLayouts/slideLayout1.xml": _E2E_LAYOUT,
+        "ppt/slideLayouts/_rels/slideLayout1.xml.rels": _E2E_LAYOUT_RELS,
+        "ppt/slideMasters/slideMaster1.xml": _E2E_MASTER,
+        "ppt/slideMasters/_rels/slideMaster1.xml.rels": _E2E_MASTER_RELS,
+        "ppt/theme/theme1.xml": _E2E_THEME,
+    }
+    for i, (xml, rels) in enumerate(slides):
+        parts[f"ppt/slides/slide{i + 1}.xml"] = xml
+        parts[f"ppt/slides/_rels/slide{i + 1}.xml.rels"] = _rels_xml(
+            [("rId1", _REL_LAYOUT, "../slideLayouts/slideLayout1.xml", False), *rels]
+        )
+    parts.update(extra_parts or {})
+    return _zip_pptx(parts)
+
+
+def _text_sp(text: str, x: int, y: int, w: int = 3_500_000, h: int = 700_000) -> str:
+    return f"""<p:sp><p:nvSpPr><p:cNvPr id="9" name="{text}"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>
+  <p:spPr><a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{w}" cy="{h}"/></a:xfrm></p:spPr>
+  <p:txBody><a:bodyPr/><a:p><a:r><a:t>{text}</a:t></a:r></a:p></p:txBody></p:sp>"""
+
+
+# 标题占位符(无 xfrm,几何走 master:最上方)写在**最后**;右栏写在左栏之前;
+# 两栏的块互相错开半行(行不对齐),纯 top→left 排序会左右交错。
+_TWO_COLUMN_SLIDE = _chain_slide(
+    _text_sp("R1", 4_800_000, 2_100_000)
+    + _text_sp("L1", 600_000, 1_800_000)
+    + _text_sp("R2", 4_800_000, 3_300_000)
+    + _text_sp("L2", 600_000, 2_700_000)
+    + """<p:grpSp><p:nvGrpSpPr><p:cNvPr id="20" name="G"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+  <p:grpSpPr><a:xfrm><a:off x="600000" y="3600000"/><a:ext cx="3500000" cy="700000"/>
+    <a:chOff x="0" y="0"/><a:chExt cx="3500000" cy="700000"/></a:xfrm></p:grpSpPr>"""
+    + _text_sp("L3", 0, 0)
+    + "</p:grpSp>"
+    + """<p:sp><p:nvSpPr><p:cNvPr id="2" name="Title 1"/><p:cNvSpPr/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
+  <p:spPr/><p:txBody><a:bodyPr/><a:p><a:r><a:t>Two Columns</a:t></a:r></a:p></p:txBody></p:sp>"""
+)
+
+
+@pytest.fixture(scope="session")
+def two_column_pptx_bytes() -> bytes:
+    """两栏 deck:标题占位符(继承几何)写在最后、右栏先于左栏、左栏第 3 块在组合里。"""
+    return build_chain_pptx([(_TWO_COLUMN_SLIDE, [])])
+
+
+_SEMANTIC_SLIDE1 = _chain_slide(
+    """<p:sp><p:nvSpPr><p:cNvPr id="4" name="Banner"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>
+  <p:spPr><a:xfrm><a:off x="838200" y="100000"/><a:ext cx="7772400" cy="200000"/></a:xfrm></p:spPr>
+  <p:txBody><a:bodyPr/><a:p><a:r><a:t>CONFIDENTIAL</a:t></a:r></a:p></p:txBody></p:sp>
+<p:sp><p:nvSpPr><p:cNvPr id="2" name="Title 1"/><p:cNvSpPr/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
+  <p:spPr/><p:txBody><a:bodyPr/><a:p><a:r><a:t>Agenda</a:t></a:r><a:br/><a:r><a:t>Q3</a:t></a:r></a:p></p:txBody></p:sp>
+<p:sp><p:nvSpPr><p:cNvPr id="3" name="Content 2"/><p:cNvSpPr/><p:nvPr><p:ph idx="1"/></p:nvPr></p:nvSpPr>
+  <p:spPr/><p:txBody><a:bodyPr/>
+    <a:p><a:r><a:t>Revenue up</a:t></a:r></a:p>
+    <a:p><a:pPr lvl="1"/><a:r><a:t>Cloud detail</a:t></a:r></a:p>
+    <a:p><a:pPr><a:buNone/></a:pPr><a:r><a:t>No marker here</a:t></a:r></a:p>
+    <a:p><a:pPr><a:buAutoNum type="arabicPeriod"/></a:pPr><a:r><a:t>First step</a:t></a:r></a:p>
+    <a:p><a:pPr><a:buAutoNum type="arabicPeriod"/></a:pPr><a:r><a:t>Second step</a:t></a:r></a:p>
+    <a:p><a:pPr><a:buNone/></a:pPr>
+      <a:r><a:t>Visit </a:t></a:r>
+      <a:r><a:rPr><a:hlinkClick r:id="rId7" tooltip="home"/></a:rPr><a:t>our site</a:t></a:r>
+      <a:r><a:t> or </a:t></a:r>
+      <a:r><a:rPr><a:hlinkClick r:id="rId8" action="ppaction://hlinksldjump"/></a:rPr><a:t>the appendix</a:t></a:r>
+    </a:p>
+  </p:txBody></p:sp>
+<p:pic><p:nvPicPr><p:cNvPr id="5" name="Picture 4" descr="Revenue chart" title="Chart">
+    <a:hlinkClick r:id="rId9"/></p:cNvPr><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+  <p:blipFill><a:blip r:embed="rId2"/></p:blipFill>
+  <p:spPr><a:xfrm><a:off x="838200" y="5100000"/><a:ext cx="2743200" cy="1143000"/></a:xfrm></p:spPr></p:pic>
+<p:pic><p:nvPicPr><p:cNvPr id="6" name="Logo 5"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+  <p:blipFill><a:blip r:embed="rId2"/></p:blipFill>
+  <p:spPr><a:xfrm><a:off x="5486400" y="5100000"/><a:ext cx="2743200" cy="1143000"/></a:xfrm></p:spPr></p:pic>"""
+)
+
+_SEMANTIC_SLIDE2 = _chain_slide(_text_sp("SECRET DRAFT", 838200, 1_000_000), ' show="0"')
+
+_SEMANTIC_SLIDE3 = _chain_slide(
+    """<p:sp><p:nvSpPr><p:cNvPr id="2" name="Title 1"/><p:cNvSpPr/><p:nvPr><p:ph type="ctrTitle"/></p:nvPr></p:nvSpPr>
+  <p:spPr/><p:txBody><a:bodyPr/><a:p><a:r><a:t>Appendix</a:t></a:r></a:p></p:txBody></p:sp>
+<p:sp><p:nvSpPr><p:cNvPr id="3" name="Subtitle 2"/><p:cNvSpPr/><p:nvPr><p:ph type="subTitle" idx="1"/></p:nvPr></p:nvSpPr>
+  <p:spPr/><p:txBody><a:bodyPr/><a:p><a:r><a:t>Backup material</a:t></a:r></a:p></p:txBody></p:sp>"""
+)
+
+_SEMANTIC_SECTIONS = """<p:extLst><p:ext uri="{521415D9-36F7-43E2-AB2F-B90AF26B5E84}">
+    <p14:sectionLst xmlns:p14="http://schemas.microsoft.com/office/powerpoint/2010/main">
+      <p14:section name="Intro" id="{11111111-1111-1111-1111-111111111111}">
+        <p14:sldIdLst><p14:sldId id="256"/></p14:sldIdLst></p14:section>
+      <p14:section name="Rest" id="{22222222-2222-2222-2222-222222222222}">
+        <p14:sldIdLst><p14:sldId id="257"/><p14:sldId id="258"/></p14:sldIdLst></p14:section>
+    </p14:sectionLst></p:ext></p:extLst>"""
+
+_SEMANTIC_ROOT_RELS = _rels_xml(
+    [
+        ("rId1", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument", "ppt/presentation.xml", False),
+        ("rId2", "http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties", "docProps/core.xml", False),
+        ("rId3", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties", "docProps/app.xml", False),
+    ]
+)
+
+_SEMANTIC_CORE = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties"
+  xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:dcterms="http://purl.org/dc/terms/"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <dc:title>Quarterly Business Review</dc:title><dc:creator>Ada Lovelace</dc:creator>
+  <cp:lastModifiedBy>Charles Babbage</cp:lastModifiedBy><cp:revision>3</cp:revision>
+  <dcterms:created xsi:type="dcterms:W3CDTF">2026-09-01T08:00:00Z</dcterms:created>
+  <dcterms:modified xsi:type="dcterms:W3CDTF">2026-09-30T17:30:00Z</dcterms:modified>
+</cp:coreProperties>"""
+
+_SEMANTIC_APP = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties">
+  <Application>Microsoft Office PowerPoint</Application><Company>Analytical Engines</Company>
+</Properties>"""
+
+
+@pytest.fixture(scope="session")
+def semantic_pptx_bytes() -> bytes:
+    """三页语义 deck:第 1 页标题占位符 + 继承列表 + 编号 + buNone + 超链接(外链 / 页内跳转)
+    + 带 alt / 无 alt 图片;第 2 页隐藏;第 3 页 ctrTitle + subTitle。另含节与文档属性。"""
+    slide1_rels = [
+        ("rId2", _REL_IMAGE, "../media/image1.png", False),
+        ("rId7", _REL_LINK, "https://example.com/home", True),
+        ("rId8", _REL_SLIDE, "slide3.xml", False),
+        ("rId9", _REL_LINK, "https://example.com/chart", True),
+    ]
+    return build_chain_pptx(
+        [(_SEMANTIC_SLIDE1, slide1_rels), (_SEMANTIC_SLIDE2, []), (_SEMANTIC_SLIDE3, [])],
+        presentation_ext=_SEMANTIC_SECTIONS,
+        extra_parts={
+            "_rels/.rels": _SEMANTIC_ROOT_RELS,
+            "docProps/core.xml": _SEMANTIC_CORE,
+            "docProps/app.xml": _SEMANTIC_APP,
+            "ppt/media/image1.png": _OCR_SAMPLE_PNG.read_bytes(),
+        },
+    )

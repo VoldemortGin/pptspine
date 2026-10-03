@@ -15,11 +15,14 @@ pub mod theme;
 
 pub use color::{apply_transforms, ColorSpec, ColorTransform, ResolvedColor};
 pub use error::{LimitKind, PptError, Result};
-pub use export::{presentation_markdown, presentation_text, slide_text};
+pub use export::{
+    presentation_markdown, presentation_markdown_with, presentation_text, presentation_text_with,
+    slide_text, slide_text_with, ExportOptions, TextOrder,
+};
 pub use geom::{emu_to_points, Emu, Point, Rect, EMU_PER_INCH, EMU_PER_POINT};
 pub use model::{
-    AutoShape, Cell, Color, Fill, GroupShape, Paragraph, Picture, Presentation, RelRect, Row,
-    Shape, Slide, Table, TextFrame, TextRun, Xfrm,
+    AutoShape, Cell, Color, DocProperties, Fill, GroupShape, Hyperlink, Paragraph, Picture,
+    Presentation, RelRect, Row, Section, Shape, Slide, Table, TextFrame, TextRun, Xfrm,
 };
 pub use resolved::{ResolvedPresentation, ResolvedShape, ResolvedSlide};
 pub use style::{

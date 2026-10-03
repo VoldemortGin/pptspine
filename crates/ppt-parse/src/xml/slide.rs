@@ -22,8 +22,8 @@ use ppt_core::color::ColorSpec;
 use ppt_core::geom::{Emu, Rect};
 use ppt_core::model::{
     AutoShape, Autofit, Background, BodyProps, Cell, CellBorders, Connector, Fill,
-    GraphicPlaceholder, GroupShape, Paragraph, Picture, RelRect, Row, RunKind, Shape, Stroke,
-    Table, TextFrame, TextRun, Xfrm,
+    GraphicPlaceholder, GroupShape, Hyperlink, Paragraph, Picture, RelRect, Row, RunKind, Shape,
+    Stroke, Table, TextFrame, TextRun, Xfrm,
 };
 use ppt_core::model::{LineEnd, LineEndKind, LineEndSize};
 use ppt_core::style::{
@@ -34,8 +34,8 @@ use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 
 use super::text_style::{
-    level_style_attrs, parse_color_in, parse_level_style, parse_list_style, parse_run_style,
-    parse_solid_fill, run_style_attrs,
+    hyperlink_from, level_style_attrs, parse_color_in, parse_level_style, parse_list_style,
+    parse_run_props, parse_solid_fill, run_style_attrs,
 };
 use super::Relationship;
 use super::{
@@ -64,6 +64,8 @@ pub struct PartData {
     pub tx_styles: Option<TxStyles>,
     /// `p:cSld > p:bg`(slide / layout / master 皆可有,B-10)。
     pub background: Option<Background>,
+    /// 根元素 `@show="0"`(隐藏页;仅 slide 有意义)。
+    pub hidden: bool,
 }
 
 /// 解析一个形部件。`rels_xml` 是该部件的 `.rels` 文本(用于把图片 `r:embed` 映射到
@@ -97,7 +99,8 @@ pub fn parse_part(
                     b"clrMapOvr" => out.clr_map_ovr = parse_clr_map_ovr(&mut reader),
                     b"txStyles" => out.tx_styles = Some(parse_tx_styles(&mut reader)),
                     b"bg" => out.background = parse_bg(&mut reader, &ctx),
-                    // 其余容器(sld / cSld / sldMaster …)继续下钻。
+                    b"sld" => out.hidden = attr_of(&e, b"show").is_some_and(|v| !ooxml_bool(v)),
+                    // 其余容器(cSld / sldMaster …)继续下钻。
                     _ => {}
                 }
             }
@@ -455,6 +458,7 @@ fn parse_alternate_content<R: std::io::BufRead>(
 fn parse_sp<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Shape> {
     let mut pr = SpPr::default();
     let mut placeholder: Option<PlaceholderRef> = None;
+    let mut hyperlink: Option<Hyperlink> = None;
     let mut style: Option<ShapeStyle> = None;
     let mut body = TxBodyData::default();
     let mut has_txbody = false;
@@ -465,7 +469,11 @@ fn parse_sp<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Shape> {
             Ok(Event::Start(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
                 match name.as_slice() {
-                    b"nvSpPr" => placeholder = parse_nv_ph(reader).or(placeholder),
+                    b"nvSpPr" => {
+                        let nv = parse_nv(reader);
+                        placeholder = nv.ph.or(placeholder);
+                        hyperlink = nv.hyperlink.or(hyperlink);
+                    }
                     b"spPr" => {
                         let got = parse_sppr(reader);
                         pr.rect = got.rect.or(pr.rect);
@@ -500,6 +508,7 @@ fn parse_sp<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Shape> {
         list_style: body.list_style,
         style: style.clone(),
         body: body.body,
+        hyperlink: hyperlink.clone(),
     };
     // 有预设几何 / 实际填充 / 描边 => 当作自选图形;否则当作纯文本框
     // (孤立的显式 `noFill` 不改变分类——渲染结果与纯文本框一致)。
@@ -534,31 +543,57 @@ fn parse_sp<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Shape> {
             placeholder,
             style,
             custom_geometry: pr.custom_geometry,
+            hyperlink,
         }))
     } else {
         Some(Shape::TextBox(text_frame))
     }
 }
 
-/// 在 `p:nvSpPr` / `p:nvPicPr` 等非可视属性容器里找 `p:ph`(占位符标识)。
-/// 已消费容器起始标签,消费到其结束标签。
-fn parse_nv_ph<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<PlaceholderRef> {
-    let mut ph = None;
+/// 非可视属性容器(`p:nvSpPr` / `p:nvPicPr`)里捕获的信息。
+#[derive(Default)]
+struct NvProps {
+    /// `p:nvPr > p:ph`(占位符标识)。
+    ph: Option<PlaceholderRef>,
+    /// `p:cNvPr@name`。
+    name: Option<String>,
+    /// `p:cNvPr@descr`(替代文本)。
+    descr: Option<String>,
+    /// `p:cNvPr@title`。
+    title: Option<String>,
+    /// `p:cNvPr > a:hlinkClick`(形状级超链接)。
+    hyperlink: Option<Hyperlink>,
+}
+
+impl NvProps {
+    fn take(&mut self, e: &BytesStart) {
+        match local_name(e.name().as_ref()) {
+            b"ph" if self.ph.is_none() => self.ph = Some(ph_from(e)),
+            b"cNvPr" => {
+                let get = |k: &[u8]| attr_of(e, k).filter(|v| !v.is_empty());
+                self.name = get(b"name");
+                self.descr = get(b"descr");
+                self.title = get(b"title");
+            }
+            b"hlinkClick" if self.hyperlink.is_none() => self.hyperlink = Some(hyperlink_from(e)),
+            _ => {}
+        }
+    }
+}
+
+/// 解析 `p:nvSpPr` / `p:nvPicPr` 等非可视属性容器:`p:ph`(占位符标识)+
+/// `p:cNvPr`(name / descr / title / `a:hlinkClick`)。已消费容器起始标签,消费到其结束标签。
+fn parse_nv<R: std::io::BufRead>(reader: &mut Reader<R>) -> NvProps {
+    let mut nv = NvProps::default();
     let mut depth = 1usize;
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
                 depth += 1;
-                if ph.is_none() && local_name(e.name().as_ref()) == b"ph" {
-                    ph = Some(ph_from(&e));
-                }
+                nv.take(&e);
             }
-            Ok(Event::Empty(e)) => {
-                if ph.is_none() && local_name(e.name().as_ref()) == b"ph" {
-                    ph = Some(ph_from(&e));
-                }
-            }
+            Ok(Event::Empty(e)) => nv.take(&e),
             Ok(Event::End(_)) => {
                 depth -= 1;
                 if depth == 0 {
@@ -571,7 +606,7 @@ fn parse_nv_ph<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Placeholde
         }
         buf.clear();
     }
-    ph
+    nv
 }
 
 /// 从 `<p:ph>` 的属性建 [`PlaceholderRef`]。
@@ -1207,13 +1242,14 @@ fn break_run() -> TextRun {
 fn parse_run_like<R: std::io::BufRead>(reader: &mut Reader<R>, kind: RunKind) -> TextRun {
     let mut text = String::new();
     let mut rs = RunStyle::default();
+    let mut hyperlink = None;
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
                 match name.as_slice() {
-                    b"rPr" => rs = parse_run_style(reader, &e),
+                    b"rPr" => (rs, hyperlink) = parse_run_props(reader, &e),
                     b"t" => {
                         text.push_str(&read_text(reader));
                     }
@@ -1248,6 +1284,7 @@ fn parse_run_like<R: std::io::BufRead>(reader: &mut Reader<R>, kind: RunKind) ->
         char_spacing_pt: rs.char_spacing_pt,
         baseline: rs.baseline,
         cap: rs.cap,
+        hyperlink,
     }
 }
 
@@ -1592,14 +1629,14 @@ fn parse_pic<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Option<S
     let mut rect: Option<Rect> = None;
     let mut xfrm = Xfrm::default();
     let mut blip = BlipFillData::default();
-    let mut placeholder: Option<PlaceholderRef> = None;
+    let mut nv = NvProps::default();
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
                 match name.as_slice() {
-                    b"nvPicPr" => placeholder = parse_nv_ph(reader).or(placeholder),
+                    b"nvPicPr" => nv = parse_nv(reader),
                     b"spPr" => {
                         let pr = parse_sppr(reader);
                         rect = pr.rect.or(rect);
@@ -1639,7 +1676,11 @@ fn parse_pic<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Option<S
         image_bytes_len,
         src_rect: blip.src_rect,
         fill_rect: blip.fill_rect,
-        placeholder,
+        placeholder: nv.ph,
+        name: nv.name,
+        alt_text: nv.descr,
+        title: nv.title,
+        hyperlink: nv.hyperlink,
     }))
 }
 

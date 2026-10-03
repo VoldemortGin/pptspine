@@ -239,6 +239,9 @@ class Presentation:
 
 - Zero required args. `font_map` maps requested family → file path or family-name override, layered on
   top of the TS-2 substitution table (宋体→Songti SC etc.).
+- **Hidden slides (`p:sld@show="0"`) are skipped by default** (PowerPoint "Export → PDF" default);
+  keyword-only `include_hidden: bool = False` on both `to_pdf` and `save_pdf` restores them. Decks
+  without hidden slides render byte-identically to before this switch (the filter only drops pages).
 - Warnings surfaced via Python `warnings.warn`, **one per unique `ExportWarning` kind** (not per shape).
 - Matches the established zero-arg export convention `to_text()`/`to_markdown()`
   (`python/pptspine/_core.pyi:49-50`, `crates/py-bindings/src/lib.rs:323-330`). Stubs added beside them;
