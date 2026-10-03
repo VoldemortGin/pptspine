@@ -34,7 +34,8 @@ offline, and deterministically via the sibling [`ocrspine`](../ocrspine) crate
 | Groups (`p:grpSp`): recursive | parsed |
 | Speaker notes (`notesSlide` → `Slide.notes`) | parsed |
 | Structured export: `to_text()` / `to_markdown()` (GFM + HTML tables for merges) | working |
-| PDF export: `to_pdf()` / `save_pdf()` — one page per slide; placeholder/theme inheritance, shape transforms (rot/flip/adj/dash/`srcRect`), group affine, tables, slide backgrounds, body-anchor/autofit, superscript/subscript with the document's own baseline offset, character spacing (expanded and condensed), `cap=all` (`cap=small` approximated as all caps + warning) | working |
+| PDF export: `to_pdf()` / `save_pdf()` — one page per slide; placeholder/theme inheritance, shape transforms (rot/flip/adj/dash/`srcRect`), line ends (`headEnd`/`tailEnd`: triangle/stealth/diamond/oval/arrow), group affine, tables, slide backgrounds, body-anchor/autofit, superscript/subscript with the document's own baseline offset, character spacing (expanded and condensed), `cap=all` (`cap=small` approximated as all caps + warning) | working |
+| `custGeom` freeform shapes | degraded: bounding-box rect (connector: straight line) + `custom-geometry-approximated` warning |
 | Image OCR (embedded pictures → words + boxes) | working (`ocr_image`) |
 | Image-table geometry reconstruction from OCR boxes | **deferred** (stub) |
 

@@ -370,6 +370,53 @@ def test_b4_dash_pattern_emitted(dashed_connector_pptx: bytes) -> None:
     assert b"[8 6] 0 d" in pdf, "expected DrawingML dash pattern (4/3 line widths)"
 
 
+def test_line_ends_draw_filled_heads_at_both_ends_and_shorten_body(
+    arrow_connector_pptx: tuple[bytes, bytes],
+) -> None:
+    """线端装饰:头 stealth lg(10×10 pt)、尾 triangle med(6×6 pt,线宽 2 pt);
+    两个线色实心多边形分落两端,线身缩到 stealth 凹点(72+6)与三角底(360−6)。"""
+    arrowed, plain = arrow_connector_pptx
+    pres = pptspine.open_bytes(arrowed)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        pdf = pres.to_pdf()
+    assert not caught, [str(w.message) for w in caught]
+    drawings = _open_pdf(pdf)[0].get_drawings()
+    heads = [d for d in drawings if d["fill"] == (1.0, 0.0, 0.0) and d["color"] is None]
+    lines = [d for d in drawings if d["type"] == "s"]
+    assert len(heads) == 2 and len(lines) == 1
+    head, tail = sorted(heads, key=lambda d: d["rect"].x0)
+    assert tuple(head["rect"]) == pytest.approx((72.0, 67.0, 82.0, 77.0), abs=0.01)
+    assert len(head["items"]) == 4, "stealth = 4-point polygon"
+    assert tuple(tail["rect"]) == pytest.approx((354.0, 69.0, 360.0, 75.0), abs=0.01)
+    assert len(tail["items"]) == 3, "triangle = 3-point polygon"
+    assert tuple(lines[0]["rect"]) == pytest.approx((78.0, 72.0, 354.0, 72.0), abs=0.01)
+
+    # type="none" 两端:与无线端一致,整线到端点、无额外多边形。
+    plain_drawings = _open_pdf(_export(plain)[0])[0].get_drawings()
+    assert len(plain_drawings) == 1
+    assert tuple(plain_drawings[0]["rect"]) == pytest.approx((72.0, 72.0, 360.0, 72.0), abs=0.01)
+
+
+def test_custom_geometry_degrades_to_bbox_with_one_warning(
+    custom_geometry_pptx_bytes: bytes,
+) -> None:
+    """custGeom:直接填充与仅 style fillRef 着色的 freeform 都画包围盒,告警逐种类一次。"""
+    pres = pptspine.open_bytes(custom_geometry_pptx_bytes)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        pdf = pres.to_pdf()
+    msgs = [str(w.message) for w in caught]
+    assert len([m for m in msgs if "custom-geometry-approximated" in m]) == 1, msgs
+    fills = sorted(
+        (tuple(d["fill"]), tuple(d["rect"])) for d in _open_pdf(pdf)[0].get_drawings()
+    )
+    assert fills == [
+        ((0.0, 0.0, 1.0), pytest.approx((72.0, 72.0, 172.0, 172.0), abs=0.01)),
+        ((0.0, 1.0, 0.0), pytest.approx((300.0, 72.0, 400.0, 172.0), abs=0.01)),
+    ]
+
+
 def test_b4_src_rect_crop_changes_raster_and_image_survives(
     src_rect_pptx: tuple[bytes, bytes],
 ) -> None:

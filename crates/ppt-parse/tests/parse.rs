@@ -512,6 +512,7 @@ fn ln_width_and_dash_on_autoshape() {
             color: Some(ppt_core::ColorSpec::srgb([0x00, 0xFF, 0x00])),
             width_emu: Some(25400),
             dash: Some("sysDot".to_string()),
+            ..Stroke::default()
         })
     );
     // 空 `<a:ln/>` 不构成描边 -> 第二个 sp 仍是纯文本框。
@@ -775,4 +776,116 @@ fn fill_variants_parsed() {
         panic!("expected an autoshape (blipFill)");
     };
     assert_eq!(blip.fill, Some(Fill::Blip));
+}
+
+// ---- 线端装饰(`a:ln > a:headEnd / a:tailEnd`)+ `a:custGeom` 分类 -----------------
+
+/// 各 type / w / len 取值原样解析;缺省 `med`;规范外 type 进 `Other`。
+#[test]
+fn line_ends_parse_kinds_and_sizes() {
+    use ppt_core::model::{LineEnd, LineEndKind, LineEndSize};
+    let conn = |ln_inner: &str| {
+        let shapes = shapes_of(&format!(
+            r#"<p:cxnSp><p:spPr><a:prstGeom prst="line"/>
+                 <a:ln w="12700">{ln_inner}</a:ln></p:spPr></p:cxnSp>"#
+        ));
+        let Shape::Connector(c) = &shapes[0] else {
+            panic!("expected connector");
+        };
+        c.stroke.clone().expect("stroke")
+    };
+    let s = conn(r#"<a:headEnd type="diamond" w="lg" len="sm"/><a:tailEnd type="arrow"/>"#);
+    assert_eq!(
+        s.head_end,
+        Some(LineEnd {
+            kind: LineEndKind::Diamond,
+            width: LineEndSize::Large,
+            length: LineEndSize::Small,
+        })
+    );
+    assert_eq!(
+        s.tail_end,
+        Some(LineEnd {
+            kind: LineEndKind::Arrow,
+            width: LineEndSize::Medium,
+            length: LineEndSize::Medium,
+        })
+    );
+    for (attr, kind) in [
+        ("triangle", LineEndKind::Triangle),
+        ("stealth", LineEndKind::Stealth),
+        ("oval", LineEndKind::Oval),
+        ("none", LineEndKind::None),
+        ("bogus", LineEndKind::Other("bogus".into())),
+    ] {
+        let s = conn(&format!(r#"<a:tailEnd type="{attr}" w="sm" len="huge"/>"#));
+        let tail = s.tail_end.expect("tail end");
+        assert_eq!(tail.kind, kind, "{attr}");
+        assert_eq!(tail.width, LineEndSize::Small);
+        assert_eq!(tail.length, LineEndSize::Medium, "规范外尺寸按 med");
+        assert_eq!(s.head_end, None);
+    }
+    // 非自闭合写法(带子元素)同样识别。
+    let s = conn(r#"<a:tailEnd type="oval" len="lg"><a:extLst/></a:tailEnd>"#);
+    assert_eq!(
+        s.tail_end.map(|e| (e.kind, e.length)),
+        Some((LineEndKind::Oval, LineEndSize::Large))
+    );
+}
+
+/// 只有线端的 `a:ln` 也构成描边(颜色 / 线宽走 lnRef);`type="none"` 与
+/// `a:noFill` 下的线端不单独构成描边(保持旧分类与渲染)。
+#[test]
+fn line_end_only_ln_and_invisible_ends() {
+    let shapes = shapes_of(
+        r#"<p:sp><p:spPr><a:ln><a:tailEnd type="triangle"/></a:ln></p:spPr></p:sp>
+           <p:sp><p:spPr><a:ln><a:tailEnd type="none"/></a:ln></p:spPr>
+             <p:txBody><a:p><a:r><a:t>t</a:t></a:r></a:p></p:txBody></p:sp>
+           <p:sp><p:spPr><a:ln><a:noFill/><a:tailEnd type="triangle"/></a:ln></p:spPr>
+             <p:txBody><a:p><a:r><a:t>u</a:t></a:r></a:p></p:txBody></p:sp>"#,
+    );
+    let Shape::Auto(a) = &shapes[0] else {
+        panic!("arrow-only ln is a stroke");
+    };
+    let s = a.stroke.as_ref().expect("stroke");
+    assert!(s.color.is_none() && s.width_emu.is_none());
+    assert!(s.tail_end.is_some());
+    assert!(matches!(&shapes[1], Shape::TextBox(_)));
+    assert!(matches!(&shapes[2], Shape::TextBox(_)));
+}
+
+/// `a:custGeom`:有填充 / 描边、或仅经 `p:style` 着色 → 自选图形并标记
+/// `custom_geometry`;毫无着色来源 → 仍是纯文本框。
+#[test]
+fn custom_geometry_is_flagged_and_style_painted_custgeom_is_auto() {
+    let cust = r#"<a:custGeom><a:pathLst><a:path w="10" h="10"><a:moveTo><a:pt x="0" y="0"/></a:moveTo>
+        <a:lnTo><a:pt x="10" y="10"/></a:lnTo></a:path></a:pathLst></a:custGeom>"#;
+    let shapes = shapes_of(&format!(
+        r#"<p:sp><p:spPr>{cust}<a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></p:spPr></p:sp>
+           <p:sp><p:spPr>{cust}</p:spPr>
+             <p:style><a:lnRef idx="0"/><a:fillRef idx="1"><a:schemeClr val="accent1"/></a:fillRef></p:style></p:sp>
+           <p:sp><p:spPr>{cust}</p:spPr>
+             <p:style><a:lnRef idx="0"/><a:fillRef idx="0"/></p:style>
+             <p:txBody><a:p><a:r><a:t>plain</a:t></a:r></a:p></p:txBody></p:sp>
+           <p:cxnSp><p:spPr><a:custGeom/></p:spPr></p:cxnSp>
+           <p:sp><p:spPr><a:prstGeom prst="rect"/></p:spPr></p:sp>"#
+    ));
+    let Shape::Auto(a) = &shapes[0] else {
+        panic!("filled custGeom is an autoshape");
+    };
+    assert!(a.custom_geometry);
+    assert_eq!(a.geometry, None);
+    let Shape::Auto(b) = &shapes[1] else {
+        panic!("style-painted custGeom must be an autoshape, not a text box");
+    };
+    assert!(b.custom_geometry && b.fill.is_none() && b.style.is_some());
+    assert!(matches!(&shapes[2], Shape::TextBox(_)));
+    let Shape::Connector(c) = &shapes[3] else {
+        panic!("expected connector");
+    };
+    assert!(c.custom_geometry);
+    let Shape::Auto(d) = &shapes[4] else {
+        panic!("expected autoshape");
+    };
+    assert!(!d.custom_geometry);
 }

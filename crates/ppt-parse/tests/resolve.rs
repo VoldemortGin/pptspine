@@ -51,7 +51,7 @@ const THEME1: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
       <a:lnStyleLst>
         <a:ln w="6350"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln>
         <a:ln w="12700"><a:solidFill><a:schemeClr val="phClr"><a:shade val="50000"/></a:schemeClr></a:solidFill></a:ln>
-        <a:ln w="19050"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln>
+        <a:ln w="19050"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:headEnd type="oval" w="sm" len="lg"/><a:tailEnd type="stealth"/></a:ln>
       </a:lnStyleLst>
       <a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst>
       <a:bgFillStyleLst>
@@ -837,6 +837,82 @@ fn ln_ref_resolves_theme_line() {
         stroke.color.expect("stroke color").rgb,
         [0x2F, 0x52, 0x8F],
         "phClr=accent1 + shade50(主题 ln 档内变换)",
+    );
+}
+
+/// 线端装饰沿描边同一路径继承:显式 `a:ln` 的 headEnd / tailEnd 逐项获胜,缺失时经
+/// `lnRef` 取主题 lnStyleLst 档(第 3 档带 oval 头 + stealth 尾)。
+#[test]
+fn line_ends_inherit_through_ln_ref() {
+    use ppt_core::model::{LineEndKind, LineEndSize};
+    let conn = |ln: &str| {
+        format!(
+            r#"<p:cxnSp>
+        <p:nvCxnSpPr><p:cNvPr id="4" name="Conn"/><p:cNvCxnSpPr/><p:nvPr/></p:nvCxnSpPr>
+        <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="100" cy="100"/></a:xfrm>
+          <a:prstGeom prst="line"/>{ln}</p:spPr>
+        <p:style><a:lnRef idx="3"><a:schemeClr val="accent1"/></a:lnRef></p:style>
+      </p:cxnSp>"#
+        )
+    };
+    let inner = [
+        conn(""),
+        conn(r#"<a:ln w="25400"><a:tailEnd type="none"/></a:ln>"#),
+        conn(r#"<a:ln><a:headEnd type="triangle" w="lg"/></a:ln>"#),
+    ]
+    .concat();
+    let slide = resolve_slide(&slide_with(&inner, ""), "");
+    let ends: Vec<_> = slide
+        .shapes
+        .iter()
+        .map(|sh| {
+            let ResolvedShape::Connector(c) = sh else {
+                panic!("expected connector");
+            };
+            let s = c.stroke.as_ref().expect("stroke");
+            (
+                s.head_end.clone().expect("head"),
+                s.tail_end.clone().expect("tail"),
+            )
+        })
+        .collect();
+    // 1) 全走主题。
+    assert_eq!(ends[0].0.kind, LineEndKind::Oval);
+    assert_eq!(
+        (ends[0].0.width, ends[0].0.length),
+        (LineEndSize::Small, LineEndSize::Large)
+    );
+    assert_eq!(ends[0].1.kind, LineEndKind::Stealth);
+    // 2) 显式 tailEnd none 压过主题 stealth;head 仍走主题。
+    assert_eq!(ends[1].0.kind, LineEndKind::Oval);
+    assert_eq!(ends[1].1.kind, LineEndKind::None);
+    // 3) 显式 headEnd 获胜,tail 走主题。
+    assert_eq!(ends[2].0.kind, LineEndKind::Triangle);
+    assert_eq!(ends[2].0.width, LineEndSize::Large);
+    assert_eq!(ends[2].1.kind, LineEndKind::Stealth);
+}
+
+/// custGeom 仅经 `p:style` fillRef 着色:终态为带主题填充的自选图形(渲染侧降级画包围盒)。
+#[test]
+fn style_painted_custom_geometry_resolves_fill() {
+    let slide = resolve_slide(
+        &slide_with(
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="5" name="Freeform"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+        <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="100" cy="100"/></a:xfrm><a:custGeom/></p:spPr>
+        <p:style><a:lnRef idx="0"/><a:fillRef idx="1"><a:schemeClr val="accent2"/></a:fillRef></p:style>
+      </p:sp>"#,
+            "",
+        ),
+        "",
+    );
+    let ResolvedShape::Auto(a) = &slide.shapes[0] else {
+        panic!("expected autoshape");
+    };
+    assert!(a.custom_geometry);
+    assert_rgb_within(
+        a.fill.expect("fill from fillRef").color().rgb,
+        [0xED, 0x7D, 0x31],
+        "fillRef idx=1 phClr=accent2",
     );
 }
 

@@ -25,6 +25,7 @@ use ppt_core::model::{
     GraphicPlaceholder, GroupShape, Paragraph, Picture, RelRect, Row, RunKind, Shape, Stroke,
     Table, TextFrame, TextRun, Xfrm,
 };
+use ppt_core::model::{LineEnd, LineEndKind, LineEndSize};
 use ppt_core::style::{
     FontRef, PlaceholderRef, RunStyle, ShapeStyle, StyleMatrixRef, TextStyleLevels, TxStyles,
 };
@@ -473,6 +474,7 @@ fn parse_sp<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Shape> {
                         pr.adjusts = got.adjusts;
                         pr.fill = got.fill.or(pr.fill);
                         pr.stroke = got.stroke.or(pr.stroke);
+                        pr.custom_geometry |= got.custom_geometry;
                     }
                     b"style" => style = Some(parse_shape_style(reader)),
                     b"txBody" => {
@@ -501,8 +503,18 @@ fn parse_sp<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Shape> {
     };
     // 有预设几何 / 实际填充 / 描边 => 当作自选图形;否则当作纯文本框
     // (孤立的显式 `noFill` 不改变分类——渲染结果与纯文本框一致)。
+    // `a:custGeom` 且仅经 `p:style` 的 fillRef / lnRef 取色,同样是会着色的图形:
+    // 归为自选图形(渲染按包围盒降级 + 告警),而不是静默丢成不画的纯文本框。
     let has_paint = pr.fill.as_ref().is_some_and(|f| !matches!(f, Fill::None));
-    if pr.geometry.is_some() || has_paint || pr.stroke.is_some() {
+    let style_paint = style.as_ref().is_some_and(|st| {
+        let live = |r: &Option<StyleMatrixRef>| r.as_ref().is_some_and(|r| r.idx >= 1);
+        live(&st.fill_ref) || live(&st.ln_ref)
+    });
+    if pr.geometry.is_some()
+        || has_paint
+        || pr.stroke.is_some()
+        || (pr.custom_geometry && style_paint)
+    {
         // 段落非空,或带 lstStyle(layout/master 占位符常态——继承链需要),才保留文字体。
         let text = if has_txbody
             && (!text_frame.paragraphs.is_empty() || text_frame.list_style.is_some())
@@ -521,6 +533,7 @@ fn parse_sp<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Shape> {
             text,
             placeholder,
             style,
+            custom_geometry: pr.custom_geometry,
         }))
     } else {
         Some(Shape::TextBox(text_frame))
@@ -655,6 +668,7 @@ fn parse_cxn_sp<R: std::io::BufRead>(reader: &mut Reader<R>) -> Shape {
                         pr.adjusts = got.adjusts;
                         pr.fill = got.fill.or(pr.fill);
                         pr.stroke = got.stroke.or(pr.stroke);
+                        pr.custom_geometry |= got.custom_geometry;
                     }
                     b"style" => style = Some(parse_shape_style(reader)),
                     _ => skip_element(reader, &name),
@@ -675,6 +689,7 @@ fn parse_cxn_sp<R: std::io::BufRead>(reader: &mut Reader<R>) -> Shape {
         fill: pr.fill,
         stroke: pr.stroke,
         style,
+        custom_geometry: pr.custom_geometry,
     })
 }
 
@@ -687,6 +702,8 @@ struct SpPr {
     adjusts: Vec<(String, i64)>,
     fill: Option<Fill>,
     stroke: Option<Stroke>,
+    /// 出现了 `a:custGeom`(自定义几何;v1 不求值路径公式)。
+    custom_geometry: bool,
 }
 
 /// 解析 `a:spPr`:`a:xfrm`(位置尺寸 + 旋转/翻转)、`a:prstGeom`(几何名 + avLst
@@ -708,6 +725,10 @@ fn parse_sppr<R: std::io::BufRead>(reader: &mut Reader<R>) -> SpPr {
                     b"prstGeom" => {
                         pr.geometry = attr_of(&e, b"prst");
                         pr.adjusts = parse_av_lst(reader);
+                    }
+                    b"custGeom" => {
+                        pr.custom_geometry = true;
+                        skip_element(reader, &name);
                     }
                     b"solidFill" => {
                         if let Some(spec) = parse_solid_fill(reader) {
@@ -733,8 +754,9 @@ fn parse_sppr<R: std::io::BufRead>(reader: &mut Reader<R>) -> SpPr {
                 let name = local_name(e.name().as_ref()).to_vec();
                 match name.as_slice() {
                     b"prstGeom" => pr.geometry = attr_of(&e, b"prst"),
+                    b"custGeom" => pr.custom_geometry = true,
                     b"noFill" => pr.fill = Some(Fill::None),
-                    b"ln" => pr.stroke = stroke_if_any(None, ln_width(&e), None).or(pr.stroke),
+                    b"ln" => pr.stroke = bare_ln(&e).or(pr.stroke),
                     _ => {}
                 }
             }
@@ -894,33 +916,44 @@ fn parse_grad_fill<R: std::io::BufRead>(reader: &mut Reader<R>) -> Vec<ColorSpec
 }
 
 /// 解析 `a:ln`(描边):自身 `@w` 线宽 + 其内 `a:solidFill` 颜色 + `a:prstDash@val`
-/// 虚线预设。已消费 `<a:ln>` 起始标签;`start` 是该起始标签(读取 `w`)。
-/// 颜色 / 线宽 / 虚线全缺时返回 `None`(与旧行为一致:空 `a:ln` 不产生描边)。
+/// 虚线预设 + `a:headEnd` / `a:tailEnd` 线端装饰。已消费 `<a:ln>` 起始标签;`start`
+/// 是该起始标签(读取 `w`)。颜色 / 线宽 / 虚线 / 有效线端全缺时返回 `None`(与旧行为
+/// 一致:空 `a:ln` 不产生描边)。`a:ln > a:noFill`(不可见线)下的线端装饰丢弃——
+/// 否则孤立的箭头会让本无描边的形状凭空长出缺省黑线。
 pub(crate) fn parse_ln<R: std::io::BufRead>(
     reader: &mut Reader<R>,
     start: &BytesStart,
 ) -> Option<Stroke> {
-    let width_emu = ln_width(start);
-    let mut color = None;
-    let mut dash = None;
+    let mut stroke = Stroke {
+        width_emu: ln_width(start),
+        ..Stroke::default()
+    };
+    let mut no_fill = false;
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
                 match name.as_slice() {
-                    b"solidFill" => color = parse_solid_fill(reader).or(color),
+                    b"solidFill" => stroke.color = parse_solid_fill(reader).or(stroke.color),
                     b"prstDash" => {
-                        dash = attr_of(&e, b"val").or(dash);
+                        stroke.dash = attr_of(&e, b"val").or(stroke.dash);
+                        skip_element(reader, &name);
+                    }
+                    b"headEnd" | b"tailEnd" | b"noFill" => {
+                        ln_child_empty(&mut stroke, &mut no_fill, &name, &e);
                         skip_element(reader, &name);
                     }
                     _ => skip_element(reader, &name),
                 }
             }
             Ok(Event::Empty(e)) => {
-                // `<a:prstDash val="dash"/>` 通常是自闭合。
-                if local_name(e.name().as_ref()) == b"prstDash" {
-                    dash = attr_of(&e, b"val").or(dash);
+                // `<a:prstDash val="dash"/>` / `<a:tailEnd type="triangle"/>` 通常是自闭合。
+                let name = local_name(e.name().as_ref()).to_vec();
+                if name.as_slice() == b"prstDash" {
+                    stroke.dash = attr_of(&e, b"val").or(stroke.dash);
+                } else {
+                    ln_child_empty(&mut stroke, &mut no_fill, &name, &e);
                 }
             }
             Ok(Event::End(_)) => break,
@@ -930,7 +963,45 @@ pub(crate) fn parse_ln<R: std::io::BufRead>(
         }
         buf.clear();
     }
-    stroke_if_any(color, width_emu, dash)
+    if no_fill {
+        stroke.head_end = None;
+        stroke.tail_end = None;
+    }
+    stroke_if_any(stroke)
+}
+
+/// `a:ln` 的线端 / `noFill` 子元素(属性即全部信息)。
+fn ln_child_empty(stroke: &mut Stroke, no_fill: &mut bool, name: &[u8], e: &BytesStart) {
+    match name {
+        b"headEnd" => stroke.head_end = Some(line_end_of(e)),
+        b"tailEnd" => stroke.tail_end = Some(line_end_of(e)),
+        b"noFill" => *no_fill = true,
+        _ => {}
+    }
+}
+
+/// `a:headEnd` / `a:tailEnd` 的 `@type` / `@w` / `@len`(缺失取 ECMA-376 缺省
+/// `none` / `med` / `med`;规范外尺寸按 `med`,规范外种类原样进 [`LineEndKind::Other`])。
+fn line_end_of(e: &BytesStart) -> LineEnd {
+    let size = |key: &[u8]| match attr_of(e, key).as_deref() {
+        Some("sm") => LineEndSize::Small,
+        Some("lg") => LineEndSize::Large,
+        _ => LineEndSize::Medium,
+    };
+    let kind = match attr_of(e, b"type").as_deref() {
+        None | Some("none") => LineEndKind::None,
+        Some("triangle") => LineEndKind::Triangle,
+        Some("stealth") => LineEndKind::Stealth,
+        Some("diamond") => LineEndKind::Diamond,
+        Some("oval") => LineEndKind::Oval,
+        Some("arrow") => LineEndKind::Arrow,
+        Some(other) => LineEndKind::Other(other.to_string()),
+    };
+    LineEnd {
+        kind,
+        width: size(b"w"),
+        length: size(b"len"),
+    }
 }
 
 /// `a:ln@w`(EMU 线宽)。
@@ -938,20 +1009,27 @@ fn ln_width(e: &BytesStart) -> Option<Emu> {
     attr_of(e, b"w").and_then(|s| s.parse().ok())
 }
 
-/// 颜色 / 线宽 / 虚线至少有一项时建 [`Stroke`],否则 `None`。
-fn stroke_if_any(
-    color: Option<ColorSpec>,
-    width_emu: Option<Emu>,
-    dash: Option<String>,
-) -> Option<Stroke> {
-    if color.is_none() && width_emu.is_none() && dash.is_none() {
+/// 自闭合 `<a:ln w="…"/>`(无子元素,只有线宽)。
+fn bare_ln(e: &BytesStart) -> Option<Stroke> {
+    stroke_if_any(Stroke {
+        width_emu: ln_width(e),
+        ..Stroke::default()
+    })
+}
+
+/// 颜色 / 线宽 / 虚线 / 有效线端(种类非 `none`)至少有一项时保留 [`Stroke`],
+/// 否则 `None`——显式 `type="none"` 的线端不单独构成描边(渲染零变化)。
+fn stroke_if_any(stroke: Stroke) -> Option<Stroke> {
+    let has_end = |e: &Option<LineEnd>| e.as_ref().is_some_and(|e| e.kind != LineEndKind::None);
+    if stroke.color.is_none()
+        && stroke.width_emu.is_none()
+        && stroke.dash.is_none()
+        && !has_end(&stroke.head_end)
+        && !has_end(&stroke.tail_end)
+    {
         return None;
     }
-    Some(Stroke {
-        color,
-        width_emu,
-        dash,
-    })
+    Some(stroke)
 }
 
 /// 解析 `p:txBody` -> 段落序列 + 自带列表样式 + `a:bodyPr`(B-6)。
@@ -1473,7 +1551,7 @@ fn parse_tcpr_children<R: std::io::BufRead>(reader: &mut Reader<R>, t: &mut TcPr
             }
             Ok(Event::Empty(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
-                let w = || stroke_if_any(None, ln_width(&e), None);
+                let w = || bare_ln(&e);
                 match name.as_slice() {
                     b"lnL" => t.borders.left = w(),
                     b"lnR" => t.borders.right = w(),

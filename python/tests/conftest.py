@@ -1084,6 +1084,62 @@ def dashed_connector_pptx() -> bytes:
     return build_sp_tree_pptx(_DASH_CONNECTOR)
 
 
+def _arrow_connector(ln_ends: str) -> str:
+    """水平连接线 (72, 72) → (360, 72) pt,线宽 2 pt 红色,``ln_ends`` 是 a:ln 内的线端元素。"""
+    return f"""<p:cxnSp>
+        <p:nvCxnSpPr><p:cNvPr id="4" name="Arrow 3"/><p:cNvCxnSpPr/><p:nvPr/></p:nvCxnSpPr>
+        <p:spPr>
+          <a:xfrm><a:off x="914400" y="914400"/><a:ext cx="3657600" cy="0"/></a:xfrm>
+          <a:prstGeom prst="straightConnector1"/>
+          <a:ln w="25400">
+            <a:solidFill><a:srgbClr val="FF0000"/></a:solidFill>
+            {ln_ends}
+          </a:ln>
+        </p:spPr>
+      </p:cxnSp>"""
+
+
+@pytest.fixture(scope="session")
+def arrow_connector_pptx() -> tuple[bytes, bytes]:
+    """线端装饰门:``(带箭头, 无箭头)``。头 stealth lg/lg、尾 triangle med/med。"""
+    return (
+        build_sp_tree_pptx(
+            _arrow_connector(
+                '<a:headEnd type="stealth" w="lg" len="lg"/><a:tailEnd type="triangle"/>'
+            )
+        ),
+        build_sp_tree_pptx(_arrow_connector('<a:headEnd type="none"/><a:tailEnd type="none"/>')),
+    )
+
+
+_CUST_GEOM = """<a:custGeom><a:pathLst><a:path w="10" h="10">
+            <a:moveTo><a:pt x="0" y="0"/></a:moveTo><a:lnTo><a:pt x="10" y="10"/></a:lnTo>
+            <a:lnTo><a:pt x="0" y="10"/></a:lnTo><a:close/></a:path></a:pathLst></a:custGeom>"""
+
+
+@pytest.fixture(scope="session")
+def custom_geometry_pptx_bytes() -> bytes:
+    """custGeom 降级门:直接蓝色填充的 freeform + 仅经 ``p:style`` fillRef 着色的 freeform。"""
+    return build_sp_tree_pptx(
+        f"""<p:sp>
+        <p:nvSpPr><p:cNvPr id="5" name="Freeform 4"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+        <p:spPr>
+          <a:xfrm><a:off x="914400" y="914400"/><a:ext cx="1270000" cy="1270000"/></a:xfrm>
+          {_CUST_GEOM}
+          <a:solidFill><a:srgbClr val="0000FF"/></a:solidFill>
+        </p:spPr>
+      </p:sp>
+      <p:sp>
+        <p:nvSpPr><p:cNvPr id="6" name="Freeform 5"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+        <p:spPr>
+          <a:xfrm><a:off x="3810000" y="914400"/><a:ext cx="1270000" cy="1270000"/></a:xfrm>
+          {_CUST_GEOM}
+        </p:spPr>
+        <p:style><a:lnRef idx="0"/><a:fillRef idx="1"><a:srgbClr val="00FF00"/></a:fillRef></p:style>
+      </p:sp>"""
+    )
+
+
 def _picture_slide(blip_extra: str) -> str:
     return f"""<p:pic>
         <p:nvPicPr><p:cNvPr id="2" name="Picture 1"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>

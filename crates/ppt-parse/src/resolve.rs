@@ -22,6 +22,7 @@ use ppt_core::model::{
     AutoShape, Autofit, Background, BodyProps, Cell, Connector, Fill, Paragraph, Presentation,
     Shape, Slide, Stroke, Table, TextFrame, TextRun,
 };
+use ppt_core::model::{LineEnd, LineEndKind};
 use ppt_core::resolved::{
     ResolvedAnchor, ResolvedAutoShape, ResolvedBackground, ResolvedBodyProps, ResolvedBullet,
     ResolvedCell, ResolvedCellBorders, ResolvedConnector, ResolvedFill, ResolvedGroup,
@@ -382,6 +383,7 @@ fn resolve_auto(a: &AutoShape, ctx: &Ctx) -> ResolvedAutoShape {
         fill: resolve_fill(ctx, a.fill.as_ref(), a.style.as_ref()),
         stroke: resolve_stroke(ctx, a.stroke.as_ref(), a.style.as_ref()),
         text,
+        custom_geometry: a.custom_geometry,
     }
 }
 
@@ -393,6 +395,7 @@ fn resolve_connector(c: &Connector, ctx: &Ctx) -> ResolvedConnector {
         adjusts: c.adjusts.clone(),
         fill: resolve_fill(ctx, c.fill.as_ref(), c.style.as_ref()),
         stroke: resolve_stroke(ctx, c.stroke.as_ref(), c.style.as_ref()),
+        custom_geometry: c.custom_geometry,
     }
 }
 
@@ -484,7 +487,8 @@ fn resolve_fill(
     }
 }
 
-/// 描边解析:显式 `a:ln` 字段逐项获胜;缺色 / 缺宽经 `lnRef` 从主题 `lnStyleLst` 补。
+/// 描边解析:显式 `a:ln` 字段逐项获胜;缺色 / 缺宽 / 缺线端(`headEnd` / `tailEnd`)
+/// 经 `lnRef` 从主题 `lnStyleLst` 补(虚线不走主题,沿旧行为)。
 fn resolve_stroke(
     ctx: &Ctx,
     stroke: Option<&Stroke>,
@@ -511,13 +515,27 @@ fn resolve_stroke(
         .and_then(|s| s.width_emu)
         .or_else(|| theme_line.and_then(|tl| tl.width_emu));
     let dash = stroke.and_then(|s| s.dash.clone());
-    if color.is_none() && width_emu.is_none() && dash.is_none() {
+    let head_end = stroke
+        .and_then(|s| s.head_end.clone())
+        .or_else(|| theme_line.and_then(|tl| tl.head_end.clone()));
+    let tail_end = stroke
+        .and_then(|s| s.tail_end.clone())
+        .or_else(|| theme_line.and_then(|tl| tl.tail_end.clone()));
+    let has_end = |e: &Option<LineEnd>| e.as_ref().is_some_and(|e| e.kind != LineEndKind::None);
+    if color.is_none()
+        && width_emu.is_none()
+        && dash.is_none()
+        && !has_end(&head_end)
+        && !has_end(&tail_end)
+    {
         return None;
     }
     Some(ResolvedStroke {
         color,
         width_emu,
         dash,
+        head_end,
+        tail_end,
     })
 }
 
