@@ -41,6 +41,17 @@ offline, and deterministically via the sibling [`ocrspine`](../ocrspine) crate
 Parsing is tolerant: unknown elements are skipped, missing attributes become
 `None`, and malformed input yields a typed `PptError` rather than a panic.
 
+Untrusted input is bounded. The zip reader never trusts declared entry sizes
+(no pre-allocation from header fields; reads are capped at the limit) and
+rejects packages that exceed `ppt_parse::ZipLimits` with
+`PptError::LimitExceeded` (`PptZipError` in Python, message names the limit).
+Defaults: 10,000 entries, 256 MiB per entry, 1 GiB total decompressed, a
+compression ratio of 1000 (only checked for entries over 1 MiB) and 1024-byte
+entry names. Absolute or `..` entry paths are rejected, and group /
+`mc:AlternateContent` nesting deeper than 64 levels is skipped instead of
+recursing. Rust callers can pass custom limits via `parse_bytes_with_limits` /
+`parse_path_with_limits`.
+
 ## Install
 
 ```bash

@@ -11,6 +11,15 @@ pub enum PptError {
     #[error("zip error: {0}")]
     Zip(String),
 
+    /// 输入超出解析限额(zip 条目数 / 单条目解压量 / 总解压量 / 压缩比 / 名字长度)。
+    /// 防 zip 炸弹与伪造头字段;`actual` 为观测到的值(读取中途截断时为"至少"值)。
+    #[error("limit exceeded: {kind} (limit {limit}, actual {actual})")]
+    LimitExceeded {
+        kind: LimitKind,
+        limit: u64,
+        actual: u64,
+    },
+
     /// XML 部件解析错误(quick-xml 报错、结构非法)。
     #[error("xml error: {0}")]
     Xml(String),
@@ -41,6 +50,7 @@ impl PptError {
     pub fn kind(&self) -> &'static str {
         match self {
             PptError::Zip(_) => "zip",
+            PptError::LimitExceeded { .. } => "limit-exceeded",
             PptError::Xml(_) => "xml",
             PptError::Unsupported(_) => "unsupported",
             PptError::InvalidArgument(_) => "invalid-argument",
@@ -48,6 +58,41 @@ impl PptError {
             PptError::Render(_) => "render",
             PptError::Ocr(_) => "ocr",
         }
+    }
+}
+
+/// [`PptError::LimitExceeded`] 命中的是哪一项限额。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LimitKind {
+    /// zip 条目数。
+    Entries,
+    /// 单个条目的解压字节数。
+    EntryBytes,
+    /// 全部条目的累计解压字节数。
+    TotalBytes,
+    /// 单个条目的压缩比(解压 / 压缩)。
+    CompressionRatio,
+    /// 条目名字节长度。
+    NameLength,
+}
+
+impl LimitKind {
+    /// 稳定的短标签(出现在错误信息里)。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LimitKind::Entries => "entries",
+            LimitKind::EntryBytes => "entry-bytes",
+            LimitKind::TotalBytes => "total-bytes",
+            LimitKind::CompressionRatio => "compression-ratio",
+            LimitKind::NameLength => "name-length",
+        }
+    }
+}
+
+impl std::fmt::Display for LimitKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 

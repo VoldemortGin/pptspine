@@ -18,7 +18,9 @@ use ppt_core::{PptError, Result};
 
 use zip_pkg::Package;
 
+pub use ppt_core::LimitKind;
 pub use resolve::{resolve, resolve_parts};
+pub use zip_pkg::ZipLimits;
 
 /// 解析输出:结构化演示文稿 + media 字节(键为裸文件名,如 `image1.png`)
 /// + 继承链部件(layout / master / theme,供 [`resolve`] 消费)。
@@ -68,13 +70,24 @@ pub struct MasterPart {
 
 /// 从磁盘路径解析一个 `.pptx`。
 pub fn parse_path(path: &Path) -> Result<ParsedPptx> {
-    let bytes = std::fs::read(path)?;
-    parse_bytes(&bytes)
+    parse_path_with_limits(path, &ZipLimits::default())
 }
 
-/// 从内存字节解析一个 `.pptx`。
+/// 同 [`parse_path`],但使用调用方给定的 zip 读取限额。
+pub fn parse_path_with_limits(path: &Path, limits: &ZipLimits) -> Result<ParsedPptx> {
+    let bytes = std::fs::read(path)?;
+    parse_bytes_with_limits(&bytes, limits)
+}
+
+/// 从内存字节解析一个 `.pptx`(默认限额 [`ZipLimits::default`])。
 pub fn parse_bytes(bytes: &[u8]) -> Result<ParsedPptx> {
-    let pkg = Package::open_bytes(bytes)?;
+    parse_bytes_with_limits(bytes, &ZipLimits::default())
+}
+
+/// 同 [`parse_bytes`],但使用调用方给定的 zip 读取限额;超限返回
+/// [`PptError::LimitExceeded`]。
+pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<ParsedPptx> {
+    let pkg = Package::open_bytes_with_limits(bytes, limits)?;
 
     // 1) presentation.xml:画布尺寸 + 幻灯片顺序(r:id 列表)。
     let pres_xml = pkg.presentation_xml()?;

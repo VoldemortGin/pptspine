@@ -18,6 +18,13 @@ Spine 家族成员之一:**纯 Rust 的 PowerPoint(.pptx / OOXML)结构化解析
   的代码**不准进**。
 - **容错解析,绝不 panic。** 未知元素跳过、缺失属性 → `None`、畸形输入 → 类型化 `PptError`。
   解析层对脏输入必须健壮。
+  - **解压限额(`ppt_parse::ZipLimits`)。** 读 zip 包不信任头字段声明大小(不按它预分配,
+    `take(limit + 1)` 截断读取),超限返回 `PptError::LimitExceeded { kind: LimitKind, limit, actual }`
+    (Python 侧为 `PptZipError`,信息含限额种类)。默认:条目数 10 000、单条目 256 MiB、总解压量
+    1 GiB、压缩比 1000(仅对解压量 > 1 MiB 的条目判定)、条目名 1024 字节;绝对路径 / 含 `..`
+    的条目名直接拒绝(`PptError::Zip`)。`parse_bytes` / `parse_path` 用默认值,
+    `parse_*_with_limits` 可自定。组合 / `mc:AlternateContent` 嵌套超过 64 层的子树整体跳过
+    (防递归下降爆栈)。
 - **缝的元模式(家族统一)。** 唯一外部能力(OCR)经 Protocol seam 接入:`OcrEngine`(来自
   `ocrspine`)是协议,`PaddleOcr` 是确定性默认实现。core 只依赖协议,**绝不**直接 import 任何
   推理 SDK。

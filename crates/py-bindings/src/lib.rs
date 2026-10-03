@@ -48,7 +48,8 @@ create_exception!(_core, PptOcrError, PptError_);
 fn map_err(e: PptError) -> PyErr {
     let msg = e.to_string();
     match e.kind() {
-        "zip" => PptZipError::new_err(msg),
+        // 限额命中(zip 炸弹 / 伪造头字段)按损坏的容器处理;信息里带限额种类。
+        "zip" | "limit-exceeded" => PptZipError::new_err(msg),
         "xml" => PptXmlError::new_err(msg),
         "unsupported" => PptUnsupportedError::new_err(msg),
         "ocr" => PptOcrError::new_err(msg),
