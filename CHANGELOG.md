@@ -13,6 +13,37 @@ still change.
 
 ## [Unreleased]
 
+### Changed
+
+- Align PDF export dependencies with pdfspine v0.8.0 (2026-09-10, `91e0255`;
+  previously unrecorded): `pdf-typeset` / `pdf-fonts` git deps and the
+  validation notes in `docs/pdfspine-v080-validation.md`.
+- Align git deps to ocrspine `041958a` (fixes a reading-order sort panic) and
+  pdfspine v0.11.2 (`78a64d6`, pdf-typeset / pdf-fonts); the test extra now
+  accepts `pdfspine>=0.8,<0.12`. No behavior change; the 18 SSIM
+  self-reference pages are unchanged.
+
+### Fixed
+
+- CI wheels job "Wheel OCR smoke" had failed since 2026-07 (the `--no-index`
+  install could not resolve the hard dependency `ocrspine-models`); it now
+  installs the models package first, then the locally built wheel with
+  `--no-index`. The pytest job installs `.[test]` and runs with `-ra`.
+- `ppt-ocr` isolates panics from the ocrspine engine, image decode and engine
+  construction into `PptError::Ocr` (Python `PptOcrError`) instead of letting
+  them escape as `PanicException`; words with NaN/Inf bbox or confidence are
+  dropped.
+
+### Security
+
+- The zip reader no longer pre-allocates from the entry's declared size, and
+  reads are capped. New `ZipLimits` (defaults: 10 000 entries, 256 MiB per
+  entry, 1 GiB total, compression ratio 1000 for entries > 1 MiB, 1024-byte
+  names) -> `PptError::LimitExceeded` (Python `PptZipError`). Absolute and `..`
+  entry paths are rejected. Group-shape / `mc:AlternateContent` nesting deeper
+  than 64 is skipped to avoid stack overflow. New `parse_bytes_with_limits` /
+  `parse_path_with_limits`.
+
 ## [0.5.1] — 2026-07-30
 
 ### Changed
