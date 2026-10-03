@@ -477,6 +477,93 @@ pub struct GraphicPlaceholder {
     pub rect: Option<Rect>,
     /// 内容种类:`a:graphicData@uri` 原样(如 `…/chart`、`…/diagram`);缺失为 `None`。
     pub kind: Option<String>,
+    /// 图表关系 id(`a:graphicData > c:chart@r:id`);非图表为 `None`。
+    pub chart_rel_id: Option<String>,
+    /// 图表缓存数据(经 slide rels 读 `ppt/charts/chartN.xml`);非图表 / 部件缺失为 `None`。
+    pub chart: Option<Chart>,
+}
+
+/// 图表种类(`c:plotArea` 下的图类型元素;3D 变体并入同名 2D 种类,`ofPieChart` 并入 `Pie`)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChartKind {
+    Bar,
+    Line,
+    Pie,
+    Doughnut,
+    Area,
+    Scatter,
+    Bubble,
+    Radar,
+    Stock,
+    Surface,
+    /// 未识别的图类型元素(本地名原样,如 `"fooChart"`)。
+    Other(String),
+}
+
+impl ChartKind {
+    /// 由图类型元素本地名(如 `barChart` / `bar3DChart`)识别;非 `*Chart` 元素为 `None`。
+    #[must_use]
+    pub fn from_element(name: &str) -> Option<Self> {
+        let base = name.strip_suffix("Chart")?;
+        let base = base.strip_suffix("3D").unwrap_or(base);
+        Some(match base {
+            "bar" => ChartKind::Bar,
+            "line" => ChartKind::Line,
+            "pie" | "ofPie" => ChartKind::Pie,
+            "doughnut" => ChartKind::Doughnut,
+            "area" => ChartKind::Area,
+            "scatter" => ChartKind::Scatter,
+            "bubble" => ChartKind::Bubble,
+            "radar" => ChartKind::Radar,
+            "stock" => ChartKind::Stock,
+            "surface" => ChartKind::Surface,
+            _ => ChartKind::Other(name.to_string()),
+        })
+    }
+
+    /// 小写种类名(`"bar"` / `"pie"` / …;`Other` 为元素本地名原样)。
+    #[must_use]
+    pub fn name(&self) -> &str {
+        match self {
+            ChartKind::Bar => "bar",
+            ChartKind::Line => "line",
+            ChartKind::Pie => "pie",
+            ChartKind::Doughnut => "doughnut",
+            ChartKind::Area => "area",
+            ChartKind::Scatter => "scatter",
+            ChartKind::Bubble => "bubble",
+            ChartKind::Radar => "radar",
+            ChartKind::Stock => "stock",
+            ChartKind::Surface => "surface",
+            ChartKind::Other(s) => s,
+        }
+    }
+}
+
+/// 图表缓存数据(`c:chartSpace`):只读 `c:strCache` / `c:numCache` / 字面量,**不**读外部工作簿。
+#[derive(Debug, Clone, PartialEq)]
+pub struct Chart {
+    /// 主图类型(`c:plotArea` 下第一个图类型;组合图的其余系列一并收进 `series`)。
+    pub kind: ChartKind,
+    /// 标题纯文本(`c:title > c:tx`;单系列图的自动标题取系列名);无标题为 `None`。
+    pub title: Option<String>,
+    /// 类别(首个带类别的系列的 `c:cat`;散点 / 气泡图为 `c:xVal`),按点序。
+    pub categories: Vec<String>,
+    /// 系列,按文档顺序。
+    pub series: Vec<ChartSeries>,
+    /// 抽取降级告警(缺缓存、点数截断等)。
+    pub warnings: Vec<String>,
+}
+
+/// 图表的一个系列(`c:ser`)。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ChartSeries {
+    /// 系列名(`c:ser > c:tx`);缺失为 `None`。
+    pub name: Option<String>,
+    /// 值(`c:val`;散点 / 气泡图为 `c:yVal`),按 `ptCount` 补齐,缺点为 `None`。
+    pub values: Vec<Option<f64>>,
+    /// 值的数字格式(`c:numCache > c:formatCode`,如 `"General"` / `"0.0%"`)。
+    pub format_code: Option<String>,
 }
 
 /// 描边属性(`a:ln`):颜色 + 线宽 + 虚线预设 + 两端线端装饰。

@@ -6,9 +6,10 @@
 //!   `buNone` / 未设 → 无标记),按层级缩进两个空格;无解析信息时退回段落直接格式;
 //! - 图片输出 `![alt](media)`(alt = `cNvPr@descr`,缺省 `@name`);
 //! - 外部超链接输出 `[text](url)`(run 级优先,形状级兜底);内部跳转按纯文本;
-//! - 表格沿用 GFM / HTML `<table>`(合并单元格)保真;备注以引用块附后。
+//! - 表格沿用 GFM / HTML `<table>`(合并单元格)保真;备注以引用块附后;
+//! - 图表(缓存数据)输出 `#### Chart: <title>` + GFM 表格(对标 MarkItDown)。
 
-use crate::model::{Hyperlink, Paragraph, Picture, Presentation, Shape, Slide, TextFrame};
+use crate::model::{Chart, Hyperlink, Paragraph, Picture, Presentation, Shape, Slide, TextFrame};
 use crate::resolved::{
     ResolvedBullet, ResolvedParagraph, ResolvedPresentation, ResolvedShape, ResolvedSlide,
 };
@@ -16,7 +17,7 @@ use crate::style::Bullet;
 
 use super::reading_order::FlatShape;
 use super::view::{exported_slides, ordered_shapes, placeholder_kind, ExportOptions};
-use super::{notes_text, paragraph_text, table_markdown};
+use super::{chart_label, chart_table, escape_pipe, notes_text, paragraph_text, table_markdown};
 
 /// 整份演示文稿的语义 Markdown。`resolved` 提供继承链信息(占位符几何 / 项目符号);
 /// 可为 `None`(退回直接格式)。
@@ -121,8 +122,32 @@ fn shape_blocks(f: &FlatShape, skip_first_para: bool, out: &mut Vec<String>) {
             }
         }
         Shape::Picture(p) => out.push(picture_markdown(p)),
-        Shape::Connector(_) | Shape::Placeholder(_) | Shape::Group(_) => {}
+        Shape::Placeholder(p) => {
+            if let Some(c) = &p.chart {
+                out.push(chart_markdown(c));
+            }
+        }
+        Shape::Connector(_) | Shape::Group(_) => {}
     }
+}
+
+/// 图表:`#### Chart: <title>`(无标题 `#### Chart (<kind>)`)+ GFM 表格(首列类别,各系列一列)。
+fn chart_markdown(c: &Chart) -> String {
+    let mut out = format!("#### {}", chart_label(c));
+    if let Some((header, rows)) = chart_table(c) {
+        let line = |cells: &[String]| {
+            let cells: Vec<String> = cells.iter().map(|s| escape_pipe(s)).collect();
+            format!("| {} |", cells.join(" | "))
+        };
+        out.push_str("\n\n");
+        out.push_str(&line(&header));
+        out.push_str(&format!("\n| {} |", vec!["---"; header.len()].join(" | ")));
+        for r in &rows {
+            out.push('\n');
+            out.push_str(&line(r));
+        }
+    }
+    out
 }
 
 /// 段落的列表标记。

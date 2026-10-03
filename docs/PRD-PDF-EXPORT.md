@@ -44,7 +44,7 @@ export fidelity. It discards all geometry. This PRD is about true layout-faithfu
 
 | Item | Rationale | v1 degradation |
 |---|---|---|
-| Charts (`graphicFrame` > `c:chart`) | chart rendering is its own engine | bounding-box placeholder rect + warning. ⚠ today the shape vanishes **including its rect** (`slide.rs:494-500`); parse must at least capture the frame rect (B-3) |
+| Charts (`graphicFrame` > `c:chart`) | chart rendering is its own engine | bounding-box placeholder rect + warning. ⚠ today the shape vanishes **including its rect** (`slide.rs:494-500`); parse must at least capture the frame rect (B-3). **Data extraction (not rendering) landed:** `xml/chart.rs` reads the chart part's cached `strCache`/`numCache` into `GraphicPlaceholder.chart` (kind/title/categories/series), consumed by `to_text`/`to_markdown`/`shapes()`; the PDF still draws only the placeholder box (bytes unchanged) |
 | SmartArt (`dgm:relIds`) | same | same placeholder + warning |
 | Audio/video/OLE | no static-PDF equivalent | video `p:pic` renders its poster-frame blip; else placeholder + warning |
 | Animations/transitions | N/A in PDF | silently ignored (final build state rendered) |

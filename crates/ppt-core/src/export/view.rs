@@ -2,11 +2,11 @@
 //! 按 [`TextOrder`] 排序;纯文本渲染也在这里。
 
 use crate::geom::Emu;
-use crate::model::{Presentation, Shape, Slide};
+use crate::model::{Chart, Presentation, Shape, Slide};
 use crate::resolved::{ResolvedPresentation, ResolvedSlide};
 
 use super::reading_order::{flatten, reading_order, FlatShape};
-use super::{frame_text, notes_text, table_text};
+use super::{chart_label, chart_table, frame_text, notes_text, table_text};
 
 /// 文字导出的形状顺序。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -111,11 +111,22 @@ fn shape_text(shape: &Shape) -> Option<String> {
         Shape::TextBox(tf) => frame_text(tf),
         Shape::Auto(a) => a.text.as_deref().map(frame_text).unwrap_or_default(),
         Shape::Table(t) => table_text(t),
-        Shape::Picture(_) | Shape::Connector(_) | Shape::Placeholder(_) | Shape::Group(_) => {
-            String::new()
-        }
+        Shape::Placeholder(p) => p.chart.as_ref().map(chart_text).unwrap_or_default(),
+        Shape::Picture(_) | Shape::Connector(_) | Shape::Group(_) => String::new(),
     };
     (!s.is_empty()).then_some(s)
+}
+
+/// 图表纯文本:标题行(无标题为 `Chart (<kind>)`)+ 每类别一行 `类别: 值, 值`。
+fn chart_text(c: &Chart) -> String {
+    let mut lines = vec![c.title.clone().unwrap_or_else(|| chart_label(c))];
+    if let Some((_, rows)) = chart_table(c) {
+        lines.extend(
+            rows.into_iter()
+                .map(|r| format!("{}: {}", r[0], r[1..].join(", "))),
+        );
+    }
+    lines.join("\n")
 }
 
 /// 整份演示文稿的纯文本:各 slide 以 `--- slide N ---` 分隔(N = 原 1 基序号,跳过隐藏页时

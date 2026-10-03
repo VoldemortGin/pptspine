@@ -5,6 +5,7 @@
 //! - `p:sp`   —— 文本框 / 自选图形(看有没有 `a:prstGeom`);占位符 `p:ph` / 列表样式
 //!   `a:lstStyle` / 形状样式 `p:style` 一并捕获(B-8/B-9 继承链)
 //! - `p:graphicFrame` > `a:tbl` —— 表格;非表格内容(图表 / SmartArt / OLE)降级为占位
+//!   (图表另记 `c:chart@r:id`,解析完 slide 后经 rels 读图表部件回填数据)
 //! - `p:pic`  —— 图片
 //! - `p:grpSp` —— 组合(递归)
 //! - `p:cxnSp` —— 连接线
@@ -1303,6 +1304,7 @@ fn parse_graphic_frame<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Sh
     let mut rect: Option<Rect> = None;
     let mut table: Option<Table> = None;
     let mut uri: Option<String> = None;
+    let mut chart_rel_id: Option<String> = None;
     // graphic / graphicData 是要"穿透"的容器:降入时计深,End 时消深,直到
     // `</p:graphicFrame>` 本身(depth 归零)才结束。此前不计深、见 End 就 break,
     // 会把 `</a:graphic>`/`</p:graphicFrame>` 留给上层容器误吞,静默丢掉 frame
@@ -1325,14 +1327,18 @@ fn parse_graphic_frame<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Sh
                         uri = attr_of(&e, b"uri").or(uri);
                         depth += 1;
                     }
+                    b"chart" => {
+                        chart_rel_id = attr_of(&e, b"id").or(chart_rel_id);
+                        skip_element(reader, &name);
+                    }
                     _ => skip_element(reader, &name),
                 }
             }
-            Ok(Event::Empty(e)) => {
-                if local_name(e.name().as_ref()) == b"graphicData" {
-                    uri = attr_of(&e, b"uri").or(uri);
-                }
-            }
+            Ok(Event::Empty(e)) => match local_name(e.name().as_ref()) {
+                b"graphicData" => uri = attr_of(&e, b"uri").or(uri),
+                b"chart" => chart_rel_id = attr_of(&e, b"id").or(chart_rel_id),
+                _ => {}
+            },
             Ok(Event::End(_)) => {
                 depth -= 1;
                 if depth == 0 {
@@ -1353,7 +1359,12 @@ fn parse_graphic_frame<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Sh
             }
             Some(Shape::Table(t))
         }
-        None => Some(Shape::Placeholder(GraphicPlaceholder { rect, kind: uri })),
+        None => Some(Shape::Placeholder(GraphicPlaceholder {
+            rect,
+            kind: uri,
+            chart_rel_id,
+            chart: None,
+        })),
     }
 }
 
