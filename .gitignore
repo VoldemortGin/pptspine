@@ -27,3 +27,9 @@ wheelhouse/
 
 # 真实 deck 语料(local-only 抽查,PRD B-11)
 corpus/
+
+# cargo-fuzz:语料由 `make_seeds` 现场生成(不落二进制 fixture);构建/崩溃产物不提交
+fuzz/corpus/
+fuzz/artifacts/
+fuzz/target/
+fuzz/coverage/

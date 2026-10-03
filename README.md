@@ -155,6 +155,27 @@ crates/
   py-bindings PyO3 _core extension (the FFI chokepoint).
 ```
 
+## Fuzzing
+
+`fuzz/` is a standalone cargo-fuzz package (excluded from the workspace; needs nightly and
+`cargo install cargo-fuzz`). Only panics / aborts / OOM count as failures — any `Err` is fine.
+A daily CI job (`.github/workflows/fuzz.yml`) runs every target; it is not part of `ci.yml`.
+Always invoke `cargo +nightly fuzz ...` explicitly: `rust-toolchain.toml` pins stable and would
+otherwise override the default toolchain.
+
+```bash
+cargo run --manifest-path fuzz/Cargo.toml --bin make_seeds   # synthesize seeds into fuzz/corpus/ (git-ignored)
+cargo +nightly fuzz run parse_slide_xml -- -max_total_time=120 -rss_limit_mb=2048
+cargo +nightly fuzz run parse_pptx      -- -max_total_time=120 -rss_limit_mb=2048
+cargo +nightly fuzz run render_pdf      -- -max_total_time=120 -rss_limit_mb=2048
+```
+
+Reproduce a crash with `cargo +nightly fuzz run <target> fuzz/artifacts/<target>/<crash-file>` and
+shrink it with `cargo +nightly fuzz tmin <target> <crash-file>`. To add a target: create
+`fuzz/fuzz_targets/<name>.rs`, register a `[[bin]]` in `fuzz/Cargo.toml`, add it to the matrix in
+`fuzz.yml`, and add seeds in `fuzz/seed.rs`. Fixed crashes get a regression test built in code
+(in `crates/ppt-parse/tests/fuzz_regressions.rs`, created with the first fix), never a committed binary.
+
 ## Deferred / follow-up
 
 - Image-table geometry reconstruction from OCR boxes

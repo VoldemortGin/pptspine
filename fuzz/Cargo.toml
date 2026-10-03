@@ -1,0 +1,47 @@
+[package]
+name = "pptspine-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# 独立 package + 独立 workspace:不进根 workspace(`exclude = ["fuzz"]`),
+# nightly-only 的 libfuzzer-sys 不会拖累主仓 `--locked` / clippy 门禁。
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+ppt-parse = { path = "../crates/ppt-parse" }
+ppt-render = { path = "../crates/ppt-render" }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[[bin]]
+name = "parse_pptx"
+path = "fuzz_targets/parse_pptx.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_slide_xml"
+path = "fuzz_targets/parse_slide_xml.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "render_pdf"
+path = "fuzz_targets/render_pdf.rs"
+test = false
+doc = false
+bench = false
+
+# 种子生成器:`cargo run --manifest-path fuzz/Cargo.toml --bin make_seeds`(稳定版即可)。
+[[bin]]
+name = "make_seeds"
+path = "seed.rs"
+test = false
+doc = false
+bench = false
