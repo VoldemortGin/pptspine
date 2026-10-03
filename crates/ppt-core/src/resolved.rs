@@ -5,6 +5,7 @@
 
 use crate::color::ResolvedColor;
 use crate::geom::{Emu, Rect};
+use crate::model::LineEnd;
 use crate::model::{GraphicPlaceholder, Picture, RunKind, Xfrm};
 use crate::style::Spacing;
 
@@ -182,6 +183,8 @@ pub struct ResolvedAutoShape {
     pub fill: Option<ResolvedFill>,
     pub stroke: Option<ResolvedStroke>,
     pub text: Option<ResolvedTextFrame>,
+    /// 几何来自 `a:custGeom`(渲染按包围盒矩形降级 + 告警)。
+    pub custom_geometry: bool,
 }
 
 /// 已解析的连接线。
@@ -193,14 +196,20 @@ pub struct ResolvedConnector {
     pub adjusts: Vec<(String, i64)>,
     pub fill: Option<ResolvedFill>,
     pub stroke: Option<ResolvedStroke>,
+    /// 几何来自 `a:custGeom`(渲染按缺省直线降级 + 告警)。
+    pub custom_geometry: bool,
 }
 
-/// 已解析的描边(颜色终端化;宽度 / 虚线原样)。
+/// 已解析的描边(颜色终端化;宽度 / 虚线 / 线端装饰原样)。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedStroke {
     pub color: Option<ResolvedColor>,
     pub width_emu: Option<Emu>,
     pub dash: Option<String>,
+    /// 线头装饰(路径起点;显式 `a:headEnd` 优先,缺失走 `lnRef` 主题线条)。
+    pub head_end: Option<LineEnd>,
+    /// 线尾装饰(路径终点;同上)。
+    pub tail_end: Option<LineEnd>,
 }
 
 /// 已解析的表格。

@@ -565,7 +565,10 @@ mod tests {
                 color: Some(ResolvedColor::opaque([255, 0, 0])),
                 width_emu: Some(12_700), // 1 pt
                 dash: dash.map(str::to_string),
+                head_end: None,
+                tail_end: None,
             }),
+            custom_geometry: false,
         })
     }
 
@@ -578,6 +581,7 @@ mod tests {
             fill: Some(ResolvedFill::Solid(ResolvedColor::opaque([255, 0, 0]))),
             stroke: None,
             text: None,
+            custom_geometry: false,
         })
     }
 
@@ -688,6 +692,8 @@ mod tests {
                 color: Some(ResolvedColor::opaque([255, 0, 0])),
                 width_emu: Some(12_700),
                 dash: None,
+                head_end: None,
+                tail_end: None,
             }),
             ..ResolvedCellBorders::default()
         };
@@ -938,6 +944,113 @@ mod tests {
             .any(|w| matches!(w, ExportWarning::PresetDegraded { preset } if preset == "cloud")));
     }
 
+    fn arrow_connector(geometry: &str, tail: ppt_core::model::LineEndKind) -> ResolvedShape {
+        let ResolvedShape::Connector(mut c) =
+            connector(Rect::new(0, 0, 2_540_000, 0), Xfrm::default(), None)
+        else {
+            unreachable!()
+        };
+        c.geometry = Some(geometry.into());
+        if let Some(s) = c.stroke.as_mut() {
+            s.tail_end = Some(ppt_core::model::LineEnd {
+                kind: tail,
+                ..ppt_core::model::LineEnd::default()
+            });
+        }
+        ResolvedShape::Connector(c)
+    }
+
+    fn custom_kinds(out: &ExportResult) -> Vec<String> {
+        out.warnings
+            .iter()
+            .filter_map(|w| match w {
+                ExportWarning::Custom { kind, .. } => Some(kind.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 尾端三角:多出一个线色实心填充(`f`),线身被缩短,无告警。
+    #[test]
+    fn connector_tail_triangle_draws_filled_head() {
+        use ppt_core::model::LineEndKind;
+        let plain = render(&one_slide(vec![arrow_connector(
+            "straightConnector1",
+            LineEndKind::None,
+        )]));
+        let arrow = render(&one_slide(vec![arrow_connector(
+            "straightConnector1",
+            LineEndKind::Triangle,
+        )]));
+        assert!(arrow.warnings.is_empty(), "{:?}", arrow.warnings);
+        let hay = String::from_utf8_lossy(&arrow.pdf);
+        assert!(
+            hay.contains("1 0 0 rg"),
+            "arrow fill must use the line color"
+        );
+        // 200 pt 长的线:线身止于 200 − 3×max(1pt, 0.7mm) ≈ 194.05。
+        assert!(
+            hay.contains("194.0"),
+            "line body must stop at the arrow base"
+        );
+        // `type="none"` 与无线端字节一致。
+        let bare = render(&one_slide(vec![connector(
+            Rect::new(0, 0, 2_540_000, 0),
+            Xfrm::default(),
+            None,
+        )]));
+        assert_eq!(plain.pdf, bare.pdf);
+    }
+
+    #[test]
+    fn unknown_line_end_kind_warns_and_skips() {
+        use ppt_core::model::LineEndKind;
+        let out = render(&one_slide(vec![arrow_connector(
+            "straightConnector1",
+            LineEndKind::Other("bogus".into()),
+        )]));
+        assert_eq!(custom_kinds(&out), vec!["line-end-degraded".to_string()]);
+    }
+
+    /// 子集外连接线预设降级成闭合包围盒:箭头无处可放 → 降级告警。
+    #[test]
+    fn degraded_connector_preset_drops_line_ends_with_warning() {
+        use ppt_core::model::LineEndKind;
+        let out = render(&one_slide(vec![arrow_connector(
+            "curvedConnector3",
+            LineEndKind::Triangle,
+        )]));
+        assert!(out
+            .warnings
+            .iter()
+            .any(|w| matches!(w, ExportWarning::PresetDegraded { .. })));
+        assert_eq!(custom_kinds(&out), vec!["line-end-degraded".to_string()]);
+    }
+
+    /// custGeom:有填充 → 包围盒矩形 + 告警;无填充无描边 → 不画、不告警。
+    #[test]
+    fn custom_geometry_approximated_with_warning() {
+        let ResolvedShape::Auto(mut filled) =
+            auto_shape(Rect::new(0, 0, 914_400, 914_400), "rect", vec![])
+        else {
+            unreachable!()
+        };
+        filled.geometry = None;
+        filled.custom_geometry = true;
+        let mut bare = filled.clone();
+        bare.fill = None;
+
+        let out = render(&one_slide(vec![ResolvedShape::Auto(filled)]));
+        assert_eq!(
+            custom_kinds(&out),
+            vec!["custom-geometry-approximated".to_string()]
+        );
+        assert!(String::from_utf8_lossy(&out.pdf).contains("1 0 0 rg"));
+
+        let out = render(&one_slide(vec![ResolvedShape::Auto(bare)]));
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    }
+
     #[test]
     fn missing_media_reports_image_dropped() {
         let out = render(&one_slide(vec![ResolvedShape::Picture(
@@ -1036,6 +1149,7 @@ mod tests {
             fill: Some(ResolvedFill::Gradient(ResolvedColor::opaque([0, 0, 255]))),
             stroke: None,
             text: None,
+            custom_geometry: false,
         })]));
         assert!(out
             .warnings

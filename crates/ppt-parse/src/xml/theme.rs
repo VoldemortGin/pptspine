@@ -185,6 +185,8 @@ fn parse_ln_styles<R: std::io::BufRead>(reader: &mut Reader<R>) -> Vec<ThemeLine
                     out.push(ThemeLine {
                         color: stroke.as_ref().and_then(|s| s.color.clone()),
                         width_emu: stroke.as_ref().and_then(|s| s.width_emu),
+                        head_end: stroke.as_ref().and_then(|s| s.head_end.clone()),
+                        tail_end: stroke.as_ref().and_then(|s| s.tail_end.clone()),
                     });
                 } else {
                     skip_element(reader, &name);
@@ -195,6 +197,7 @@ fn parse_ln_styles<R: std::io::BufRead>(reader: &mut Reader<R>) -> Vec<ThemeLine
                     out.push(ThemeLine {
                         color: None,
                         width_emu: attr_of(&e, b"w").and_then(|s| s.parse().ok()),
+                        ..ThemeLine::default()
                     });
                 }
             }

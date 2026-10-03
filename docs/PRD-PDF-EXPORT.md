@@ -50,7 +50,7 @@ export fidelity. It discards all geometry. This PRD is about true layout-faithfu
 | Animations/transitions | N/A in PDF | silently ignored (final build state rendered) |
 | WordArt text effects | glyph outline/fill machinery | plain styled text + warning |
 | Vertical text (`bodyPr@vert` ≠ `horz`) | vertical layout engine deferred | render horizontally + warning |
-| `custGeom` | formula evaluator + path builder is L | bounding-box rect with the shape's fill/line + warning; text still rendered on top |
+| `custGeom` | formula evaluator + path builder is L | bounding-box rect with the shape's fill/line + warning; text still rendered on top. **Implemented:** `AutoShape/Connector.custom_geometry` flag; autoshape → bbox rect, connector → default straight line, `ExportWarning::Custom{kind:"custom-geometry-approximated"}` only when something is drawn; a custGeom painted solely via `p:style` fillRef/lnRef (idx ≥ 1) is classified as an autoshape (previously fell to an undrawn TextBox) |
 | Gradient fills (`gradFill`) | pdf-edit authoring has no `/Shading` (pdfspine `crates/pdf-edit`, grep-verified) | representative solid (first stop) + warning |
 | Shadows / 3D / reflection (`effectLst`) | effects pipeline out | dropped + warning |
 | `tableStyles.xml` full banding semantics | full style resolution is L | explicit per-cell props only + optional simple firstRow emphasis; warning when `tableStyleId` present |
@@ -111,8 +111,8 @@ Every row: verdict + evidence + effort + model growth needed. PARSED rows are in
 | h | `rPr`: `@u`/`@strike`/`@baseline`/`@spc`, `a:ea`/`a:cs` typefaces (**critical for CJK**), `a:highlight`, `a:hlinkClick` color | **PARTIAL** | attrs beyond sz/b/i unread `slide.rs:388-392`; children beyond latin/solidFill skipped `slide.rs:443-448` | **S** each | run fields: `underline`, `strike`, `ea_font`, `cs_font`, `highlight`, `hyperlink` |
 | i | `a:br` + `a:fld` inside paragraphs | **MISSING — silent text loss** | `parse_paragraph` matches only `pPr`/`r` `slide.rs:335-350` (notes.rs handles fld; slide.rs doesn't) | **S** | run-level `Break` marker + field runs with resolved text |
 | j | `prstGeom` `avLst` adjust values | **MISSING** | skip right after grabbing `prst` `slide.rs:184` | **S–M** | `adjusts: Vec<(String, i64)>` on AutoShape |
-| k | `custGeom` | **MISSING** | unhandled (skip) | **L** — v1 OUT (§1) | none in v1 |
-| l | `a:ln` width/dash/cap/`headEnd`/`tailEnd` | **MISSING** | `parse_line_color` reads nested solidFill only `slide.rs:279-301` | **S** | `Stroke{color, width_emu, dash, caps, arrows}` |
+| k | `custGeom` | **DEGRADED** (bbox + warning, §1) | path formulas still unevaluated | **L** — v1 OUT (§1) | `custom_geometry: bool` on AutoShape / Connector |
+| l | `a:ln` width/dash/cap/`headEnd`/`tailEnd` | **PARSED** except cap | `parse_ln` reads `@w`, solidFill, `prstDash`, `headEnd`/`tailEnd` (`@type`/`@w`/`@len`); ends inherit like color/width (explicit field wins, else `lnRef` → `fmtScheme > lnStyleLst`) | **S** | `Stroke{color, width_emu, dash, head_end, tail_end}` + `LineEnd{kind, width, length}` |
 | m | `gradFill` / shape-level `blipFill` / `noFill` distinction | **MISSING** (`noFill` indistinguishable from unset) | `parse_sppr` arms `slide.rs:180-188` | **S–M** | `Fill::{None, Solid, Gradient, Blip}` enum |
 | n | picture `srcRect` crop + `stretch/fillRect` + `tile` | **MISSING** | `parse_blip_fill` reads only `blip` `slide.rs:686-695` | **S–M** | crop/stretch fields on Picture |
 | o | slide background `bg`/`bgPr`/`bgRef` (slide→layout→master) | **MISSING** | walker fast-forwards to `spTree` `slide.rs:40-52`; no `bg` string in crate (grep) | **M** (`bgRef` needs b) | `Slide.background: Option<Fill>` |
@@ -208,7 +208,15 @@ plus rot/flip about center) with children kept nested — ppt-render accumulates
   `Picture` → decode + place with `srcRect` crop (clip + offset `cm`) and stretch/fillRect;
   `Table` → pdf-typeset table primitives: absolute cell x from accumulated `tblGrid` widths, row y from
   row heights (grown to fit content), per-cell borders as 4 lines, fills behind text;
-  `Connector` → line/polyline with stroke props (arrowheads v1.x);
+  `Connector` → line/polyline with stroke props + line ends (`headEnd` = path start, `tailEnd` =
+  path end; open outlines only — `line`/`straightConnector1`/`bentConnector2/3`/`arc`, also on `p:sp`).
+  Sizes follow LibreOffice `lclPushMarkerProperties` (ECMA-376 names `sm/med/lg` without numbers):
+  `base = max(line width, 0.7 mm)`, width/length = factor × base with `sm/med/lg = 2/3/5`
+  (open `arrow` 2.5/3.5/5.5). triangle/stealth/diamond/oval are filled in the line color
+  (stealth notch at 0.6·len; diamond/oval centered on the endpoint); `arrow` is a two-segment stroke.
+  The body is shortened to the triangle base / stealth notch so it never pokes through. Unknown
+  `@type`, or an outline degraded to a closed bbox → that end is skipped +
+  `Custom{kind:"line-end-degraded"}`;
   `Group` → recurse with accumulated affine transform (nested `chOff`/`chExt` remaps compose);
   `Placeholder` (charts/SmartArt/OLE) → light-gray bounding box + warning.
 - **Warning propagation:** ppt-render adds its own kinds (`UnsupportedChart`, `VerticalText`,

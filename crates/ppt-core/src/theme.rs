@@ -6,6 +6,7 @@
 use crate::color::ColorSpec;
 use crate::geom::Emu;
 use crate::model::Color;
+use crate::model::LineEnd;
 
 /// 主题 12 色方案(`a:clrScheme`)。槽位值已是终端 RGB
 /// (`sysClr` 在解析期折算为其 `lastClr` 缓存值)。
@@ -151,6 +152,9 @@ impl ClrMap {
 pub struct ThemeLine {
     pub color: Option<ColorSpec>,
     pub width_emu: Option<Emu>,
+    /// 主题线条的线头 / 线尾装饰(`a:ln > a:headEnd` / `a:tailEnd`)。
+    pub head_end: Option<LineEnd>,
+    pub tail_end: Option<LineEnd>,
 }
 
 /// 一份主题(`a:theme > a:themeElements`)。

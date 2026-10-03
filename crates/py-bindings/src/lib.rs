@@ -356,7 +356,8 @@ impl PyPresentation {
 }
 
 /// 把导出降级经 Python `warnings.warn` 上浮:每个 [`ExportWarning`] **种类**只
-/// 上浮首个实例(PRD §6 锁定:逐种类、不逐形状)。
+/// 上浮首个实例(PRD §6 锁定:逐种类、不逐形状)。`Custom` 是消费侧的通用逃生舱,
+/// 其种类由 `kind` 标签区分(否则图表占位 / 线端降级 / custGeom 近似会互相吞掉)。
 fn surface_warnings(py: Python<'_>, warnings: &[ExportWarning]) -> PyResult<()> {
     if warnings.is_empty() {
         return Ok(());
@@ -364,7 +365,11 @@ fn surface_warnings(py: Python<'_>, warnings: &[ExportWarning]) -> PyResult<()> 
     let module = py.import("warnings")?;
     let mut seen = HashSet::new();
     for w in warnings {
-        if seen.insert(std::mem::discriminant(w)) {
+        let tag = match w {
+            ExportWarning::Custom { kind, .. } => Some(kind.as_str()),
+            _ => None,
+        };
+        if seen.insert((std::mem::discriminant(w), tag)) {
             module.call_method1("warn", (format!("pptspine PDF export: {w}"),))?;
         }
     }

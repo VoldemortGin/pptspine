@@ -11,10 +11,16 @@
 //! (本批引擎 pin 不动),把整图按 `显示宽 / (1 − l − r)` 放大、以负偏移铺放,
 //! 再用显示矩形做 `Op::Group { clip }` 剪裁——无需解码重编码,对 JPEG 直通路径
 //! 零损;负值(外扩)同式自然成立。
+//!
+//! 线端装饰(`a:headEnd` / `a:tailEnd`)见 [`line_ends`]:只加在开放轮廓(line /
+//! 连接线 / arc)两端,随形状级变换一起生效。`a:custGeom` v1 不求值路径公式:自选
+//! 图形按包围盒矩形、连接线按缺省直线降级,画了东西就记 `custom-geometry-approximated`。
+
+mod line_ends;
 
 use ppt_core::color::ResolvedColor;
 use ppt_core::geom::emu_to_points;
-use ppt_core::model::{GraphicPlaceholder, Picture, RelRect, Xfrm};
+use ppt_core::model::{GraphicPlaceholder, LineEnd, Picture, RelRect, Xfrm};
 use ppt_core::resolved::{ResolvedAutoShape, ResolvedConnector, ResolvedFill, ResolvedStroke};
 
 use pdf_typeset::preset::preset_outline;
@@ -95,6 +101,39 @@ fn rect_segs(r: Rect) -> Vec<PathSeg> {
     ]
 }
 
+/// 降级告警种类:`a:custGeom` 按包围盒 / 缺省直线近似。
+const CUSTOM_GEOMETRY_KIND: &str = "custom-geometry-approximated";
+/// 降级告警种类:线端装饰画不出(规范外 type / 轮廓降级后无开放端点)。
+const LINE_END_KIND: &str = "line-end-degraded";
+
+/// 一条描边的两端装饰(已解析;`None` / `type="none"` = 不画)。
+#[derive(Clone, Copy, Default)]
+struct LineEnds<'a> {
+    head: Option<&'a LineEnd>,
+    tail: Option<&'a LineEnd>,
+}
+
+impl<'a> LineEnds<'a> {
+    fn of(s: Option<&'a ResolvedStroke>) -> Self {
+        LineEnds {
+            head: s.and_then(|s| s.head_end.as_ref()),
+            tail: s.and_then(|s| s.tail_end.as_ref()),
+        }
+    }
+
+    fn any(self) -> bool {
+        line_ends::is_live(self.head) || line_ends::is_live(self.tail)
+    }
+}
+
+/// `a:custGeom` 近似绘制的告警(只在确实画了东西时发)。
+fn custom_geometry_warning(ctx: &mut RenderCtx<'_>, drawn_as: &str) {
+    ctx.warnings.push(ExportWarning::Custom {
+        kind: CUSTOM_GEOMETRY_KIND.to_string(),
+        detail: format!("custGeom 自定义路径 v1 未求值;按{drawn_as}近似绘制"),
+    });
+}
+
 /// 把一个 op 按形状级 rot/flip 包进 `Op::Group`(恒等直接透传)。
 fn with_shape_transform(xfrm: Xfrm, rect: Rect, op: Op, ops: &mut Vec<Op>) {
     match shape_transform(xfrm, rect) {
@@ -109,7 +148,8 @@ fn with_shape_transform(xfrm: Xfrm, rect: Rect, op: Op, ops: &mut Vec<Op>) {
 
 /// 预设几何轮廓 → `Op::Path`(fill 与 stroke 皆缺时不发 op);`avLst` 调整值
 /// 原样透传 TS-6;子集外预设记一次 [`ExportWarning::PresetDegraded`];
-/// rot/flip 绕映射后矩形中心生效。
+/// rot/flip 绕映射后矩形中心生效。有线端装饰时线身按需缩短、装饰 op 紧随其后,
+/// 与线身同组变换;`custom` = 几何来自 `a:custGeom`(按缺省几何近似 + 告警)。
 #[allow(clippy::too_many_arguments)]
 fn outline_op(
     ctx: &mut RenderCtx<'_>,
@@ -120,10 +160,21 @@ fn outline_op(
     adjusts: &[(String, i64)],
     fill: Option<Fill>,
     stroke: Option<Stroke>,
+    ends: LineEnds<'_>,
+    custom: bool,
+    scale: f64,
     ops: &mut Vec<Op>,
 ) {
     if fill.is_none() && stroke.is_none() {
         return;
+    }
+    if custom {
+        let drawn_as = if default_geometry == "line" {
+            "缺省直线"
+        } else {
+            "包围盒矩形"
+        };
+        custom_geometry_warning(ctx, drawn_as);
     }
     let name = geometry.unwrap_or(default_geometry);
     #[allow(clippy::cast_precision_loss)]
@@ -137,12 +188,45 @@ fn outline_op(
             preset: name.to_string(),
         });
     }
-    let path = Op::Path {
-        segs: outline.segs,
-        fill,
-        stroke,
+    let line = stroke.as_ref().filter(|_| ends.any()).cloned();
+    let Some(line) = line else {
+        let path = Op::Path {
+            segs: outline.segs,
+            fill,
+            stroke,
+        };
+        with_shape_transform(xfrm, rect, path, ops);
+        return;
     };
-    with_shape_transform(xfrm, rect, path, ops);
+    let mut segs = outline.segs;
+    let min_base = line_ends::MIN_BASE_PT * scale;
+    let decorations = line_ends::decorate(&mut segs, ends.head, ends.tail, &line, min_base);
+    let mut group = vec![Op::Path { segs, fill, stroke }];
+    match decorations {
+        Some((deco, skipped)) => {
+            group.extend(deco);
+            for line_ends::EndSkip::UnknownKind(kind) in skipped {
+                ctx.warnings.push(ExportWarning::Custom {
+                    kind: LINE_END_KIND.to_string(),
+                    detail: format!("线端装饰 type='{kind}' 未支持;该端不画"),
+                });
+            }
+        }
+        // 闭合轮廓本就不带线端(PowerPoint 同);只有降级 / 近似成闭合时才算丢失。
+        None if outline.degraded || custom => ctx.warnings.push(ExportWarning::Custom {
+            kind: LINE_END_KIND.to_string(),
+            detail: format!("'{name}' 轮廓已降级为闭合包围盒,线端装饰无处可放;不画"),
+        }),
+        None => {}
+    }
+    match shape_transform(xfrm, rect) {
+        Some(m) => ops.push(Op::Group {
+            transform: Some(m),
+            clip: None,
+            ops: group,
+        }),
+        None => ops.extend(group),
+    }
 }
 
 /// 自选图形的形状底(文字由调用方在其上叠加)。
@@ -166,6 +250,9 @@ pub(crate) fn auto_shape_ops(
         &auto.adjusts,
         fill,
         stroke,
+        LineEnds::of(auto.stroke.as_ref()),
+        auto.custom_geometry,
+        flat.s,
         ops,
     );
 }
@@ -195,6 +282,9 @@ pub(crate) fn connector_ops(
         &conn.adjusts,
         fill,
         Some(stroke),
+        LineEnds::of(conn.stroke.as_ref()),
+        conn.custom_geometry,
+        flat.s,
         ops,
     );
 }

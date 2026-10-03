@@ -356,6 +356,8 @@ pub struct AutoShape {
     pub placeholder: Option<PlaceholderRef>,
     /// 形状样式引用(`p:style`)。
     pub style: Option<ShapeStyle>,
+    /// 几何来自 `a:custGeom`(自定义路径;v1 不求值公式,渲染按包围盒降级 + 告警)。
+    pub custom_geometry: bool,
 }
 
 /// 连接线(`p:cxnSp`)—— 形同自选图形,但没有文字体。
@@ -374,6 +376,8 @@ pub struct Connector {
     pub stroke: Option<Stroke>,
     /// 形状样式引用(`p:style`,连接线常经 `lnRef` 取主题线色)。
     pub style: Option<ShapeStyle>,
+    /// 几何来自 `a:custGeom`(v1 不求值,渲染按缺省直线降级 + 告警)。
+    pub custom_geometry: bool,
 }
 
 /// 非表格 `p:graphicFrame`(图表 / SmartArt / OLE 等)的占位信息。
@@ -385,7 +389,7 @@ pub struct GraphicPlaceholder {
     pub kind: Option<String>,
 }
 
-/// 描边属性(`a:ln`):颜色 + 线宽 + 虚线预设。
+/// 描边属性(`a:ln`):颜色 + 线宽 + 虚线预设 + 两端线端装饰。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Stroke {
     /// 描边色(`a:ln` > `a:solidFill`)。
@@ -394,6 +398,50 @@ pub struct Stroke {
     pub width_emu: Option<Emu>,
     /// 虚线预设名(`a:prstDash@val`,如 `"dash"`/`"sysDot"`);实线通常缺省为 `None`。
     pub dash: Option<String>,
+    /// 线头装饰(`a:ln > a:headEnd`,路径起点);缺失为 `None`(走 `lnRef` 继承)。
+    pub head_end: Option<LineEnd>,
+    /// 线尾装饰(`a:ln > a:tailEnd`,路径终点);缺失为 `None`(走 `lnRef` 继承)。
+    pub tail_end: Option<LineEnd>,
+}
+
+/// 线端装饰种类(`a:headEnd` / `a:tailEnd@type`,ECMA-376 ST_LineEndType)。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum LineEndKind {
+    /// 无装饰(`none`,属性缺省值)。
+    #[default]
+    None,
+    /// 实心三角(`triangle`)。
+    Triangle,
+    /// 燕尾实心箭头(`stealth`)。
+    Stealth,
+    /// 实心菱形(`diamond`)。
+    Diamond,
+    /// 实心椭圆(`oval`)。
+    Oval,
+    /// 开口箭头(`arrow`,两段线)。
+    Arrow,
+    /// 规范外取值(原样保留,渲染降级为不画 + 告警)。
+    Other(String),
+}
+
+/// 线端尺寸档(ECMA-376 ST_LineEndWidth / ST_LineEndLength;缺省 `med`)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LineEndSize {
+    /// `sm`。
+    Small,
+    /// `med`(属性缺省值)。
+    #[default]
+    Medium,
+    /// `lg`。
+    Large,
+}
+
+/// 一个线端装饰(`a:headEnd` / `a:tailEnd`):种类 + 宽度档(`@w`)+ 长度档(`@len`)。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LineEnd {
+    pub kind: LineEndKind,
+    pub width: LineEndSize,
+    pub length: LineEndSize,
 }
 
 /// 一个 RGB 颜色(来自 `a:srgbClr@val` 的十六进制)。
