@@ -1,5 +1,7 @@
 [workspace]
 resolver = "2"
+# fuzz/ 是独立 package(nightly-only libfuzzer-sys),不进主门禁。
+exclude = ["fuzz"]
 members = [
     "crates/ppt-core",
     "crates/ppt-parse",
