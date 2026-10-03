@@ -29,12 +29,15 @@ offline, and deterministically via the sibling [`ocrspine`](../ocrspine) crate
 | Tables: rows, cells, cell text | parsed |
 | Table merges: `gridSpan` / `rowSpan` / `hMerge` / `vMerge` | parsed |
 | Cell solid-fill color | parsed |
-| Pictures: `r:embed` rel → media name; raw bytes via `Presentation.image_bytes()` | parsed |
+| Pictures: `r:embed` rel → media name; raw bytes via `Presentation.image_bytes()`; alt text `cNvPr@descr` / `@title` / `@name` (`alt_text` / `title` / `name` keys) | parsed |
+| Hyperlinks `a:hlinkClick` (run- and shape-level): external URL via rels, internal jumps (`ppaction://hlinksldjump` / `hlinkshowjump`) → target slide index (`hyperlink` key) | parsed |
+| Placeholders: `p:ph` type/idx on every shape dict (`placeholder` key: `{"type", "idx"}` or `None`) | parsed |
+| Hidden slides (`p:sld@show="0"` → `Slide.hidden`), sections (`p14:sectionLst` → `Presentation.sections()`), document properties (`docProps/core.xml` + `app.xml` → `Presentation.core_properties()`) | parsed |
 | Autoshapes: geometry name, fill, stroke, optional text | parsed (best-effort) |
 | Groups (`p:grpSp`): recursive | parsed |
 | Speaker notes (`notesSlide` → `Slide.notes`) | parsed |
-| Structured export: `to_text()` / `to_markdown()` (GFM + HTML tables for merges) | working |
-| PDF export: `to_pdf()` / `save_pdf()` — one page per slide; placeholder/theme inheritance, shape transforms (rot/flip/adj/dash/`srcRect`), line ends (`headEnd`/`tailEnd`: triangle/stealth/diamond/oval/arrow), group affine, tables, slide backgrounds, body-anchor/autofit, superscript/subscript with the document's own baseline offset, character spacing (expanded and condensed), `cap=all` (`cap=small` approximated as all caps + warning) | working |
+| Structured export: `to_text()` / `to_markdown()` — visual reading order (XY-cut over flattened group geometry; `order="document"` falls back to z-order), title from `title`/`ctrTitle` placeholder, list markers `- ` / `1. ` from the resolved bullet chain, `![alt](media)` images, `[text](url)` external links, GFM + HTML tables for merges; hidden slides skipped unless `include_hidden=True` | working |
+| PDF export: `to_pdf()` / `save_pdf()` — one page per visible slide (hidden slides skipped unless `include_hidden=True`, matching PowerPoint); placeholder/theme inheritance, shape transforms (rot/flip/adj/dash/`srcRect`), line ends (`headEnd`/`tailEnd`: triangle/stealth/diamond/oval/arrow), group affine, tables, slide backgrounds, body-anchor/autofit, superscript/subscript with the document's own baseline offset, character spacing (expanded and condensed), `cap=all` (`cap=small` approximated as all caps + warning) | working |
 | `custGeom` freeform shapes | degraded: bounding-box rect (connector: straight line) + `custom-geometry-approximated` warning |
 | Image OCR (embedded pictures → words + boxes) | working (`ocr_image`) |
 | Image-table geometry reconstruction from OCR boxes | **deferred** (stub) |
@@ -99,13 +102,18 @@ for slide in pres.slides():
             for row in shape["rows"]:
                 print([cell["text"] for cell in row])
         elif shape["kind"] == "picture":
-            print("image:", shape["media"])
+            print("image:", shape["media"], shape["alt_text"])
+        print(shape["placeholder"])        # {"type": "title", "idx": None} | None
 
-# Structured export + speaker notes:
+# Structured export + speaker notes (visual reading order, hidden slides skipped):
 print(pres.to_text())          # slides joined by "--- slide N ---"
-print(pres.to_markdown())      # one section per slide; GFM / HTML tables
-print(pres.slides()[0].text)   # all text on a slide (convenience)
+print(pres.to_markdown())      # "### <title placeholder>", "- " / "1. " lists, ![alt](media), [text](url)
+print(pres.to_text(order="document", include_hidden=True))  # z-order, keep hidden slides
+print(pres.slides()[0].text)   # all text on a slide (convenience, visual order)
 print(pres.slides()[0].notes)  # speaker notes, or None
+print(pres.slides()[0].hidden) # p:sld@show="0"
+print(pres.sections())         # [("Intro", [0]), ("Body", [1, 2])] — [] without sections
+print(pres.core_properties()["title"])  # docProps core/app fields; missing → None
 
 # Run OCR on raw image bytes (PNG/JPEG), offline:
 items = pptspine.ocr_image(open("scan.png", "rb").read())
@@ -125,6 +133,7 @@ for shape in pres.slides()[0].shapes():
 pres = pptspine.open("deck.pptx")
 pres.save_pdf("deck.pdf")          # one PDF page per slide
 pdf_bytes = pres.to_pdf()          # or in-memory bytes
+pres.save_pdf("all.pdf", include_hidden=True)  # hidden slides are skipped by default
 
 # Optional: map a requested font family to a local font file (or to another
 # installed family), layered on top of the built-in substitution table:

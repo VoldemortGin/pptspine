@@ -17,14 +17,17 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use ppt_core::color::ColorSpec;
-use ppt_core::export::{presentation_markdown, presentation_text, slide_text};
+use ppt_core::export::{
+    presentation_markdown_with, presentation_text_with, slide_text_with, ExportOptions, TextOrder,
+};
 use ppt_core::geom::emu_to_points;
 use ppt_core::model::{
-    AutoShape, Cell, Color, Connector, Fill, GraphicPlaceholder, Paragraph, Picture,
+    AutoShape, Cell, Color, Connector, Fill, GraphicPlaceholder, Hyperlink, Paragraph, Picture,
     Presentation as CorePresentation, Row, RunKind, Shape, Slide as CoreSlide, Stroke, Table,
     TextFrame, TextRun,
 };
-use ppt_core::style::Caps;
+use ppt_core::resolved::ResolvedPresentation;
+use ppt_core::style::{Caps, PlaceholderRef};
 use ppt_core::PptError;
 use ppt_ocr::{OcrItem, PptOcr};
 use ppt_parse::{parse_bytes, parse_path, resolve_parts, InheritanceParts};
@@ -114,6 +117,46 @@ fn rect_to_py(
     }
 }
 
+/// 占位符 → `{"type", "idx"}` dict(`@type` 缺省按 ECMA-376 记 `body`);非占位符 → `None`。
+fn placeholder_py<'py>(
+    py: Python<'py>,
+    ph: Option<&PlaceholderRef>,
+) -> PyResult<Option<Bound<'py, PyDict>>> {
+    let Some(ph) = ph else {
+        return Ok(None);
+    };
+    let d = PyDict::new(py);
+    d.set_item("type", ph.kind.as_deref().unwrap_or("body"))?;
+    d.set_item("idx", ph.idx)?;
+    Ok(Some(d))
+}
+
+/// 超链接 → `{"url", "slide_index", "action", "tooltip"}` dict;无链接 → `None`。
+/// 外链只填 `url`;内部跳转(`ppaction://`)只填 `slide_index`(解析不出为 `None`)。
+fn hyperlink_py<'py>(
+    py: Python<'py>,
+    link: Option<&Hyperlink>,
+) -> PyResult<Option<Bound<'py, PyDict>>> {
+    let Some(link) = link else {
+        return Ok(None);
+    };
+    let d = PyDict::new(py);
+    d.set_item("url", link.url.as_deref())?;
+    d.set_item("slide_index", link.slide_index)?;
+    d.set_item("action", link.action.as_deref())?;
+    d.set_item("tooltip", link.tooltip.as_deref())?;
+    Ok(Some(d))
+}
+
+/// 把 `order=` 字符串参数解析成 [`TextOrder`](非法取值 → `ValueError`)。
+fn parse_order(order: &str) -> PyResult<TextOrder> {
+    TextOrder::parse(order).ok_or_else(|| {
+        PyValueError::new_err(format!(
+            "order must be \"visual\" or \"document\", got {order:?}"
+        ))
+    })
+}
+
 // --- dict 构造:把领域模型映射成可自省的 list[dict] ----------------------
 
 /// 一个 [`TextRun`] -> dict。
@@ -146,6 +189,7 @@ fn run_dict<'py>(py: Python<'py>, run: &TextRun) -> PyResult<Bound<'py, PyDict>>
         Caps::All => "all",
     });
     d.set_item("cap", cap)?;
+    d.set_item("hyperlink", hyperlink_py(py, run.hyperlink.as_ref())?)?;
     Ok(d)
 }
 
@@ -189,6 +233,8 @@ fn text_frame_dict<'py>(py: Python<'py>, tf: &TextFrame) -> PyResult<Bound<'py, 
     d.set_item("rect_points", rect_pts)?;
     d.set_item("paragraphs", paras)?;
     d.set_item("text", text)?;
+    d.set_item("placeholder", placeholder_py(py, tf.placeholder.as_ref())?)?;
+    d.set_item("hyperlink", hyperlink_py(py, tf.hyperlink.as_ref())?)?;
     Ok(d)
 }
 
@@ -234,6 +280,7 @@ fn table_dict<'py>(py: Python<'py>, table: &Table) -> PyResult<Bound<'py, PyDict
     d.set_item("rect_points", rect_pts)?;
     d.set_item("col_widths", &table.col_widths)?;
     d.set_item("rows", rows)?;
+    d.set_item("placeholder", py.None())?;
     Ok(d)
 }
 
@@ -247,6 +294,11 @@ fn picture_dict<'py>(py: Python<'py>, pic: &Picture) -> PyResult<Bound<'py, PyDi
     d.set_item("rel_id", &pic.rel_id)?;
     d.set_item("media", pic.media_name.as_deref())?;
     d.set_item("image_bytes_len", pic.image_bytes_len)?;
+    d.set_item("name", pic.name.as_deref())?;
+    d.set_item("alt_text", pic.alt_text.as_deref())?;
+    d.set_item("title", pic.title.as_deref())?;
+    d.set_item("hyperlink", hyperlink_py(py, pic.hyperlink.as_ref())?)?;
+    d.set_item("placeholder", placeholder_py(py, pic.placeholder.as_ref())?)?;
     Ok(d)
 }
 
@@ -283,6 +335,13 @@ fn autoshape_dict<'py>(py: Python<'py>, sh: &AutoShape) -> PyResult<Bound<'py, P
             d.set_item("text", py.None())?;
         }
     }
+    d.set_item("placeholder", placeholder_py(py, sh.placeholder.as_ref())?)?;
+    // 形状级链接(`p:cNvPr`;文字体上的同一链接作兜底)。
+    let link = sh
+        .hyperlink
+        .as_ref()
+        .or_else(|| sh.text.as_ref().and_then(|t| t.hyperlink.as_ref()));
+    d.set_item("hyperlink", hyperlink_py(py, link)?)?;
     Ok(d)
 }
 
@@ -296,6 +355,7 @@ fn connector_dict<'py>(py: Python<'py>, c: &Connector) -> PyResult<Bound<'py, Py
     d.set_item("geometry", c.geometry.as_deref())?;
     d.set_item("fill", c.fill.as_ref().and_then(fill_hex))?;
     set_stroke_items(&d, c.stroke.as_ref())?;
+    d.set_item("placeholder", py.None())?;
     Ok(d)
 }
 
@@ -307,6 +367,7 @@ fn placeholder_dict<'py>(py: Python<'py>, p: &GraphicPlaceholder) -> PyResult<Bo
     d.set_item("rect", rect_emu)?;
     d.set_item("rect_points", rect_pts)?;
     d.set_item("uri", p.kind.as_deref())?;
+    d.set_item("placeholder", py.None())?;
     Ok(d)
 }
 
@@ -327,6 +388,7 @@ fn shape_dict<'py>(py: Python<'py>, shape: &Shape) -> PyResult<Bound<'py, PyDict
             }
             d.set_item("kind", "group")?;
             d.set_item("children", kids)?;
+            d.set_item("placeholder", py.None())?;
             Ok(d)
         }
     }
@@ -342,14 +404,37 @@ struct PyPresentation {
     media: Arc<BTreeMap<String, Vec<u8>>>,
     /// 继承链部件(layout / master / theme),供 `to_pdf` 走 `resolve_parts`。
     inherit: Arc<InheritanceParts>,
+    /// 惰性缓存的继承链解析结果(文字导出用:占位符继承几何 / 项目符号),与 slide 句柄共享。
+    resolved: Arc<OnceLock<ResolvedPresentation>>,
+}
+
+/// 取(必要时惰性计算)继承链解析结果。纯函数、确定性;首次调用在释放 GIL 下计算。
+fn resolved_of<'a>(
+    py: Python<'_>,
+    cell: &'a OnceLock<ResolvedPresentation>,
+    pres: &CorePresentation,
+    inherit: &InheritanceParts,
+) -> &'a ResolvedPresentation {
+    py.detach(|| cell.get_or_init(|| resolve_parts(pres, inherit)))
 }
 
 impl PyPresentation {
+    fn new(parsed: ppt_parse::ParsedPptx) -> Self {
+        PyPresentation {
+            inner: Arc::new(parsed.presentation),
+            media: Arc::new(parsed.media),
+            inherit: Arc::new(parsed.inherit),
+            resolved: Arc::new(OnceLock::new()),
+        }
+    }
+
     /// 继承链解析 + PDF 渲染(重活,释放 GIL 跑;错误折成类型化异常)。
+    /// `include_hidden = false` 时跳过隐藏页(PowerPoint "导出 PDF" 的缺省行为)。
     fn render_pdf_result(
         &self,
         py: Python<'_>,
         font_map: Option<BTreeMap<String, String>>,
+        include_hidden: bool,
     ) -> PyResult<ExportResult> {
         let inner = Arc::clone(&self.inner);
         let media = Arc::clone(&self.media);
@@ -358,10 +443,26 @@ impl PyPresentation {
             font_map: font_map.unwrap_or_default(),
         };
         py.detach(move || {
-            let resolved = resolve_parts(&inner, &inherit);
+            let mut resolved = resolve_parts(&inner, &inherit);
+            if !include_hidden {
+                let hidden: HashSet<usize> = inner
+                    .slides
+                    .iter()
+                    .filter(|s| s.hidden)
+                    .map(|s| s.index)
+                    .collect();
+                resolved.slides.retain(|s| !hidden.contains(&s.index));
+            }
             render_pdf(&resolved, &media, &opts)
         })
         .map_err(map_err)
+    }
+
+    fn export_options(order: &str, include_hidden: bool) -> PyResult<ExportOptions> {
+        Ok(ExportOptions {
+            order: parse_order(order)?,
+            include_hidden,
+        })
     }
 }
 
@@ -410,10 +511,7 @@ impl PyPresentation {
     /// 所有幻灯片句柄。
     fn slides(&self) -> Vec<PySlide> {
         (0..self.inner.slides.len())
-            .map(|i| PySlide {
-                pres: Arc::clone(&self.inner),
-                index: i,
-            })
+            .map(|i| self.slide_handle(i))
             .collect()
     }
 
@@ -425,10 +523,7 @@ impl PyPresentation {
                 self.inner.slides.len()
             )));
         }
-        Ok(PySlide {
-            pres: Arc::clone(&self.inner),
-            index,
-        })
+        Ok(self.slide_handle(index))
     }
 
     fn __len__(&self) -> usize {
@@ -446,39 +541,91 @@ impl PyPresentation {
     }
 
     /// 整份演示文稿的纯文本(各 slide 以 `--- slide N ---` 分隔,含演讲者备注)。
-    fn to_text(&self) -> String {
-        presentation_text(&self.inner)
+    /// `order="visual"`(缺省)按视觉阅读顺序,`"document"` 按 spTree 文档顺序;
+    /// 隐藏页缺省跳过(`include_hidden=True` 纳入)。
+    #[pyo3(signature = (*, order="visual", include_hidden=false))]
+    fn to_text(&self, py: Python<'_>, order: &str, include_hidden: bool) -> PyResult<String> {
+        let opts = Self::export_options(order, include_hidden)?;
+        let resolved = resolved_of(py, &self.resolved, &self.inner, &self.inherit);
+        Ok(presentation_text_with(&self.inner, Some(resolved), &opts))
     }
 
-    /// 整份演示文稿的 Markdown(每页一节;表格用 GFM,含合并单元格时退回 HTML `<table>`)。
-    fn to_markdown(&self) -> String {
-        presentation_markdown(&self.inner)
+    /// 整份演示文稿的 Markdown(每页一节;标题取 title 占位符,列表标记 / 图片 / 外链
+    /// 语义化;表格用 GFM,含合并单元格时退回 HTML `<table>`)。参数同 [`Self::to_text`]。
+    #[pyo3(signature = (*, order="visual", include_hidden=false))]
+    fn to_markdown(&self, py: Python<'_>, order: &str, include_hidden: bool) -> PyResult<String> {
+        let opts = Self::export_options(order, include_hidden)?;
+        let resolved = resolved_of(py, &self.resolved, &self.inner, &self.inherit);
+        Ok(presentation_markdown_with(
+            &self.inner,
+            Some(resolved),
+            &opts,
+        ))
+    }
+
+    /// 节(`p14:sectionLst`):`[(name, [slide_index, ...])]`;无节为空列表。
+    fn sections(&self) -> Vec<(String, Vec<usize>)> {
+        self.inner
+            .sections
+            .iter()
+            .map(|s| (s.name.clone(), s.slide_indices.clone()))
+            .collect()
+    }
+
+    /// 文档属性(`docProps/core.xml` + `app.xml`):固定键 dict,缺失值为 `None`。
+    fn core_properties<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let p = &self.inner.properties;
+        let d = PyDict::new(py);
+        for (k, v) in [
+            ("title", &p.title),
+            ("subject", &p.subject),
+            ("creator", &p.creator),
+            ("keywords", &p.keywords),
+            ("description", &p.description),
+            ("category", &p.category),
+            ("last_modified_by", &p.last_modified_by),
+            ("revision", &p.revision),
+            ("created", &p.created),
+            ("modified", &p.modified),
+            ("language", &p.language),
+            ("application", &p.application),
+            ("app_version", &p.app_version),
+            ("company", &p.company),
+            ("manager", &p.manager),
+            ("presentation_format", &p.presentation_format),
+        ] {
+            d.set_item(k, v.as_deref())?;
+        }
+        Ok(d)
     }
 
     /// 导出忠实 PDF 字节:每 slide 一页、页面尺寸 = 画布尺寸(EMU → pt)、形状
     /// 绝对定位(PRD-PDF-EXPORT §6 锁定 API)。`font_map` 把请求字体族映射到字体
     /// 文件路径或替代族名,叠加在内置替换表之上。降级(字体替换 / 预设退化 / 图片
-    /// 丢弃等)以 `warnings.warn` 逐种类上浮一次。
-    #[pyo3(signature = (*, font_map=None))]
+    /// 丢弃等)以 `warnings.warn` 逐种类上浮一次。隐藏页缺省不导出(与 PowerPoint 一致),
+    /// `include_hidden=True` 纳入。
+    #[pyo3(signature = (*, font_map=None, include_hidden=false))]
     fn to_pdf<'py>(
         &self,
         py: Python<'py>,
         font_map: Option<BTreeMap<String, String>>,
+        include_hidden: bool,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        let result = self.render_pdf_result(py, font_map)?;
+        let result = self.render_pdf_result(py, font_map, include_hidden)?;
         surface_warnings(py, &result.warnings)?;
         Ok(PyBytes::new(py, &result.pdf))
     }
 
     /// 导出 PDF 并写到 `path`(`to_pdf` 的落盘便捷;签名同 §6 锁定 API)。
-    #[pyo3(signature = (path, *, font_map=None))]
+    #[pyo3(signature = (path, *, font_map=None, include_hidden=false))]
     fn save_pdf(
         &self,
         py: Python<'_>,
         path: PathBuf,
         font_map: Option<BTreeMap<String, String>>,
+        include_hidden: bool,
     ) -> PyResult<()> {
-        let result = self.render_pdf_result(py, font_map)?;
+        let result = self.render_pdf_result(py, font_map, include_hidden)?;
         surface_warnings(py, &result.warnings)?;
         std::fs::write(&path, &result.pdf).map_err(|e| map_err(PptError::Io(e)))
     }
@@ -496,7 +643,20 @@ impl PyPresentation {
 #[pyclass(name = "Slide", module = "pptspine._core", frozen)]
 struct PySlide {
     pres: Arc<CorePresentation>,
+    inherit: Arc<InheritanceParts>,
+    resolved: Arc<OnceLock<ResolvedPresentation>>,
     index: usize,
+}
+
+impl PyPresentation {
+    fn slide_handle(&self, index: usize) -> PySlide {
+        PySlide {
+            pres: Arc::clone(&self.inner),
+            inherit: Arc::clone(&self.inherit),
+            resolved: Arc::clone(&self.resolved),
+            index,
+        }
+    }
 }
 
 impl PySlide {
@@ -526,10 +686,19 @@ impl PySlide {
         self.core().master_name.clone()
     }
 
-    /// 该 slide 所有文字拼接(便利属性;不含演讲者备注)。
+    /// 该 slide 所有文字拼接(便利属性;视觉阅读顺序;不含演讲者备注)。
     #[getter]
-    fn text(&self) -> String {
-        slide_text(self.core())
+    fn text(&self, py: Python<'_>) -> String {
+        let resolved = resolved_of(py, &self.resolved, &self.pres, &self.inherit);
+        let slide = self.core();
+        let rs = resolved.slides.iter().find(|r| r.index == slide.index);
+        slide_text_with(slide, rs, self.pres.slide_size, TextOrder::Visual)
+    }
+
+    /// 是否隐藏页(`p:sld@show="0"`)。
+    #[getter]
+    fn hidden(&self) -> bool {
+        self.core().hidden
     }
 
     /// 演讲者备注文本(无备注则 `None`)。
@@ -562,11 +731,7 @@ impl PySlide {
 #[pyfunction]
 fn open(py: Python<'_>, path: PathBuf) -> PyResult<PyPresentation> {
     let parsed = py.detach(|| parse_path(&path)).map_err(map_err)?;
-    Ok(PyPresentation {
-        inner: Arc::new(parsed.presentation),
-        media: Arc::new(parsed.media),
-        inherit: Arc::new(parsed.inherit),
-    })
+    Ok(PyPresentation::new(parsed))
 }
 
 /// 从内存字节解析一个 `.pptx`。解析在释放 GIL 下进行。
@@ -574,11 +739,7 @@ fn open(py: Python<'_>, path: PathBuf) -> PyResult<PyPresentation> {
 fn open_bytes(py: Python<'_>, data: &[u8]) -> PyResult<PyPresentation> {
     let owned = data.to_vec();
     let parsed = py.detach(|| parse_bytes(&owned)).map_err(map_err)?;
-    Ok(PyPresentation {
-        inner: Arc::new(parsed.presentation),
-        media: Arc::new(parsed.media),
-        inherit: Arc::new(parsed.inherit),
-    })
+    Ok(PyPresentation::new(parsed))
 }
 
 /// 把 [`OcrItem`] 折成一个 dict。

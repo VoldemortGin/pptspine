@@ -1091,6 +1091,7 @@ mod tests {
                 src_rect: None,
                 fill_rect: None,
                 placeholder: None,
+                ..Default::default()
             },
         )]));
         assert!(out
@@ -1199,6 +1200,7 @@ mod tests {
                 src_rect,
                 fill_rect: None,
                 placeholder: None,
+                ..Default::default()
             })])
         };
         let plain = render_pdf(&pic(None), &media, &RenderOptions::default()).expect("render");

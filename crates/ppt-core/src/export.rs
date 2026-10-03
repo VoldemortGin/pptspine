@@ -2,78 +2,36 @@
 //!
 //! 基于现有领域模型(无 IO / XML),逐 slide 拼接文字、表格,并可选纳入演讲者备注。
 //! 设计目标:确定性、容错(空内容不产生噪声)、对合并单元格保真(Markdown 走 HTML `<table>`)。
+//!
+//! 分层:[`reading_order`] 展平组合 + 视觉阅读顺序;`view` 导出选项 / 有序形状视图 / 纯文本;
+//! `markdown` 语义 Markdown(标题占位符、列表标记、图片、超链接)。本文件保留表格与共用辅助。
 
-use crate::model::{Cell, Paragraph, Presentation, Shape, Slide, Table, TextFrame};
+mod markdown;
+pub mod reading_order;
+mod view;
 
-/// 一张幻灯片的正文文字(所有文本框 / 自选图形文字 / 表格,按文档顺序;**不含备注**)。
+use crate::model::{Cell, Paragraph, Presentation, Slide, Table, TextFrame};
+
+pub use markdown::presentation_markdown_with;
+pub use view::{presentation_text_with, slide_text_with, ExportOptions, TextOrder};
+
+/// 一张幻灯片的正文文字(所有文本框 / 自选图形文字 / 表格,按视觉阅读顺序;**不含备注**)。
+/// 无继承链信息(占位符继承几何缺失的形状排在最后);需要更准的顺序用 [`slide_text_with`]。
 pub fn slide_text(slide: &Slide) -> String {
-    let mut blocks: Vec<String> = Vec::new();
-    for sh in &slide.shapes {
-        collect_shape_text(sh, &mut blocks);
-    }
-    blocks.join("\n")
+    slide_text_with(slide, None, (0, 0), TextOrder::default())
 }
 
-/// 整份演示文稿的纯文本:各 slide 以 `--- slide N ---` 分隔(1 基序号),可附带备注。
+/// 整份演示文稿的纯文本(缺省选项:视觉顺序、跳过隐藏页;见 [`presentation_text_with`])。
 pub fn presentation_text(pres: &Presentation) -> String {
-    let mut sections: Vec<String> = Vec::new();
-    for slide in &pres.slides {
-        let mut sect = format!("--- slide {} ---", slide.index + 1);
-        let body = slide_text(slide);
-        if !body.is_empty() {
-            sect.push('\n');
-            sect.push_str(&body);
-        }
-        if let Some(notes) = notes_text(slide) {
-            sect.push_str("\n\nNotes:\n");
-            sect.push_str(&notes);
-        }
-        sections.push(sect);
-    }
-    sections.join("\n\n")
+    presentation_text_with(pres, None, &ExportOptions::default())
 }
 
-/// 整份演示文稿的 Markdown:每页一节(`## Slide N`),首个文本框作标题,表格用
-/// GFM(无合并)或 HTML `<table>`(含 `gridSpan`/`rowSpan` 合并)保真,备注以引用块附后。
+/// 整份演示文稿的 Markdown(缺省选项;见 [`presentation_markdown_with`])。
 pub fn presentation_markdown(pres: &Presentation) -> String {
-    pres.slides
-        .iter()
-        .map(slide_markdown)
-        .collect::<Vec<_>>()
-        .join("\n\n")
+    presentation_markdown_with(pres, None, &ExportOptions::default())
 }
 
 // ---- 纯文本辅助 ----------------------------------------------------------
-
-fn collect_shape_text(shape: &Shape, out: &mut Vec<String>) {
-    match shape {
-        Shape::TextBox(tf) => push_frame_text(tf, out),
-        Shape::Auto(a) => {
-            if let Some(tf) = &a.text {
-                push_frame_text(tf, out);
-            }
-        }
-        Shape::Table(t) => {
-            let s = table_text(t);
-            if !s.is_empty() {
-                out.push(s);
-            }
-        }
-        Shape::Picture(_) | Shape::Connector(_) | Shape::Placeholder(_) => {}
-        Shape::Group(g) => {
-            for c in &g.children {
-                collect_shape_text(c, out);
-            }
-        }
-    }
-}
-
-fn push_frame_text(tf: &TextFrame, out: &mut Vec<String>) {
-    let s = frame_text(tf);
-    if !s.is_empty() {
-        out.push(s);
-    }
-}
 
 fn frame_text(tf: &TextFrame) -> String {
     tf.paragraphs
@@ -118,83 +76,6 @@ fn notes_text(slide: &Slide) -> Option<String> {
 }
 
 // ---- Markdown 辅助 -------------------------------------------------------
-
-fn slide_markdown(slide: &Slide) -> String {
-    let mut out = String::new();
-    out.push_str(&format!("## Slide {}", slide.index + 1));
-
-    let mut title_done = false;
-    let mut blocks: Vec<String> = Vec::new();
-    for sh in &slide.shapes {
-        collect_shape_markdown(sh, &mut title_done, &mut blocks);
-    }
-    for block in blocks {
-        out.push_str("\n\n");
-        out.push_str(&block);
-    }
-
-    if let Some(notes) = notes_text(slide) {
-        let quoted = notes
-            .lines()
-            .map(|l| format!("> {l}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        out.push_str("\n\n> Notes:\n");
-        out.push_str(&quoted);
-    }
-    out
-}
-
-fn collect_shape_markdown(shape: &Shape, title_done: &mut bool, out: &mut Vec<String>) {
-    match shape {
-        Shape::TextBox(tf) => frame_markdown(tf, title_done, out),
-        Shape::Auto(a) => {
-            if let Some(tf) = &a.text {
-                frame_markdown(tf, title_done, out);
-            }
-        }
-        Shape::Table(t) => {
-            let md = table_markdown(t);
-            if !md.is_empty() {
-                out.push(md);
-            }
-        }
-        Shape::Picture(_) | Shape::Connector(_) | Shape::Placeholder(_) => {}
-        Shape::Group(g) => {
-            for c in &g.children {
-                collect_shape_markdown(c, title_done, out);
-            }
-        }
-    }
-}
-
-fn frame_markdown(tf: &TextFrame, title_done: &mut bool, out: &mut Vec<String>) {
-    let paras: Vec<(u8, String)> = tf
-        .paragraphs
-        .iter()
-        .map(|p| (p.level, paragraph_text(p)))
-        .filter(|(_, t)| !t.trim().is_empty())
-        .collect();
-    if paras.is_empty() {
-        return;
-    }
-    let mut iter = paras.into_iter();
-    if !*title_done {
-        // 首个非空文本框的第一段当 slide 标题。
-        let (_, title) = iter.next().expect("paras non-empty");
-        out.push(format!("### {title}"));
-        *title_done = true;
-    }
-    for (level, text) in iter {
-        if level == 0 {
-            out.push(text);
-        } else {
-            // 缩进的项目符号(层级 >= 1)。
-            let indent = "  ".repeat((level as usize).saturating_sub(1));
-            out.push(format!("{indent}- {text}"));
-        }
-    }
-}
 
 fn table_markdown(t: &Table) -> String {
     if t.rows.is_empty() {
@@ -277,7 +158,7 @@ fn escape_html(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Row, TextRun};
+    use crate::model::{Row, Shape, TextRun};
 
     fn run(text: &str) -> TextRun {
         TextRun {
@@ -323,6 +204,7 @@ mod tests {
             notes: notes.map(|s| s.to_string()),
             clr_map_ovr: None,
             background: None,
+            hidden: false,
         }
     }
 
@@ -386,6 +268,8 @@ mod tests {
         let pres = Presentation {
             slides: vec![slide],
             slide_size: (0, 0),
+            sections: Vec::new(),
+            properties: Default::default(),
         };
 
         let text = presentation_text(&pres);

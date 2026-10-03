@@ -15,6 +15,71 @@ pub struct Presentation {
     pub slides: Vec<Slide>,
     /// 幻灯片画布尺寸 `(cx, cy)`(EMU,来自 `p:sldSz`)。
     pub slide_size: (Emu, Emu),
+    /// 节(`presentation.xml` 扩展 `p14:sectionLst`);无节为空。
+    pub sections: Vec<Section>,
+    /// 文档属性(`docProps/core.xml` + `docProps/app.xml`);缺失字段为 `None`。
+    pub properties: DocProperties,
+}
+
+/// 一个节(`p14:section`):名字 + 所含幻灯片的零基序号(按节内顺序)。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Section {
+    pub name: String,
+    pub slide_indices: Vec<usize>,
+}
+
+/// 文档属性:`docProps/core.xml`(Dublin Core / OPC core)+ `docProps/app.xml`(扩展属性)。
+/// 值一律原样字符串(时间戳保持 W3CDTF 原文);缺失为 `None`。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DocProperties {
+    /// `dc:title`。
+    pub title: Option<String>,
+    /// `dc:subject`。
+    pub subject: Option<String>,
+    /// `dc:creator`。
+    pub creator: Option<String>,
+    /// `cp:keywords`。
+    pub keywords: Option<String>,
+    /// `dc:description`。
+    pub description: Option<String>,
+    /// `cp:category`。
+    pub category: Option<String>,
+    /// `cp:lastModifiedBy`。
+    pub last_modified_by: Option<String>,
+    /// `cp:revision`。
+    pub revision: Option<String>,
+    /// `dcterms:created`(W3CDTF 原文)。
+    pub created: Option<String>,
+    /// `dcterms:modified`(W3CDTF 原文)。
+    pub modified: Option<String>,
+    /// `dc:language`。
+    pub language: Option<String>,
+    /// app.xml `Application`。
+    pub application: Option<String>,
+    /// app.xml `AppVersion`。
+    pub app_version: Option<String>,
+    /// app.xml `Company`。
+    pub company: Option<String>,
+    /// app.xml `Manager`。
+    pub manager: Option<String>,
+    /// app.xml `PresentationFormat`。
+    pub presentation_format: Option<String>,
+}
+
+/// 超链接(`a:hlinkClick`,run 级 `a:rPr` 内或形状级 `p:cNvPr` 内)。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Hyperlink {
+    /// `@r:id`(指向所在部件 rels 的一条关系;纯动作链接可缺失)。
+    pub rel_id: Option<String>,
+    /// `@action`(如 `ppaction://hlinksldjump`、`ppaction://hlinkshowjump?jump=nextslide`)。
+    pub action: Option<String>,
+    /// `@tooltip`。
+    pub tooltip: Option<String>,
+    /// 外部链接目标(rels `Target`,仅非 `ppaction://` 链接);内部跳转为 `None`。
+    pub url: Option<String>,
+    /// 内部跳转的目标幻灯片零基序号(`hlinksldjump` 经 rels 定位,或
+    /// `hlinkshowjump` 的 first/last/next/previous 相对当前页计算);解析不出为 `None`。
+    pub slide_index: Option<usize>,
 }
 
 /// 单张幻灯片。
@@ -35,6 +100,8 @@ pub struct Slide {
     pub clr_map_ovr: Option<ClrMap>,
     /// 幻灯片自身的背景(`p:bg`,§3.o);`None` = 沿 layout → master 链继承。
     pub background: Option<Background>,
+    /// 隐藏页(`p:sld@show="0"`);导出侧缺省跳过。
+    pub hidden: bool,
 }
 
 /// 幻灯片背景(`p:bg`,§3.o,B-10)。
@@ -205,6 +272,8 @@ pub struct TextFrame {
     pub style: Option<ShapeStyle>,
     /// 文本体属性(`a:bodyPr`,B-6;缺失字段沿占位符链继承)。
     pub body: BodyProps,
+    /// 形状级超链接(`p:cNvPr > a:hlinkClick`)。
+    pub hyperlink: Option<Hyperlink>,
 }
 
 /// 一个段落(`a:p`)。
@@ -266,6 +335,8 @@ pub struct TextRun {
     pub baseline: Option<f32>,
     /// 大写变换(`a:rPr@cap`)。
     pub cap: Option<Caps>,
+    /// run 级超链接(`a:rPr > a:hlinkClick`)。
+    pub hyperlink: Option<Hyperlink>,
 }
 
 /// 一张表格(`a:tbl`)。
@@ -323,7 +394,7 @@ pub struct Cell {
 }
 
 /// 一张图片(`p:pic`)。原始字节存放在解析输出的 media map 里,这里只携带定位信息。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Picture {
     pub rect: Option<Rect>,
     /// 旋转/翻转(`a:xfrm` 自身属性;翻转对图片是真镜像)。
@@ -340,6 +411,14 @@ pub struct Picture {
     pub fill_rect: Option<RelRect>,
     /// 占位符标识(`p:nvPicPr > p:nvPr > p:ph`,图片占位符几何可继承)。
     pub placeholder: Option<PlaceholderRef>,
+    /// 形状名(`p:cNvPr@name`;alt 文本缺失时的回退)。
+    pub name: Option<String>,
+    /// 替代文本(`p:cNvPr@descr`)。
+    pub alt_text: Option<String>,
+    /// 标题(`p:cNvPr@title`)。
+    pub title: Option<String>,
+    /// 形状级超链接(`p:cNvPr > a:hlinkClick`)。
+    pub hyperlink: Option<Hyperlink>,
 }
 
 /// 几何自选图形(`p:sp` 带 `a:prstGeom`)。
@@ -365,6 +444,8 @@ pub struct AutoShape {
     pub style: Option<ShapeStyle>,
     /// 几何来自 `a:custGeom`(自定义路径;v1 不求值公式,渲染按包围盒降级 + 告警)。
     pub custom_geometry: bool,
+    /// 形状级超链接(`p:cNvPr > a:hlinkClick`)。
+    pub hyperlink: Option<Hyperlink>,
 }
 
 /// 连接线(`p:cxnSp`)—— 形同自选图形,但没有文字体。
