@@ -31,6 +31,18 @@ pub enum Bullet {
     },
 }
 
+/// 大写变换(`a:rPr@cap`,ECMA-376 ST_TextCapsType)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Caps {
+    /// `none`(缺省):原样。
+    #[default]
+    None,
+    /// `small`:小型大写字母。
+    Small,
+    /// `all`:全部大写。
+    All,
+}
+
 /// 可继承的 run 级样式(`a:rPr` / `a:defRPr` 形):全字段三态
 /// (`None` = 未指定 → 继承;`Some` = 显式指定 → 覆盖)。
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -44,6 +56,13 @@ pub struct RunStyle {
     pub ea_font: Option<String>,
     pub cs_font: Option<String>,
     pub color: Option<ColorSpec>,
+    /// 字符间距(磅,可负;`@spc` 以百分之一磅存储,解析时已除以 100)。
+    pub char_spacing_pt: Option<f32>,
+    /// 上下标基线偏移(相对字号的比例,正上标负下标;`@baseline` 千分之一百分点,
+    /// 解析时已除以 100000,30000 → 0.30)。
+    pub baseline: Option<f32>,
+    /// 大写变换(`@cap`)。
+    pub cap: Option<Caps>,
 }
 
 impl RunStyle {
@@ -59,6 +78,9 @@ impl RunStyle {
             ea_font: over.ea_font.clone().or_else(|| self.ea_font.clone()),
             cs_font: over.cs_font.clone().or_else(|| self.cs_font.clone()),
             color: over.color.clone().or_else(|| self.color.clone()),
+            char_spacing_pt: over.char_spacing_pt.or(self.char_spacing_pt),
+            baseline: over.baseline.or(self.baseline),
+            cap: over.cap.or(self.cap),
         }
     }
 }

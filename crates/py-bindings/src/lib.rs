@@ -24,6 +24,7 @@ use ppt_core::model::{
     Presentation as CorePresentation, Row, RunKind, Shape, Slide as CoreSlide, Stroke, Table,
     TextFrame, TextRun,
 };
+use ppt_core::style::Caps;
 use ppt_core::PptError;
 use ppt_ocr::{OcrItem, PptOcr};
 use ppt_parse::{parse_bytes, parse_path, resolve_parts, InheritanceParts};
@@ -136,6 +137,15 @@ fn run_dict<'py>(py: Python<'py>, run: &TextRun) -> PyResult<Bound<'py, PyDict>>
     d.set_item("underline", run.underline.unwrap_or(false))?;
     d.set_item("strike", run.strike.unwrap_or(false))?;
     d.set_item("color", run.color.as_ref().and_then(spec_hex))?;
+    // 字符间距(磅,可负)/ 上下标基线偏移(字号比例,正上负下)/ 大写变换;缺失为 None。
+    d.set_item("char_spacing_pt", run.char_spacing_pt)?;
+    d.set_item("baseline", run.baseline)?;
+    let cap = run.cap.map(|c| match c {
+        Caps::None => "none",
+        Caps::Small => "small",
+        Caps::All => "all",
+    });
+    d.set_item("cap", cap)?;
     Ok(d)
 }
 

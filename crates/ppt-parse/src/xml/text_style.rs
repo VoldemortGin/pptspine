@@ -8,7 +8,7 @@
 
 use ppt_core::color::{ColorSpec, ColorTransform};
 use ppt_core::model::Color;
-use ppt_core::style::{Bullet, RunStyle, Spacing, TextLevelStyle, TextStyleLevels};
+use ppt_core::style::{Bullet, Caps, RunStyle, Spacing, TextLevelStyle, TextStyleLevels};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 
@@ -144,7 +144,41 @@ pub fn run_style_attrs(e: &BytesStart) -> RunStyle {
         // `u="none"` / `strike="noStrike"` 是显式关闭(`Some(false)`)。
         underline: attr_of(e, b"u").map(|v| v != "none"),
         strike: attr_of(e, b"strike").map(|v| v != "noStrike"),
+        char_spacing_pt: attr_of(e, b"spc").and_then(|v| parse_spc(&v)),
+        baseline: attr_of(e, b"baseline").and_then(|v| parse_baseline(&v)),
+        cap: attr_of(e, b"cap").and_then(|v| parse_cap(&v)),
         ..RunStyle::default()
+    }
+}
+
+/// ST_TextPoint 的合法范围(百分之一磅,ECMA-376 §20.1.10.74)。
+const TEXT_POINT_LIMIT: f64 = 400_000.0;
+
+/// `@spc`(百分之一磅,可负)→ 磅;非数字 / 非有限 / 越出 ST_TextPoint 范围 → `None`。
+fn parse_spc(v: &str) -> Option<f32> {
+    let n = v.trim().parse::<f64>().ok()?;
+    (n.is_finite() && n.abs() <= TEXT_POINT_LIMIT).then(|| (n / 100.0) as f32)
+}
+
+/// `@baseline`(ST_Percentage:transitional 千分之一百分点 `30000`,strict `30%`)→
+/// 相对字号的比例(0.30);非数字 / 非有限 → `None`。
+fn parse_baseline(v: &str) -> Option<f32> {
+    let v = v.trim();
+    let pct = match v.strip_suffix('%') {
+        Some(p) => p.trim().parse::<f64>().ok()?,
+        None => v.parse::<f64>().ok()? / 1000.0,
+    };
+    let frac = (pct / 100.0) as f32;
+    frac.is_finite().then_some(frac)
+}
+
+/// `@cap`(ST_TextCapsType)→ [`Caps`];未知取值 → `None`(继承)。
+fn parse_cap(v: &str) -> Option<Caps> {
+    match v {
+        "none" => Some(Caps::None),
+        "small" => Some(Caps::Small),
+        "all" => Some(Caps::All),
+        _ => None,
     }
 }
 

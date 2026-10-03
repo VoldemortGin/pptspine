@@ -19,11 +19,11 @@ use ppt_core::geom::emu_to_points;
 use ppt_core::resolved::{
     ResolvedAnchor, ResolvedBodyProps, ResolvedBullet, ResolvedParagraph, ResolvedRun,
 };
-use ppt_core::style::Spacing;
+use ppt_core::style::{Caps, Spacing};
 
 use pdf_typeset::{
-    Align, Block, LineSpacing, ListLabel, ParaProps, Rect, Rgb, Run, RunStyle, TextBoxSpec,
-    Typesetter, VAnchor,
+    Align, Block, CharacterSpacing, LineSpacing, ListLabel, ParaProps, Rect,
+    ResolvedScriptPlacement, Rgb, Run, RunStyle, TextBoxSpec, Typesetter, VAnchor,
 };
 
 /// 项目符号标签右缘到正文起点的间距(pt;引擎 `ListLabel::gutter`)。
@@ -32,6 +32,10 @@ const BULLET_GUTTER_PT: f64 = 6.0;
 const BULLET_FALLBACK_MARL_PT: f64 = 18.0;
 /// 继承链全无字体名时的兜底拉丁字体(Office 缺省主题 minor latin)。
 const DEFAULT_LATIN: &str = "Calibri";
+/// 上/下标(`baseline` ≠ 0)的字形缩放。OOXML 只给基线偏移、不给缩放比例(PowerPoint
+/// 渲染时自行缩小);沿用 docspine 上下标的 0.65(介于 LibreOffice 缺省 58% 与 Office
+/// 观感 ≈2/3 之间)。名义字号不变,仍作行高支柱。
+const SCRIPT_GLYPH_SCALE: f64 = 0.65;
 
 /// 把一个文本体折成 TS-5 文本框输入。`rect` 已是页坐标 pt(组合仿射预乘后);
 /// `rotation_deg` 为视觉逆时针角(pptx `rot` 换算取负后传入)。
@@ -135,6 +139,8 @@ fn scale_paragraphs(
             let mut np = p.clone();
             for r in &mut np.runs {
                 r.size_pt = (f64::from(r.size_pt) * scale) as f32;
+                // 与引擎 `font_scale` 收缩同语义:字符间距随字号同比例缩放。
+                r.char_spacing_pt = (f64::from(r.char_spacing_pt) * scale) as f32;
             }
             if ln_reduction > 0.0 {
                 np.ln_spc = Some(reduce_line_spacing(p.ln_spc, ln_reduction));
@@ -212,15 +218,47 @@ fn paragraph_block(para: &ResolvedParagraph, counters: &mut AutoNumCounters) -> 
     Block::Paragraph(props, runs)
 }
 
-/// 一个 run → 引擎 [`Run`](五属性 + B-3 的下划线/删除线直通)。
+/// 一个 run → 引擎 [`Run`](五属性 + B-3 的下划线/删除线直通 + `spc` / `baseline` /
+/// `cap`)。`cap=small` 引擎无小型大写,近似为全大写(降级告警由调用方一次性发出)。
 fn run_input(run: &ResolvedRun) -> Run {
-    let mut style = RunStyle::new(family_for(run), f64::from(run.size_pt));
+    let size = f64::from(run.size_pt);
+    let mut style = RunStyle::new(family_for(run), size);
+    style.script_placement = script_placement(run.baseline, size);
+    style.character_spacing = character_spacing(run.char_spacing_pt);
     style.bold = run.bold;
     style.italic = run.italic;
     style.underline = run.underline;
     style.strike = run.strike;
     style.color = rgb(run.color);
-    Run::new(run.text.clone(), style)
+    let text = match run.cap {
+        Caps::None => run.text.clone(),
+        Caps::Small | Caps::All => run.text.to_uppercase(),
+    };
+    Run::new(text, style)
+}
+
+/// `baseline`(相对字号的比例,正上负下)→ 引擎基线偏移:**文档给的偏移量** × 名义
+/// 字号(磅,正 = 上抬),字形 ×[`SCRIPT_GLYPH_SCALE`]。0 时 `None`(保持原排版路径,
+/// 字节不变);非有限值降级为不偏移,不 panic。
+fn script_placement(baseline: f32, size: f64) -> Option<ResolvedScriptPlacement> {
+    if baseline == 0.0 || !baseline.is_finite() {
+        return None;
+    }
+    ResolvedScriptPlacement::new(SCRIPT_GLYPH_SCALE, f64::from(baseline) * size).ok()
+}
+
+/// `spc`(磅)→ 引擎字符间距:非负走 `new`,负值(紧缩)走 `resolved_signed`。负间距由
+/// 引擎 `layout_text_box` / `measure_text_box` 的无错路径预检:可前进的段落照常紧缩,
+/// 不可前进的段落只把负间距归零并发 `SignedSpacingFallback` 告警(文本不丢)。
+/// 非有限值降级为 0。
+fn character_spacing(points: f32) -> CharacterSpacing {
+    let points = f64::from(points);
+    let spacing = if points < 0.0 {
+        CharacterSpacing::resolved_signed(points)
+    } else {
+        CharacterSpacing::new(points)
+    };
+    spacing.unwrap_or_default()
 }
 
 /// 终端颜色 → 引擎 RGB(文字色的 alpha 引擎 RunStyle 尚不承载,忽略)。
@@ -407,6 +445,8 @@ fn to_roman(n: i32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pdf_typeset::CharacterSpacing;
+    use ppt_core::style::Caps;
 
     #[test]
     fn autonum_formats() {
@@ -446,6 +486,108 @@ mod tests {
         assert!(approx(space_pts(None, 20.0), 0.0));
     }
 
+    fn styled_run(text: &str, f: impl FnOnce(&mut ResolvedRun)) -> ResolvedRun {
+        let mut run = ResolvedRun {
+            text: text.into(),
+            kind: ppt_core::model::RunKind::Text,
+            font: Some("Arial".into()),
+            ea_font: None,
+            cs_font: None,
+            size_pt: 20.0,
+            bold: false,
+            italic: false,
+            underline: false,
+            strike: false,
+            color: ResolvedColor::opaque([0, 0, 0]),
+            char_spacing_pt: 0.0,
+            baseline: 0.0,
+            cap: Caps::None,
+        };
+        f(&mut run);
+        run
+    }
+
+    /// `baseline` 正上负下:文档给的偏移比例 × 名义字号 = 基线偏移(磅),字形 ×0.65,
+    /// 名义字号不变(行高支柱);0 / 非有限值不设置(原排版路径)。
+    #[test]
+    fn baseline_maps_to_script_placement() {
+        let sup = run_input(&styled_run("sup", |r| r.baseline = 0.30));
+        assert_eq!(sup.style.size, 20.0, "名义字号不变");
+        let p = sup.style.script_placement.expect("上标有基线偏移");
+        assert!((p.glyph_scale() - 0.65).abs() < 1e-9, "字形 ×0.65");
+        assert!(
+            (p.baseline_shift() - 6.0).abs() < 1e-6,
+            "30% × 20pt = 上抬 6pt"
+        );
+
+        let sub = run_input(&styled_run("sub", |r| r.baseline = -0.25));
+        let p = sub.style.script_placement.expect("下标有基线偏移");
+        assert!((p.glyph_scale() - 0.65).abs() < 1e-9);
+        assert!(
+            (p.baseline_shift() + 5.0).abs() < 1e-6,
+            "-25% × 20pt = 下沉 5pt"
+        );
+
+        let plain = run_input(&styled_run("plain", |_| {}));
+        assert_eq!(plain.style.script_placement, None, "缺省不设置");
+        let nan = run_input(&styled_run("nan", |r| r.baseline = f32::NAN));
+        assert_eq!(nan.style.script_placement, None, "非有限值降级为不偏移");
+    }
+
+    /// `spc`(磅)→ 引擎字符间距:正用 `new`、负用 `resolved_signed`;非有限值降级为 0。
+    #[test]
+    fn char_spacing_maps_to_engine() {
+        let wide = run_input(&styled_run("wide", |r| r.char_spacing_pt = 3.0));
+        assert_eq!(wide.style.character_spacing.points(), 3.0);
+        assert_eq!(wide.style.script_placement, None, "间距不触发上下标");
+        let tight = run_input(&styled_run("tight", |r| r.char_spacing_pt = -1.5));
+        assert_eq!(tight.style.character_spacing.points(), -1.5, "负间距保真");
+        let plain = run_input(&styled_run("plain", |_| {}));
+        assert_eq!(plain.style.character_spacing, CharacterSpacing::default());
+        let inf = run_input(&styled_run("inf", |r| r.char_spacing_pt = f32::INFINITY));
+        assert_eq!(inf.style.character_spacing, CharacterSpacing::default());
+    }
+
+    /// `cap=all` / `cap=small` → 渲染文本大写(small 近似为全大写,引擎无小型大写)。
+    #[test]
+    fn caps_uppercase_rendered_text() {
+        assert_eq!(
+            run_input(&styled_run("Mixed", |r| r.cap = Caps::All)).text,
+            "MIXED"
+        );
+        assert_eq!(
+            run_input(&styled_run("Mixed", |r| r.cap = Caps::Small)).text,
+            "MIXED"
+        );
+        assert_eq!(run_input(&styled_run("Mixed", |_| {})).text, "Mixed");
+    }
+
+    /// 重算式 autofit 缩字号时字符间距同比例缩放(与引擎 `font_scale` 收缩语义一致);
+    /// 基线偏移按缩放后字号重算,自然同比例。
+    #[test]
+    fn autofit_scales_char_spacing() {
+        let para = ResolvedParagraph {
+            level: 0,
+            align: None,
+            mar_l: None,
+            indent: None,
+            ln_spc: None,
+            spc_bef: None,
+            spc_aft: None,
+            bullet: ResolvedBullet::None,
+            runs: vec![styled_run("w", |r| {
+                r.char_spacing_pt = 4.0;
+                r.baseline = 0.30;
+            })],
+        };
+        let scaled = scale_paragraphs(&[para], 0.5, 0.0);
+        let r = &scaled[0].runs[0];
+        assert!((r.char_spacing_pt - 2.0).abs() < 1e-6);
+        assert!((r.size_pt - 10.0).abs() < 1e-6);
+        let p = run_input(r).style.script_placement.expect("仍是上标");
+        assert!((p.baseline_shift() - 3.0).abs() < 1e-6);
+    }
+
     #[test]
     fn cjk_prefers_ea_font() {
         let run = ResolvedRun {
@@ -460,6 +602,9 @@ mod tests {
             underline: false,
             strike: false,
             color: ResolvedColor::opaque([0, 0, 0]),
+            char_spacing_pt: 0.0,
+            baseline: 0.0,
+            cap: ppt_core::style::Caps::None,
         };
         assert_eq!(family_for(&run), "SimSun");
     }

@@ -67,6 +67,7 @@ pub fn render_pdf(
         image_ids: BTreeMap::new(),
         warnings: Vec::new(),
         vertical_warned: false,
+        small_caps_warned: false,
     };
     let pages: Vec<PageOps> = pres
         .slides
@@ -93,6 +94,28 @@ struct RenderCtx<'a> {
     warnings: Vec<ExportWarning>,
     /// 纵排文字降级告警的一次性开关(整篇 presentation 只发一条)。
     vertical_warned: bool,
+    /// 小型大写(`cap=small`)降级告警的一次性开关(整篇只发一条)。
+    small_caps_warned: bool,
+}
+
+impl RenderCtx<'_> {
+    /// `cap=small` 引擎无小型大写,`text::run_input` 近似为全大写;整篇首次遇到时告警一次。
+    fn note_small_caps(&mut self, paragraphs: &[ppt_core::resolved::ResolvedParagraph]) {
+        if self.small_caps_warned {
+            return;
+        }
+        let small = paragraphs
+            .iter()
+            .flat_map(|p| &p.runs)
+            .any(|r| r.cap == ppt_core::style::Caps::Small);
+        if small {
+            self.warnings.push(ExportWarning::Custom {
+                kind: "small-caps".into(),
+                detail: "小型大写(rPr@cap=small)v1 近似为全大写".into(),
+            });
+            self.small_caps_warned = true;
+        }
+    }
 }
 
 /// 一张 slide 的全部绘制 op(背景先铺,再 spTree 顺序 = 绘制顺序)。
@@ -194,6 +217,7 @@ fn text_ops(
         });
         ctx.vertical_warned = true;
     }
+    ctx.note_small_caps(&tf.paragraphs);
     let mapped = flat.map_emu_rect(rect);
     let rot = -tf.xfrm.rot_deg();
     // B-6:`normAutofit` 生效但**未存** fontScale → 用引擎 TS-10 测量按内容重算缩放;
@@ -338,6 +362,7 @@ fn table_ops(
                 }
                 cell_border_ops(&cell.borders, crect, ops);
                 let body = cell_body(cell);
+                ctx.note_small_caps(&cell.paragraphs);
                 let spec = text::text_box_spec(crect, 0.0, &body, &cell.paragraphs);
                 ops.extend(ts.layout_text_box(&spec));
             }
@@ -505,6 +530,9 @@ mod tests {
             underline: false,
             strike: false,
             color: ResolvedColor::opaque([0, 0, 0]),
+            char_spacing_pt: 0.0,
+            baseline: 0.0,
+            cap: ppt_core::style::Caps::None,
         }
     }
 
@@ -1125,6 +1153,89 @@ mod tests {
             "Deep",
         )]);
         assert_eq!(render(&outer).pdf, render(&twin).pdf);
+    }
+
+    fn styled_text_box(text: &str, f: impl Fn(&mut ResolvedRun)) -> ResolvedShape {
+        let mut p = para(text);
+        f(&mut p.runs[0]);
+        ResolvedShape::TextBox(ResolvedTextFrame {
+            rect: Some(Rect::new(0, 0, 6_000_000, 3_000_000)),
+            xfrm: Xfrm::default(),
+            body: ppt_core::resolved::ResolvedBodyProps::default(),
+            paragraphs: vec![p],
+        })
+    }
+
+    fn has_custom_warning(out: &ExportResult, want: &str) -> bool {
+        out.warnings
+            .iter()
+            .any(|w| matches!(w, ExportWarning::Custom { kind, .. } if kind == want))
+    }
+
+    fn has_spacing_fallback(out: &ExportResult) -> bool {
+        out.warnings
+            .iter()
+            .any(|w| matches!(w, ExportWarning::SignedSpacingFallback { .. }))
+    }
+
+    /// 负字符间距:可前进的紧缩照常排、无回退告警;紧缩过度(簇不前进)时引擎只把
+    /// 该段负间距归零 + `signed-spacing-fallback` 告警,文本照常渲染、不 panic。
+    #[test]
+    fn negative_char_spacing_condenses_or_falls_back_with_warning() {
+        let mild = render(&one_slide(vec![styled_text_box("Condensed", |r| {
+            r.char_spacing_pt = -1.0;
+        })]));
+        assert!(mild.pdf.starts_with(b"%PDF"));
+        assert!(
+            !has_spacing_fallback(&mild),
+            "-1pt 可前进,不应回退: {:?}",
+            mild.warnings
+        );
+        let extreme = render(&one_slide(vec![styled_text_box("Condensed", |r| {
+            r.char_spacing_pt = -100.0;
+        })]));
+        assert!(extreme.pdf.starts_with(b"%PDF"));
+        assert!(has_spacing_fallback(&extreme));
+    }
+
+    /// 上下标 / 间距真的改变输出;显式 0 与缺省逐字节一致(默认路径不变)。
+    #[test]
+    fn script_and_spacing_change_output_but_zero_is_identity() {
+        let plain = render(&one_slide(vec![styled_text_box("x2", |_| {})])).pdf;
+        let zero = render(&one_slide(vec![styled_text_box("x2", |r| {
+            r.char_spacing_pt = 0.0;
+            r.baseline = 0.0;
+        })]))
+        .pdf;
+        assert_eq!(plain, zero, "显式 0 不改变字节");
+        let sup = render(&one_slide(vec![styled_text_box("x2", |r| {
+            r.baseline = 0.30
+        })]))
+        .pdf;
+        assert_ne!(plain, sup, "上标改变排版");
+        let wide = render(&one_slide(vec![styled_text_box("x2", |r| {
+            r.char_spacing_pt = 2.0;
+        })]))
+        .pdf;
+        assert_ne!(plain, wide, "字符间距改变排版");
+    }
+
+    /// `cap=small` 近似为全大写渲染,降级告警整篇只一条;`cap=all` 不告警。
+    #[test]
+    fn small_caps_warns_exactly_once() {
+        use ppt_core::style::Caps;
+        let small = || styled_text_box("Small caps", |r| r.cap = Caps::Small);
+        let out = render(&one_slide(vec![small(), small()]));
+        let n = out
+            .warnings
+            .iter()
+            .filter(|w| matches!(w, ExportWarning::Custom { kind, .. } if kind == "small-caps"))
+            .count();
+        assert_eq!(n, 1, "small-caps 降级告警应恰好一条");
+        let all = render(&one_slide(vec![styled_text_box("All caps", |r| {
+            r.cap = Caps::All;
+        })]));
+        assert!(!has_custom_warning(&all, "small-caps"));
     }
 
     /// Task 4:两个纵排文本框仍水平降级渲染,但降级告警**恰好一条**(一次性)。

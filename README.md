@@ -24,7 +24,7 @@ offline, and deterministically via the sibling [`ocrspine`](../ocrspine) crate
 | --- | --- |
 | Slides + slide size | parsed |
 | Text frames: paragraphs, runs, text | parsed |
-| Run styling: font, size, bold, italic, solid-fill color | parsed |
+| Run styling: font, size, bold, italic, solid-fill color, character spacing `spc`, super/subscript `baseline`, caps `cap` (inherited through `lstStyle`/`txStyles`) | parsed |
 | Paragraph level + alignment | parsed |
 | Tables: rows, cells, cell text | parsed |
 | Table merges: `gridSpan` / `rowSpan` / `hMerge` / `vMerge` | parsed |
@@ -34,7 +34,7 @@ offline, and deterministically via the sibling [`ocrspine`](../ocrspine) crate
 | Groups (`p:grpSp`): recursive | parsed |
 | Speaker notes (`notesSlide` → `Slide.notes`) | parsed |
 | Structured export: `to_text()` / `to_markdown()` (GFM + HTML tables for merges) | working |
-| PDF export: `to_pdf()` / `save_pdf()` — one page per slide; placeholder/theme inheritance, shape transforms (rot/flip/adj/dash/`srcRect`), group affine, tables, slide backgrounds, body-anchor/autofit | working |
+| PDF export: `to_pdf()` / `save_pdf()` — one page per slide; placeholder/theme inheritance, shape transforms (rot/flip/adj/dash/`srcRect`), group affine, tables, slide backgrounds, body-anchor/autofit, superscript/subscript with the document's own baseline offset, character spacing (expanded and condensed), `cap=all` (`cap=small` approximated as all caps + warning) | working |
 | Image OCR (embedded pictures → words + boxes) | working (`ocr_image`) |
 | Image-table geometry reconstruction from OCR boxes | **deferred** (stub) |
 

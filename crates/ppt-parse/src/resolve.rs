@@ -299,6 +299,9 @@ fn resolve_run(
         ea_font: run.ea_font.clone(),
         cs_font: run.cs_font.clone(),
         color: run.color.clone(),
+        char_spacing_pt: run.char_spacing_pt,
+        baseline: run.baseline,
+        cap: run.cap,
     };
     let m = base.overridden_by(&direct);
     // 字体:主题引用展开;链上全缺落 `p:style > a:fontRef` 的 major/minor。
@@ -341,6 +344,9 @@ fn resolve_run(
         underline: m.underline.unwrap_or(false),
         strike: m.strike.unwrap_or(false),
         color,
+        char_spacing_pt: m.char_spacing_pt.unwrap_or(0.0),
+        baseline: m.baseline.unwrap_or(0.0),
+        cap: m.cap.unwrap_or_default(),
     }
 }
 
