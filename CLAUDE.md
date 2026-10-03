@@ -48,16 +48,21 @@ crates/
     src/error.rs   PptError(thiserror):Zip/Xml/Unsupported/InvalidArgument/Io/Ocr + kind() + Result<T>
     src/geom.rs    Emu(i64,914400/inch) + to_points + Rect/Point
     src/model.rs   Presentation/Slide/Shape/TextFrame/Paragraph/TextRun/Table/Row/Cell/Picture/AutoShape/Color
+    src/export/    reading_order.rs(XY-cut 视觉阅读顺序,展平组合几何) view.rs(导出选项 + 每页有序形状视图 + 纯文本)
+                   markdown.rs(语义 Markdown:标题占位符 / 列表标记 / 图片 alt / 超链接)
   ppt-parse/   OOXML 读取:zip 解包 + quick-xml 遍历 -> Presentation。本轮核心。#![forbid(unsafe_code)]
     src/lib.rs     parse_path / parse_bytes -> ParsedPptx { presentation, media }
     src/zip_pkg.rs zip 读 API:presentation.xml / slides / _rels / media / layouts / masters
+    src/links.rs   超链接后处理:rels 回填外链 url,页内跳转折成目标幻灯片序号
     src/xml/       quick-xml walker:presentation.rs(尺寸+顺序) slide.rs(spTree -> Shape)
+                   doc_props.rs(docProps/core.xml + app.xml -> DocProperties)
   ppt-ocr/     图片 OCR 桥:把 ocrspine 套到嵌入图片上。本轮薄但可用。#![forbid(unsafe_code)]
     src/lib.rs     ocr_image_bytes / PptOcr{engine} + reconstruct_table_from_image(stub)
   ppt-render/  终态 IR -> PDF:逐 slide 一页,经共享 pdf-typeset 引擎(pdfspine Phase A)。#![forbid(unsafe_code)]
     src/lib.rs       render_pdf(pres,media,opts)->ExportResult:逐 slide 装配 / 背景 / 表格网格 / font_map 应用
     src/text.rs      ResolvedTextFrame 段落/run -> TS-5 绝对定位文本框(锚定/内边距/换行/项目符号/行距)
     src/shapes.rs    自选图形 / 连接线 / 图片 / 图表占位 -> 引擎 op
+    src/shapes/line_ends.rs 线端装饰 headEnd/tailEnd(triangle/stealth/diamond/oval/arrow)
     src/transform.rs 组合仿射(chOff/chExt 重映射,B-5)
   py-bindings/ PyO3 _core 扩展。唯一用 unsafe(经 PyO3)的 crate。#![deny(unsafe_op_in_unsafe_fn)]
     src/lib.rs     open -> Presentation handle;Slide.shapes() -> list[dict];ocr_image;异常层级

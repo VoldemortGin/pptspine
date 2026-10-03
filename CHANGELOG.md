@@ -15,11 +15,14 @@ still change.
 
 ### Added
 
+- Semantic extraction: visual reading order for `to_text`/`to_markdown`/`Slide.text` (XY-cut over flattened group geometry; `order="document"` restores z-order); Markdown titles from `title`/`ctrTitle` placeholders, `- `/`1. ` list markers from the resolved bullet chain, `![alt](media)` images (`cNvPr@descr`, falls back to `@name`), `[text](url)` external hyperlinks; `shapes()` dicts gain `placeholder`, `hyperlink`, `alt_text`/`title`/`name`; run dicts gain `hyperlink`; `Slide.hidden`, `Presentation.sections()`, `Presentation.core_properties()`.
+- PDF export draws slideMaster / slideLayout non-placeholder shapes (logos, decorative bars, footer rules, fixed footer text) beneath slide content, honoring `showMasterSp` on slides (hides master + layout graphics) and layouts (hides master graphics). Master/layout pictures and picture backgrounds now resolve through their own part rels (previously dropped silently). `Slide.shapes()`, `to_text()` and `to_markdown()` remain slide-only.
 - Run-level `a:rPr@spc` (signed character spacing), `@baseline` (superscript/subscript using the document's own offset; glyph ×0.65) and `@cap` are parsed, inherited through `txStyles`/`lstStyle`, exposed in the run dict (`char_spacing_pt` / `baseline` / `cap`) and rendered via pdf-typeset `CharacterSpacing` / `ResolvedScriptPlacement`. Over-condensed paragraphs fall back with a `SignedSpacingFallback` warning; `cap=small` is approximated as all caps with a one-time `small-caps` warning. Default decks render byte-identical PDFs.
 - PDF export draws line ends `a:headEnd` / `a:tailEnd` (triangle / stealth / diamond / oval / arrow; sm/med/lg sized per LibreOffice ratios) on open outlines, shortening the stroke to the arrow base; inherited via `lnRef` → theme `lnStyleLst`. Unsupported kinds degrade with a `line-end-degraded` warning.
 
 ### Changed
 
+- Hidden slides (`show="0"`) are skipped by `to_text`/`to_markdown`/`to_pdf`/`save_pdf` by default (`include_hidden=True` to keep them), matching PowerPoint's PDF export. Text export order defaults to visual reading order. Markdown list indent is now `level × 2` spaces.
 - `a:custGeom` is no longer silently drawn as a rectangle — it is approximated by its bounding box (connectors as a straight line) with a `custom-geometry-approximated` warning; custGeom colored only via `p:style` is now drawn too.
 - Python export warnings of the `Custom` kind now surface once per kind (previously collapsed into one).
 - Align PDF export dependencies with pdfspine v0.8.0 (2026-09-10, `91e0255`;
