@@ -28,7 +28,7 @@ Spine 家族成员之一:**纯 Rust 的 PowerPoint(.pptx / OOXML)结构化解析
 - **`../pdfspine/` 只读。** 另一个 agent 正在改它。可读它学模式(PyO3 chokepoint / 工作区布局),
   但**绝不**写入或修改 pdfspine 里的**任何**文件。
 - **姊妹 crate 走 git dep(非 path)。** 在 `[workspace.dependencies]` 里一次性声明
-  `ocrspine = { git = "https://github.com/VoldemortGin/ocrspine", rev = "732975f0…" }`
+  `ocrspine = { git = "https://github.com/VoldemortGin/ocrspine", rev = "041958aa…" }`
   (pdf-typeset 同理:`{ git = "https://github.com/VoldemortGin/pdfspine", rev = "…" }`);
   `ppt-ocr` 用 `ocrspine.workspace = true`、`ppt-render` 用 `pdf-typeset.workspace = true`,
   避免逐 crate 算相对路径。

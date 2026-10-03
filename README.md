@@ -62,10 +62,11 @@ VIRTUAL_ENV="$(pwd)/.venv" .venv/bin/maturin develop --release --locked --uv --e
 
 The `test` extra installs pytest and the pdfspine PDF read-back engine. Cargo
 fetches `pdf-typeset` and test-only `pdf-fonts` from the same official pdfspine
-v0.8.0 commit, `f1f6ab4208876b0ba867edd76cc4e5da7ad8add2`; no sibling checkout
+v0.11.2 commit, `78a64d6e252ab739fcbad66c0d7f5328a080d667`, and `ocrspine` from
+commit `041958aa6f8d70d3957e8f9e27896cf0cbc42511`; no sibling checkout
 is required. Installation may access the network; export and OCR run locally,
 with model weights supplied by the installed `ocrspine-models` package.
-See [migration validation](docs/pdfspine-v080-validation.md) for the actual
+See [migration validation](docs/pdfspine-v0112-validation.md) for the actual
 wheel, export/SSIM results and coverage limits.
 
 ## Use from Python
