@@ -22,6 +22,10 @@ pub struct ZipLimits {
     /// 全部条目的累计实际解压字节上限。
     pub max_total_bytes: u64,
     /// 最大压缩比(解压 / 压缩);仅当解压量 > 1 MiB 时才判定(避免误伤小文件)。
+    ///
+    /// 默认 10 000:deflate 对大块零的理论上限约 1032:1,若设 1000 会误拒超过 1 MiB 的
+    /// 合法纯色位图等 media。内存风险已由单条目 / 总量上限兜住,压缩比检查只用于拦
+    /// 非 deflate 方法(bzip2 / zstd / lzma)的极端比值。
     pub max_compression_ratio: u32,
     /// 条目名最大字节长度。
     pub max_name_len: usize,
@@ -36,7 +40,7 @@ impl Default for ZipLimits {
             max_entries: 10_000,
             max_entry_bytes: 256 * 1024 * 1024,
             max_total_bytes: 1024 * 1024 * 1024,
-            max_compression_ratio: 1000,
+            max_compression_ratio: 10_000,
             max_name_len: 1024,
         }
     }
@@ -57,7 +61,12 @@ fn check_ratio(uncompressed: u64, compressed: u64, limits: &ZipLimits) -> Result
     }
     let max = u128::from(limits.max_compression_ratio);
     if u128::from(uncompressed) > max * u128::from(compressed) {
-        let actual = uncompressed.checked_div(compressed).unwrap_or(u64::MAX);
+        // 向上取整,保证 actual > limit。
+        let actual = if compressed == 0 {
+            u64::MAX
+        } else {
+            uncompressed.div_ceil(compressed)
+        };
         return Err(limit_err(
             LimitKind::CompressionRatio,
             u64::from(limits.max_compression_ratio),
@@ -67,9 +76,15 @@ fn check_ratio(uncompressed: u64, compressed: u64, limits: &ZipLimits) -> Result
     Ok(())
 }
 
-/// 条目名是否安全:非绝对路径、无 `..` 段、无 NUL(复用 zip 的 `enclosed_name` 再加严)。
+/// 条目名是否安全:非绝对路径、无盘符前缀(`C:\x` / `C:/x`)、无 `..` 段、无 NUL
+/// (复用 zip 的 `enclosed_name` 再加严)。
 fn is_safe_name(file: &zip::read::ZipFile<'_>) -> bool {
-    file.enclosed_name().is_some() && !file.name().split(['/', '\\']).any(|seg| seg == "..")
+    let name = file.name();
+    let b = name.as_bytes();
+    let drive_letter = b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':';
+    !drive_letter
+        && file.enclosed_name().is_some()
+        && !name.split(['/', '\\']).any(|seg| seg == "..")
 }
 
 /// 解包后的 pptx 原始部件集合(尚未解析 XML)。
@@ -138,6 +153,7 @@ impl Package {
                 .map_err(|e| PptError::Zip(format!("read {name}: {e}")))?;
             let actual = buf.len() as u64;
             if actual > cap {
+                // TotalBytes 报累计值(截断时 = max_total_bytes + 1,必 > limit)。
                 return Err(if actual > limits.max_entry_bytes {
                     limit_err(LimitKind::EntryBytes, limits.max_entry_bytes, actual)
                 } else {

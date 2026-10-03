@@ -38,8 +38,8 @@ still change.
 
 - The zip reader no longer pre-allocates from the entry's declared size, and
   reads are capped. New `ZipLimits` (defaults: 10 000 entries, 256 MiB per
-  entry, 1 GiB total, compression ratio 1000 for entries > 1 MiB, 1024-byte
-  names) -> `PptError::LimitExceeded` (Python `PptZipError`). Absolute and `..`
+  entry, 1 GiB total, compression ratio 10 000 for entries > 1 MiB, 1024-byte
+  names) -> `PptError::LimitExceeded` (Python `PptZipError`). Absolute, drive-letter and `..`
   entry paths are rejected. Group-shape / `mc:AlternateContent` nesting deeper
   than 64 is skipped to avoid stack overflow. New `parse_bytes_with_limits` /
   `parse_path_with_limits`.

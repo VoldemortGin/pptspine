@@ -128,7 +128,7 @@ fn default_limits_values() {
     assert_eq!(d.max_entries, 10_000);
     assert_eq!(d.max_entry_bytes, 256 * 1024 * 1024);
     assert_eq!(d.max_total_bytes, 1024 * 1024 * 1024);
-    assert_eq!(d.max_compression_ratio, 1000);
+    assert_eq!(d.max_compression_ratio, 10_000);
     assert_eq!(d.max_name_len, 1024);
 }
 
@@ -175,6 +175,8 @@ fn parent_dir_and_absolute_paths_rejected() {
         "ppt/../../evil.xml",
         "ppt/a/../b.xml",
         "/abs.xml",
+        "C:\\x",
+        "C:/x",
     ] {
         let bytes = simple_with(&[(bad, b"x", CompressionMethod::Stored)]);
         match parse_bytes(&bytes) {
@@ -246,6 +248,18 @@ fn compression_ratio_bomb_rejected() {
 }
 
 #[test]
+fn real_4mib_zeros_pass_under_default_limits() {
+    // deflate 对零的比值约 1032:1,旧默认 1000 会误拒;默认 10 000 下应通过。
+    let zeros = vec![0u8; 4 * 1024 * 1024];
+    let bytes = simple_with(&[("ppt/media/zeros.bin", &zeros, CompressionMethod::Deflated)]);
+    let parsed = parse_bytes(&bytes).expect("legit solid-color media allowed");
+    assert_eq!(
+        parsed.media.get("zeros.bin").map(Vec::len),
+        Some(4 * 1024 * 1024)
+    );
+}
+
+#[test]
 fn compression_ratio_not_checked_for_small_entries() {
     // 512 KiB 零(压缩比远超 100,但未过 1 MiB 起判门槛)→ 不误伤。
     let limits = ZipLimits {
@@ -278,7 +292,8 @@ fn total_bytes_over_limit() {
         LimitKind::TotalBytes,
     );
     assert_eq!(limit, 1024 * 1024);
-    assert!(actual <= limit + 1, "read must stop right after the limit");
+    // 累计值:400K + 400K + 截断读取的 248K + 1 = max_total_bytes + 1。
+    assert_eq!(actual, limit + 1);
 }
 
 #[test]
