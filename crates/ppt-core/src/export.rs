@@ -418,6 +418,7 @@ mod tests {
             properties: Default::default(),
             first_slide_num: 1,
             diagnostics: Vec::new(),
+            report: Default::default(),
         }
     }
 
@@ -460,6 +461,7 @@ mod tests {
             properties: Default::default(),
             first_slide_num: 1,
             diagnostics: Vec::new(),
+            report: Default::default(),
         };
         let opts = ExportOptions {
             max_output_bytes: 30, // "--- slide 1 ---\n" 16 字节 + 7 个 é = 30
@@ -538,6 +540,7 @@ mod tests {
             properties: Default::default(),
             first_slide_num: 1,
             diagnostics: Vec::new(),
+            report: Default::default(),
         };
 
         let text = presentation_text(&pres);

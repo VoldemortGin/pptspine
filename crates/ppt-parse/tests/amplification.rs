@@ -149,7 +149,7 @@ fn smartart_fan_out_is_bounded_by_the_default_shape_budget() {
     assert_eq!(p.presentation.slides[0].shapes.len(), 150, "frame 不丢");
 }
 
-/// 图表:`ptCount` 填满 2 万点的图表 × 100 个 frame(200 万,超默认预算 100 万)。
+/// 图表:`ptCount` 填满 2 万点的图表 × 150 个 frame(300 万,超默认预算 200 万)。
 #[test]
 fn chart_fan_out_is_bounded_by_the_default_point_budget() {
     let limits = ZipLimits::default();
@@ -157,7 +157,7 @@ fn chart_fan_out_is_bounded_by_the_default_point_budget() {
         CHART,
         &format!(r#"<c:chart xmlns:c="{CHART}" r:id="rId1"/>"#),
     )
-    .repeat(100);
+    .repeat(150);
     let chart = format!(
         r#"<c:chartSpace xmlns:c="{CHART}"><c:chart><c:plotArea><c:barChart><c:ser><c:val><c:numLit><c:ptCount val="20000"/></c:numLit></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#
     );
@@ -180,7 +180,7 @@ fn chart_fan_out_is_bounded_by_the_default_point_budget() {
         })
         .sum();
     assert!(points <= limits.max_chart_points, "展开 {points} 点");
-    assert_eq!(points, 1_000_000);
+    assert_eq!(points, 2_000_000);
     assert_eq!(diag_total(&p, DiagnosticKind::ChartDegraded), 50);
 }
 
@@ -322,7 +322,8 @@ fn shape_flood_in_one_slide_is_bounded_by_the_default_part_budget() {
     assert_eq!(diag_at(&p, DiagnosticKind::ShapesTruncated, SLIDE1), 5_000);
 }
 
-/// 演示文稿级总预算:每页都在单部件预算之内,累计超过总预算后,后面的页被截空。
+/// 演示文稿级总预算:每页都在单部件预算之内,累计超过总预算。截断是公平的——每页保底
+/// `min(100, 总额 / 页数)` = 50 个,不是前两页完整、后两页为空。
 #[test]
 fn shape_flood_across_slides_is_bounded_by_the_total_budget() {
     let limits = ZipLimits {
@@ -338,7 +339,7 @@ fn shape_flood_across_slides_is_bounded_by_the_total_budget() {
         .iter()
         .map(|s| s.shapes.len())
         .collect();
-    assert_eq!(per_slide, [100, 100, 50, 0, 0]);
+    assert_eq!(per_slide, [50, 50, 50, 50, 50]);
     assert_eq!(per_slide.iter().sum::<usize>(), limits.max_total_shapes);
     let at = |i: usize| {
         diag_at(
@@ -347,7 +348,7 @@ fn shape_flood_across_slides_is_bounded_by_the_total_budget() {
             &format!("ppt/slides/slide{i}.xml"),
         )
     };
-    assert_eq!((at(1), at(2), at(3), at(4), at(5)), (0, 0, 50, 100, 100));
+    assert_eq!((at(1), at(2), at(3), at(4), at(5)), (50, 50, 50, 50, 50));
 }
 
 /// 组合里的后代同样计数:嵌套的形状洪水不能绕过预算。
@@ -524,7 +525,8 @@ fn table_flood_is_bounded_by_the_item_budget() {
     assert!(diag_at(&p, DiagnosticKind::ContentTruncated, SLIDE1) > 0);
 }
 
-/// 演示文稿级节点总预算:每页在单部件预算内,累计超出后后面的页被截。
+/// 演示文稿级节点总预算:每页在单部件预算内,累计超出。截断公平:每页保底
+/// `min(2000, 250 / 4)` = 62 个节点,首页多拿到余数。
 #[test]
 fn item_flood_across_slides_is_bounded_by_the_total_budget() {
     let limits = ZipLimits {
@@ -545,7 +547,7 @@ fn item_flood_across_slides_is_bounded_by_the_total_budget() {
             _ => 0,
         })
         .collect();
-    assert_eq!(per_slide, [100, 100, 50, 0]);
+    assert_eq!(per_slide, [64, 62, 62, 62]);
 }
 
 /// 默认预算下正常文档不受影响:几百个带文字的形状 + 一张表,没有任何截断诊断。

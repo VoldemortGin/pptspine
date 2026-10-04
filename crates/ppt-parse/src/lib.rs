@@ -139,25 +139,66 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
 
     // 每页一个 `Slide` 骨架总是保留(幻灯片数已受 `max_slides` 约束):先从模型字节预算里预留。
     pkg.reserve_model_bytes(ordered_parts.len() * std::mem::size_of::<Slide>());
+    // 截断公平性:后面每张幻灯片的保底额度先预留出来(见 `Package::plan_slides`)。
+    pkg.plan_slides(ordered_parts.len());
+
+    // 5) 先解析被所有幻灯片依赖的部件:layout -> master -> theme(按裸名去重,B-8/B-9)与表格样式。
+    //    它们在幻灯片之前解析,又只拿"预留完全部幻灯片保底之后"的额度——既不会被幻灯片饿死,
+    //    也不会把幻灯片饿死。
+    let layout_names: Vec<Option<String>> = ordered_parts
+        .iter()
+        .map(|part| pkg.layout_name_for(part))
+        .collect();
+    let mut inherit =
+        collect_inheritance(&pkg, &layout_names, meta.default_text_style, &media_index);
+    inherit.table_styles = collect_table_styles(&pkg, &pres_rels);
 
     let comment_authors = collect_comment_authors(&pkg, &pres_rels);
     let mut comment_cache = CommentCache::new(limits);
+    let mut chart_cache = charts::ChartCache::new(limits);
+    let mut diagram_cache = diagrams::DiagramCache::new(limits);
+    let part_index: BTreeMap<String, usize> = ordered_parts
+        .iter()
+        .enumerate()
+        .map(|(i, part)| (part.clone(), i))
+        .collect();
 
-    // 5) 逐张解析 slide(`slide_parts[i]` = `slides[i]` 的部件路径与 rels,供链接后处理)。
+    // 6) 逐张解析 slide,连同它自己的附属部件(超链接回填、图表、SmartArt、备注、批注)一起,
+    //    在"为后面的幻灯片预留保底"之后的额度内完成。
     let mut slides = Vec::with_capacity(ordered_parts.len());
-    let mut slide_parts: Vec<(&str, BTreeMap<String, xml::Relationship>)> = Vec::new();
     for (index, part) in ordered_parts.iter().enumerate() {
+        pkg.set_pending(ordered_parts.len() - index - 1);
         let Some(slide_xml) = pkg.part_str(part) else {
             continue;
         };
         let rels_xml = pkg.slide_rels_str(part);
         let data = parse_shape_part(&pkg, part, &slide_xml, rels_xml.as_deref(), &media_index);
-        slide_parts.push((
-            part.as_str(),
-            rels_xml.as_deref().map(xml::parse_rels).unwrap_or_default(),
-        ));
+        let rels = rels_xml.as_deref().map(xml::parse_rels).unwrap_or_default();
+        let mut shapes = data.shapes;
 
-        let layout_name = pkg.layout_name_for(part);
+        // 超链接:外链目标 + 内部跳转目标序号(需全量"部件 → 序号"映射);图表占位经 rels 读
+        // 图表部件回填缓存数据;SmartArt 展开(在超链接之后:drawing 里的关系属于 drawing 部件)。
+        let ctx = links::LinkCtx {
+            rels: &rels,
+            part,
+            part_index: &part_index,
+            current: index,
+            count: ordered_parts.len(),
+            pkg: &pkg,
+            urls: Default::default(),
+        };
+        links::resolve_links(&mut shapes, &ctx);
+        charts::resolve_charts(&mut shapes, &rels, part, &pkg, &mut chart_cache);
+        diagrams::resolve_diagrams(
+            &mut shapes,
+            &rels,
+            part,
+            &pkg,
+            &media_index,
+            &mut diagram_cache,
+        );
+
+        let layout_name = layout_names[index].clone();
         let master_name = layout_name
             .as_deref()
             .and_then(|ln| pkg.master_name_for_layout(ln));
@@ -174,7 +215,7 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
 
         slides.push(Slide {
             index,
-            shapes: data.shapes,
+            shapes,
             layout_name,
             master_name,
             notes,
@@ -191,47 +232,12 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
             ),
         });
     }
-
-    // 5b) 超链接后处理:外链目标 + 内部跳转目标序号(需全量"部件 → 序号"映射);
-    //     图表占位经 rels 读图表部件回填缓存数据。
-    let part_index: BTreeMap<String, usize> = slide_parts
-        .iter()
-        .enumerate()
-        .map(|(i, (part, _))| ((*part).to_string(), i))
-        .collect();
-    let count = slides.len();
-    let mut chart_cache = charts::ChartCache::new(limits);
-    let mut diagram_cache = diagrams::DiagramCache::new(limits);
-    for (i, (slide, (part, rels))) in slides.iter_mut().zip(&slide_parts).enumerate() {
-        let ctx = links::LinkCtx {
-            rels,
-            part,
-            part_index: &part_index,
-            current: i,
-            count,
-            pkg: &pkg,
-            urls: Default::default(),
-        };
-        links::resolve_links(&mut slide.shapes, &ctx);
-        charts::resolve_charts(&mut slide.shapes, rels, part, &pkg, &mut chart_cache);
-        diagrams::resolve_diagrams(
-            &mut slide.shapes,
-            rels,
-            part,
-            &pkg,
-            &media_index,
-            &mut diagram_cache,
-        );
-    }
+    pkg.set_pending(0);
 
     if slides.is_empty() && !ordered_parts.is_empty() {
         // 有 slide 部件却一张都没解析成功 —— 视为结构异常。
         return Err(PptError::Xml("no slides could be parsed".into()));
     }
-
-    // 6) 继承链部件:slide 引用的 layout -> master -> theme(按裸名去重,B-8/B-9)。
-    let mut inherit = collect_inheritance(&pkg, &slides, meta.default_text_style, &media_index);
-    inherit.table_styles = collect_table_styles(&pkg, &pres_rels);
 
     // 7) 节(`sldId@id` → 幻灯片序号)与文档属性。
     let sections = resolve_sections(&meta.sections, &meta.slide_ids, &part_index);
@@ -245,6 +251,7 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
             properties,
             first_slide_num: meta.first_slide_num.unwrap_or(1),
             diagnostics: pkg.take_diagnostics(),
+            report: pkg.report(),
         },
         media,
         inherit,
@@ -285,10 +292,10 @@ pub(crate) fn parse_shape_part(
     data
 }
 
-/// 解析各 slide 引用到的 layout / master / theme 部件(去重;容错:缺失部件跳过)。
+/// 解析各 slide 引用到的 layout / master / theme 部件(按幻灯片顺序去重;容错:缺失部件跳过)。
 fn collect_inheritance(
     pkg: &Package,
-    slides: &[Slide],
+    layout_names: &[Option<String>],
     default_text_style: Option<TextStyleLevels>,
     media_index: &BTreeMap<String, usize>,
 ) -> InheritanceParts {
@@ -297,8 +304,8 @@ fn collect_inheritance(
         ..InheritanceParts::default()
     };
 
-    for slide in slides {
-        let Some(layout_name) = slide.layout_name.as_deref() else {
+    for layout_name in layout_names {
+        let Some(layout_name) = layout_name.as_deref() else {
             continue;
         };
         if !inherit.layouts.contains_key(layout_name) {

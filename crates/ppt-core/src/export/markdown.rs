@@ -441,6 +441,7 @@ mod tests {
             properties: Default::default(),
             first_slide_num: 1,
             diagnostics: Vec::new(),
+            report: Default::default(),
         }
     }
 

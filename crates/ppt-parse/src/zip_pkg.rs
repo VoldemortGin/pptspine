@@ -53,8 +53,9 @@ pub struct ZipLimits {
     pub max_diagram_text_bytes: usize,
     /// 整个演示文稿里图表数据点总数上限(类别数 + 各系列点数,每个引用图表的 frame 记一次)。
     ///
-    /// 默认 1 000 000:现实图表几十到几千个点,百张图表也远低于 10 万;每点按 Rust 侧
-    /// 约 40 B(值 + 类别字符串)估算,封在约 40 MB。超出后该 frame 的图表降级为占位框并记
+    /// 默认 2 000 000:合法基准"100 页 × 每页 20 张中等图表(4 系列 × 50 点)"实测 50 万点,取其
+    /// 4 倍。图表数据本身各 frame 共享(模型字节只扣一次),这个按 frame 计的上限是第二道闸,
+    /// 约束的是导出 / 渲染按 frame 的展开量。超出后该 frame 的图表降级为占位框并记
     /// `chart-degraded` 诊断。
     pub max_chart_points: usize,
     /// 整个演示文稿里批注总条数上限(含回复;跨幻灯片累计,多张幻灯片共享同一批注部件时每张各
@@ -79,9 +80,9 @@ pub struct ZipLimits {
     /// **解析时**整个演示文稿累计解析的形状元素数(跨所有 slide / layout / master / SmartArt drawing,
     /// 每个部件只记一次)。
     ///
-    /// 默认 200 000:5 000 页(默认页数上限)× 每页 40 个形状恰为此数,已高于现实;按每个形状
-    /// (含堆上字符串)约 1 KB 估算,把形状模型的最坏内存封在约 200 MB。超出后后续部件(或当前
-    /// 部件剩余部分)的形状被丢弃,记 `shapes-truncated` 诊断。
+    /// 默认 1 000 000:合法基准"2 000 页 × 每页 100 个文本框"实测 20 万,取其 5 倍——这是防病态
+    /// 输入的第二道闸,不应被合法大文稿碰到;内存上界由 `max_model_bytes` 负责。超出后的形状被
+    /// 丢弃,记 `shapes-truncated` 诊断;截断按页公平分摊(见 [`ZipLimits::max_model_bytes`])。
     pub max_total_shapes: usize,
     /// **解析时**单个形部件最多建模的文本 / 表格节点数:段落、run、表格行、单元格、网格列、
     /// 渐变停靠点、颜色变换、形状调节值各记 1。
@@ -92,8 +93,8 @@ pub struct ZipLimits {
     pub max_part_items: usize,
     /// **解析时**整个演示文稿累计建模的文本 / 表格节点数(口径同 `max_part_items`,每个部件只记一次)。
     ///
-    /// 默认 1 000 000:5 000 页 × 每页 200 个节点恰为此数;按平均约 400 B 估算,封在约 400 MB。
-    /// 超出后的节点被丢弃,记 `content-truncated` 诊断。
+    /// 默认 8 000 000:合法基准"500 页 × 每页 50 × 20 表格"实测 153.6 万,取其 5 倍(第二道闸,
+    /// 内存上界由 `max_model_bytes` 负责)。超出后的节点被丢弃,记 `content-truncated` 诊断。
     pub max_total_items: usize,
     /// **模型字节预算**:整个演示文稿解析出的模型(形状 / 节点 / 字符串 / 批注 / 图表 / SmartArt
     /// 展开副本,含 layout / master / 主题 / 表格样式 / 备注)按估算字节累计的上限。
@@ -105,6 +106,16 @@ pub struct ZipLimits {
     /// 耗尽后按"提前停止"约定丢弃后续内容,记 `content-truncated` / `value-truncated` /
     /// `chart-degraded` / `smartart-degraded` 诊断。个数预算(`max_*_shapes` / `max_*_items` 等)
     /// 保留为第二道闸。
+    ///
+    /// 默认 2 GiB:合法基准里最大的"500 页 × 每页 50 × 20 表格"实测记账 0.76 GB(进程 RSS 约
+    /// 1.5 GB),取约 2.8 倍;对不可信输入,这就是"输入多小都行,模型内存有明确上界"的那个上界
+    /// (需要更紧时调小)。
+    ///
+    /// **截断公平性**(三种全文稿预算同一策略):先解析被所有幻灯片依赖的部件(母版 / 版式 / 主题 /
+    /// 表格样式),再逐页解析;解析任何部件之前都先为"还没解析的幻灯片"每页预留保底额度
+    /// `min(常量, 剩余额度 / 页数)`(节点 2 000、形状 100、模型字节 2 MiB),所以预算耗尽时表现为
+    /// "每页的长尾被截",而不是"后半本书消失"。每张被截断的部件都列在
+    /// `Presentation.report.truncated_parts`(不受诊断条目上限影响)。
     pub max_model_bytes: usize,
 }
 
@@ -122,13 +133,13 @@ impl Default for ZipLimits {
             max_slides: 5_000,
             max_diagram_shapes: 100_000,
             max_diagram_text_bytes: 8 * 1024 * 1024,
-            max_chart_points: 1_000_000,
+            max_chart_points: 2_000_000,
             max_comments: 100_000,
             max_part_shapes: 20_000,
-            max_total_shapes: 200_000,
+            max_total_shapes: 1_000_000,
             max_part_items: 200_000,
-            max_total_items: 1_000_000,
-            max_model_bytes: 1024 * 1024 * 1024,
+            max_total_items: 8_000_000,
+            max_model_bytes: 2 * 1024 * 1024 * 1024,
         }
     }
 }
@@ -187,8 +198,39 @@ pub struct Package {
     /// 解析诊断收集器(见 [`Package::note`])。解析是单线程且部件读取全经 `&Package`,
     /// 用内部可变性收集,免得每个 walker / 后处理都要传 `&mut`。
     diag: RefCell<DiagState>,
-    /// 解析时的形状 / 节点预算(单部件上限 + 演示文稿级剩余额度,见 [`Package::part_budget`])。
+    /// 解析时的形状 / 节点 / 模型字节预算(单部件上限 + 演示文稿级剩余额度,见 [`Package::budgeted`])。
     budget: Cell<ParseBudget>,
+    /// 解析开始时的演示文稿级额度(结束时算用量)。
+    initial: ParseBudget,
+    /// 截断公平性:还没解析的幻灯片数 × 每页保底额度,从当前可用额度里预留(见 [`Package::plan_slides`])。
+    fair: Cell<Fairness>,
+    /// 内容丢失汇总(不受诊断条目上限影响)。
+    report: RefCell<ReportState>,
+}
+
+/// 每张幻灯片的保底额度上限:节点数。合法的一页至多几千个节点;2 000 个足以保住标题与正文主体。
+const SLIDE_FLOOR_ITEMS: usize = 2_000;
+/// 每张幻灯片的保底额度上限:形状数(一页前 100 个形状)。
+const SLIDE_FLOOR_SHAPES: usize = 100;
+/// 每张幻灯片的保底额度上限:模型字节(2 MiB,约 1 500 个带文字的表格单元格)。
+const SLIDE_FLOOR_BYTES: usize = 2 * 1024 * 1024;
+
+/// 截断公平性状态:每页保底额度 + 还在排队的幻灯片数。
+#[derive(Clone, Copy, Default)]
+struct Fairness {
+    pending: usize,
+    items: usize,
+    shapes: usize,
+    bytes: usize,
+}
+
+/// 内容丢失汇总的累计状态。
+#[derive(Default)]
+struct ReportState {
+    parts: BTreeSet<String>,
+    dropped_shapes: usize,
+    dropped_items: usize,
+    truncated_values: usize,
 }
 
 /// 解析时预算的当前状态。
@@ -315,6 +357,13 @@ impl Package {
             total += actual;
             parts.insert(name, buf);
         }
+        let initial = ParseBudget {
+            part_shapes: limits.max_part_shapes,
+            shapes_left: limits.max_total_shapes,
+            part_items: limits.max_part_items,
+            items_left: limits.max_total_items,
+            bytes_left: limits.max_model_bytes,
+        };
         let main_part = locate_main_part(&parts);
         let root = main_part
             .rsplit_once('/')
@@ -324,13 +373,10 @@ impl Package {
             main_part,
             root,
             diag: RefCell::default(),
-            budget: Cell::new(ParseBudget {
-                part_shapes: limits.max_part_shapes,
-                shapes_left: limits.max_total_shapes,
-                part_items: limits.max_part_items,
-                items_left: limits.max_total_items,
-                bytes_left: limits.max_model_bytes,
-            }),
+            budget: Cell::new(initial),
+            initial,
+            fair: Cell::new(Fairness::default()),
+            report: RefCell::default(),
         })
     }
 
@@ -346,6 +392,24 @@ impl Package {
         } else {
             ""
         };
+        if kind.is_content_loss() {
+            let mut r = self.report.borrow_mut();
+            if !part.is_empty() && !r.parts.contains(part) {
+                r.parts.insert(part.to_string());
+            }
+            match kind {
+                DiagnosticKind::ShapesTruncated => {
+                    r.dropped_shapes = r.dropped_shapes.saturating_add(count);
+                }
+                DiagnosticKind::ContentTruncated => {
+                    r.dropped_items = r.dropped_items.saturating_add(count);
+                }
+                DiagnosticKind::ValueTruncated => {
+                    r.truncated_values = r.truncated_values.saturating_add(count);
+                }
+                _ => {}
+            }
+        }
         let mut st = self.diag.borrow_mut();
         let mut key = (kind, part.to_string());
         if !st.index.contains_key(&key) && !part.is_empty() && st.list.len() >= MAX_DIAGNOSTICS {
@@ -370,10 +434,22 @@ impl Package {
     /// 结束后把实际用量从演示文稿级额度里扣掉,并把被丢弃的节点 / 被截短的值记成
     /// `content-truncated` / `value-truncated` 诊断(`part` = 本部件)。所有部件(形部件、备注、
     /// 主题、表格样式、批注、SmartArt data、图表)都经这里——同一套预算、同一套诊断。
+    ///
+    /// 截断公平性:可用额度先扣掉"还没解析的幻灯片数 × 每页保底额度"(见 [`Self::plan_slides`]),
+    /// 所以前面的部件再大也不会把后面的幻灯片饿成空页。
     pub(crate) fn budgeted<T>(&self, part: &str, f: impl FnOnce(usize) -> T) -> T {
         let b = self.budget.get();
-        let saved = crate::xml::budget::begin(b.part_items.min(b.items_left), b.bytes_left);
-        let out = f(b.part_shapes.min(b.shapes_left));
+        let fair = self.fair.get();
+        let reserve = |floor: usize| fair.pending.saturating_mul(floor);
+        let items = b
+            .part_items
+            .min(b.items_left.saturating_sub(reserve(fair.items)));
+        let bytes = b.bytes_left.saturating_sub(reserve(fair.bytes));
+        let shapes = b
+            .part_shapes
+            .min(b.shapes_left.saturating_sub(reserve(fair.shapes)));
+        let saved = crate::xml::budget::begin(items, bytes);
+        let out = f(shapes);
         let usage = crate::xml::budget::end(saved);
         let mut b = self.budget.get();
         b.items_left = b.items_left.saturating_sub(usage.items_used);
@@ -403,14 +479,54 @@ impl Package {
     }
 
     /// 直接从模型字节预算里申请 `bytes`(解析之后的克隆 / 共享值首次创建用):不够返回 `false`(不扣)。
+    /// 同样先为还没解析的幻灯片预留保底额度。
     pub(crate) fn take_model_bytes(&self, bytes: usize) -> bool {
         let mut b = self.budget.get();
-        if b.bytes_left < bytes {
+        let fair = self.fair.get();
+        let reserve = fair.pending.saturating_mul(fair.bytes);
+        if b.bytes_left.saturating_sub(reserve) < bytes {
             return false;
         }
         b.bytes_left -= bytes;
         self.budget.set(b);
         true
+    }
+
+    /// 截断公平性:演示文稿有 `n` 张幻灯片。每页保底额度 = `min(常量上限, 当前剩余额度 / n)`
+    /// (节点 / 形状 / 模型字节各算一份);之后 [`Self::set_pending`] 声明还有几张没解析,
+    /// [`Self::budgeted`] 先为它们预留保底。于是全文稿预算耗尽时表现为"每页的长尾被截",
+    /// 而不是"后半本书消失"。
+    pub(crate) fn plan_slides(&self, n: usize) {
+        let b = self.budget.get();
+        let per = |left: usize, cap: usize| left.checked_div(n).map_or(0, |v| cap.min(v));
+        self.fair.set(Fairness {
+            pending: n,
+            items: per(b.items_left, SLIDE_FLOOR_ITEMS),
+            shapes: per(b.shapes_left, SLIDE_FLOOR_SHAPES),
+            bytes: per(b.bytes_left, SLIDE_FLOOR_BYTES),
+        });
+    }
+
+    /// 声明还有 `pending` 张幻灯片没有解析(它们的保底额度从可用额度里预留)。
+    pub(crate) fn set_pending(&self, pending: usize) {
+        let mut f = self.fair.get();
+        f.pending = pending;
+        self.fair.set(f);
+    }
+
+    /// 解析预算用量与截断汇总。
+    pub(crate) fn report(&self) -> ppt_core::model::ParseReport {
+        let (i, b) = (self.initial, self.budget.get());
+        let r = self.report.borrow();
+        ppt_core::model::ParseReport {
+            truncated_parts: r.parts.iter().cloned().collect(),
+            dropped_shapes: r.dropped_shapes,
+            dropped_items: r.dropped_items,
+            truncated_values: r.truncated_values,
+            shapes_used: i.shapes_left - b.shapes_left,
+            items_used: i.items_left - b.items_left,
+            model_bytes: i.bytes_left - b.bytes_left,
+        }
     }
 
     /// 取走已收集的全部诊断(按首次出现顺序)。

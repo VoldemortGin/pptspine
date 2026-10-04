@@ -94,3 +94,21 @@ def test_pdf_render_budget_warns():
         full = pres.to_pdf()
     assert not any("render-budget" in str(x.message) for x in w)
     assert len(small) < len(full)
+
+
+def test_truncated_flag_and_parse_report():
+    one = "<a:p><a:r><a:t>x</a:t></a:r></a:p>"
+    clean = pptspine.open_bytes(build_pptx([SlideSpec(_text_box(one))]))
+    assert clean.truncated is False
+    r = clean.parse_report()
+    assert r["truncated"] is False and r["truncated_parts"] == []
+    assert r["items_used"] == 2 and r["shapes_used"] == 1 and r["model_bytes"] > 0
+
+    tight = pptspine.open_bytes(
+        build_pptx([SlideSpec(_text_box(one * 50)) for _ in range(3)]), max_part_items=10
+    )
+    assert tight.truncated is True
+    r = tight.parse_report()
+    assert r["truncated_parts"] == [f"ppt/slides/slide{i}.xml" for i in (1, 2, 3)]
+    # 每页 50 段 × (段 + run) = 100 个节点,保留 10 个;被跳过段落里的 run 也计入。
+    assert r["dropped_items"] == 3 * 90

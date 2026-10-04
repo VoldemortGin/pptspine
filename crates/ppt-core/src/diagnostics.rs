@@ -36,12 +36,14 @@ pub enum DiagnosticKind {
     CommentsTruncated,
     /// 单个部件的形状数超过 `ZipLimits::max_part_shapes`,或整个演示文稿累计超过
     /// `ZipLimits::max_total_shapes`:该部件的形状解析提前停止(已解析的保留),其余形状被丢弃。
-    /// `part` = 被截断的部件,`count` = 被丢弃的形状元素数(组合内被整体跳过的后代不另计)。
+    /// `part` = 被截断的部件,`count` = 被丢弃的形状元素数(含被整体跳过的组合的全部后代形状;
+    /// 这些形状里的文字节点另计入 `ContentTruncated`)。
     ShapesTruncated,
     /// 单个部件的文本 / 表格节点(段落、run、表格行 / 单元格 / 网格列、渐变停靠点、颜色变换、
     /// 形状调节值)超过 `ZipLimits::max_part_items`,或整个演示文稿累计超过
-    /// `ZipLimits::max_total_items`:超出的节点被丢弃。`part` = 被截断的部件,`count` = 被丢弃
-    /// 的节点数。
+    /// `ZipLimits::max_total_items`,或模型字节预算 `ZipLimits::max_model_bytes` 耗尽:超出的节点被
+    /// 丢弃。`part` = 被截断的部件,`count` = 被丢弃的节点数(含被整体跳过的行 / 单元格 / 段落 / 形状
+    /// 里的全部后代节点,即实际丢失的内容量)。
     ContentTruncated,
     /// 单个字符串值超过长度上限(属性值 64 KiB、文本节点 1 MiB、批注作者 / 图表类别名等短标签
     /// 4 KiB、超链接目标 16 KiB、公式定界符 / 运算符 2 个字符),或模型字节预算
@@ -51,6 +53,22 @@ pub enum DiagnosticKind {
 }
 
 impl DiagnosticKind {
+    /// 是否"内容丢失"类诊断(计入 [`crate::model::ParseReport::truncated_parts`])。
+    #[must_use]
+    pub const fn is_content_loss(self) -> bool {
+        matches!(
+            self,
+            DiagnosticKind::XmlTruncated
+                | DiagnosticKind::NestingTooDeep
+                | DiagnosticKind::ShapesTruncated
+                | DiagnosticKind::ContentTruncated
+                | DiagnosticKind::ValueTruncated
+                | DiagnosticKind::CommentsTruncated
+                | DiagnosticKind::ChartDegraded
+                | DiagnosticKind::SmartArtDegraded
+        )
+    }
+
     /// 稳定的 kebab-case 标识(Python 侧 `kind` 字段)。
     #[must_use]
     pub const fn code(self) -> &'static str {

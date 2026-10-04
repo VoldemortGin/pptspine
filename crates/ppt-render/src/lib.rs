@@ -34,14 +34,14 @@ use transform::{group_transform, Flatten, GroupTransform};
 
 /// 单页渲染 op 预算的缺省值(按 [`op_weight`] 计)。
 ///
-/// 合法大页的实测需求:50 × 20 的表格一页约 1.1 万(每格填充 / 边线 / 文字),100 个文本框一页
-/// 约 300;20 万留足一个数量级以上余量,又把一页的 op 内存封在数十 MB。
-pub const DEFAULT_MAX_PAGE_OPS: usize = 200_000;
+/// 合法大页实测:标题 + 50 × 20 表格一页 4 301,100 个文本框一页 100;10 万是前者的 23 倍,
+/// 又把一页的 op 内存封在十 MB 量级。
+pub const DEFAULT_MAX_PAGE_OPS: usize = 100_000;
 /// 整份文稿渲染 op 预算的缺省值(按 [`op_weight`] 计)。
 ///
-/// 合法大文稿实测:500 页 × 50 × 20 表格约 560 万,2 000 页 × 100 个形状约 60 万;取前者约 2 倍。
-/// 每个 op 在引擎里几十到上百字节、序列化后约 20–60 字节,把 op 内存与 PDF 大小封在 GB 以内。
-pub const DEFAULT_MAX_TOTAL_OPS: usize = 12_000_000;
+/// 合法大文稿实测:500 页 × 50 × 20 表格约 215 万,2 000 页 × 100 个文本框约 20 万;取前者
+/// 约 4.6 倍。每个 op 在引擎里几十到上百字节,把 op 内存封在 GB 以内。
+pub const DEFAULT_MAX_TOTAL_OPS: usize = 10_000_000;
 
 /// 渲染选项(PRD §5:`font_map` 覆盖喂给 TS-2 字体解析器)。
 #[derive(Debug, Clone)]

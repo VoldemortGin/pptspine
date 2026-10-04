@@ -26,8 +26,8 @@ pub use export::{
 pub use geom::{emu_to_points, Emu, Point, Rect, EMU_PER_INCH, EMU_PER_POINT};
 pub use model::{
     AutoShape, BlipFill, Cell, Chart, ChartKind, ChartSeries, Color, DocProperties, Fill,
-    GroupShape, Hyperlink, Paragraph, Picture, Presentation, RelRect, Row, Section, Shape, Slide,
-    Table, TextFrame, TextRun, Xfrm,
+    GroupShape, Hyperlink, Paragraph, ParseReport, Picture, Presentation, RelRect, Row, Section,
+    Shape, Slide, Table, TextFrame, TextRun, Xfrm,
 };
 pub use resolved::{ResolvedPresentation, ResolvedShape, ResolvedSlide};
 pub use style::{

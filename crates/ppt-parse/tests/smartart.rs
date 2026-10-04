@@ -363,15 +363,16 @@ fn defaults_for_expansion_budgets() {
     let d = ZipLimits::default();
     assert_eq!(d.max_diagram_shapes, 100_000);
     assert_eq!(d.max_diagram_text_bytes, 8 * 1024 * 1024);
-    assert_eq!(d.max_chart_points, 1_000_000);
+    assert_eq!(d.max_chart_points, 2_000_000);
 }
 
 /// 解析时预算的缺省值(单部件 < 总量;封住最坏内存的依据见 `ZipLimits` 文档)。
 #[test]
 fn defaults_for_parse_time_budgets() {
     let d = ZipLimits::default();
-    assert_eq!((d.max_part_shapes, d.max_total_shapes), (20_000, 200_000));
-    assert_eq!((d.max_part_items, d.max_total_items), (200_000, 1_000_000));
+    assert_eq!((d.max_part_shapes, d.max_total_shapes), (20_000, 1_000_000));
+    assert_eq!((d.max_part_items, d.max_total_items), (200_000, 8_000_000));
+    assert_eq!(d.max_model_bytes, 2 * 1024 * 1024 * 1024);
     assert!(d.max_part_shapes < d.max_total_shapes);
     assert!(d.max_part_items < d.max_total_items);
 }

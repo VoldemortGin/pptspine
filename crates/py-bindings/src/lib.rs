@@ -767,6 +767,30 @@ impl PyPresentation {
             .collect()
     }
 
+    /// 解析结果是否不完整(有任何部件因预算 / 损坏丢失了内容)。`to_text()` / `to_markdown()`
+    /// 的调用方据此一眼判断"这份输出不完整",不必遍历 `diagnostics()`。
+    #[getter]
+    fn truncated(&self) -> bool {
+        self.inner.report.truncated()
+    }
+
+    /// 解析预算用量与截断汇总:`truncated` / `truncated_parts`(每个丢失内容的部件,不受诊断
+    /// 条目上限影响)/ `dropped_shapes` / `dropped_items`(含被整体跳过容器的后代)/
+    /// `truncated_values` / `shapes_used` / `items_used` / `model_bytes`。
+    fn parse_report<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let r = &self.inner.report;
+        let d = PyDict::new(py);
+        d.set_item("truncated", r.truncated())?;
+        d.set_item("truncated_parts", &r.truncated_parts)?;
+        d.set_item("dropped_shapes", r.dropped_shapes)?;
+        d.set_item("dropped_items", r.dropped_items)?;
+        d.set_item("truncated_values", r.truncated_values)?;
+        d.set_item("shapes_used", r.shapes_used)?;
+        d.set_item("items_used", r.items_used)?;
+        d.set_item("model_bytes", r.model_bytes)?;
+        Ok(d)
+    }
+
     /// 文档属性(`docProps/core.xml` + `app.xml`):固定键 dict,缺失值为 `None`。
     fn core_properties<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let p = &self.inner.properties;
@@ -799,7 +823,7 @@ impl PyPresentation {
     /// 文件路径或替代族名,叠加在内置替换表之上。降级(字体替换 / 预设退化 / 图片
     /// 丢弃等)以 `warnings.warn` 逐种类上浮一次。隐藏页缺省不导出(与 PowerPoint 一致),
     /// `include_hidden=True` 纳入。
-    /// `max_page_ops` / `max_total_ops` 是单页 / 全文的渲染 op 预算(缺省 20 万 / 1 200 万),
+    /// `max_page_ops` / `max_total_ops` 是单页 / 全文的渲染 op 预算(缺省 10 万 / 1 000 万),
     /// 超出后后续形状不再绘制并告警(`render-budget`)。
     #[pyo3(signature = (*, font_map=None, include_hidden=false, max_page_ops=None, max_total_ops=None))]
     fn to_pdf<'py>(

@@ -32,6 +32,40 @@ pub struct Presentation {
     /// 解析诊断:内容被静默丢失 / 降级的结构化事实(截断、嵌套超限、重复引用、缺失部件、
     /// SmartArt / 图表降级);完全正常的文件为空。只含种类 / 部件路径 / 计数,不含正文。
     pub diagnostics: Vec<Diagnostic>,
+    /// 解析预算用量与截断汇总:调用方不必遍历诊断就能知道"这份结果不完整"(见 [`ParseReport`])。
+    pub report: ParseReport,
+}
+
+/// 解析预算用量与截断汇总。
+///
+/// `truncated_parts` 不受诊断条目上限(10 000)影响:每个有内容丢失类诊断(`xml-truncated` /
+/// `nesting-too-deep` / `shapes-truncated` / `content-truncated` / `value-truncated` /
+/// `comments-truncated` / `chart-degraded` / `smartart-degraded`)的包内部件都在其中(去重、
+/// 按路径排序;至多包内部件数)。丢弃计数是这些诊断 `count` 的合计,含被整体跳过的容器的后代。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ParseReport {
+    /// 有内容丢失的部件(排序、去重)。
+    pub truncated_parts: Vec<String>,
+    /// 被丢弃的形状元素数(`shapes-truncated` 合计,含被跳过组合的后代)。
+    pub dropped_shapes: usize,
+    /// 被丢弃的文本 / 表格节点数(`content-truncated` 合计,含被跳过容器的后代)。
+    pub dropped_items: usize,
+    /// 被截短的字符串值个数(`value-truncated` 合计)。
+    pub truncated_values: usize,
+    /// 实际解析的形状元素数(全部部件)。
+    pub shapes_used: usize,
+    /// 实际建模的文本 / 表格节点数(全部部件)。
+    pub items_used: usize,
+    /// 实际扣减的模型字节数(解析侧记账口径,见 `ZipLimits::max_model_bytes`)。
+    pub model_bytes: usize,
+}
+
+impl ParseReport {
+    /// 结果是否不完整(有任何部件丢失了内容)。
+    #[must_use]
+    pub fn truncated(&self) -> bool {
+        !self.truncated_parts.is_empty()
+    }
 }
 
 /// 一个节(`p14:section`):名字 + 所含幻灯片的零基序号(按节内顺序)。
