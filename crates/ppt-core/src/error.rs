@@ -75,6 +75,8 @@ pub enum LimitKind {
     CompressionRatio,
     /// 条目名字节长度。
     NameLength,
+    /// 幻灯片总数(去重后的 `p:sldIdLst` 引用数)。
+    Slides,
 }
 
 impl LimitKind {
@@ -86,6 +88,7 @@ impl LimitKind {
             LimitKind::TotalBytes => "total-bytes",
             LimitKind::CompressionRatio => "compression-ratio",
             LimitKind::NameLength => "name-length",
+            LimitKind::Slides => "slides",
         }
     }
 }

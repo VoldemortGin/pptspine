@@ -130,6 +130,7 @@ fn default_limits_values() {
     assert_eq!(d.max_total_bytes, 1024 * 1024 * 1024);
     assert_eq!(d.max_compression_ratio, 10_000);
     assert_eq!(d.max_name_len, 1024);
+    assert_eq!(d.max_slides, 5_000);
 }
 
 #[test]
@@ -348,4 +349,102 @@ fn deep_group_nesting_is_truncated_not_overflowed() {
     let parsed = parse_bytes(&bytes).expect("parse");
     let shapes = &parsed.presentation.slides[0].shapes;
     assert_eq!(group_chain_depth(shapes), 64);
+}
+
+// ---------------------------------------------------------------- 重复引用放大 / 幻灯片总数上限
+
+/// 合成一个多 slide 的 pptx:`slides[i]` 是第 i 个部件 `slideN.xml` 的文字;`refs` 是
+/// `p:sldIdLst` 里按顺序引用的部件序号(可重复),每个引用用独立的 `rIdK`。
+fn deck(slide_texts: &[&str], refs: &[usize]) -> Vec<u8> {
+    let ids: String = refs
+        .iter()
+        .enumerate()
+        .map(|(k, _)| format!(r#"<p:sldId id="{}" r:id="rId{}"/>"#, 256 + k, k + 1))
+        .collect();
+    let pres = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:presentation xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+                xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+  <p:sldIdLst>{ids}</p:sldIdLst><p:sldSz cx="9144000" cy="6858000"/>
+</p:presentation>"#
+    );
+    let rel_entries: String = refs
+        .iter()
+        .enumerate()
+        .map(|(k, n)| {
+            format!(
+                r#"<Relationship Id="rId{}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide{}.xml"/>"#,
+                k + 1,
+                n + 1
+            )
+        })
+        .collect();
+    let rels = format!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{rel_entries}</Relationships>"#
+    );
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut zip = ZipWriter::new(&mut buf);
+        let opts = SimpleFileOptions::default();
+        let mut put = |name: &str, body: &str| {
+            zip.start_file(name, opts).expect("start_file");
+            zip.write_all(body.as_bytes()).expect("write");
+        };
+        put("ppt/presentation.xml", &pres);
+        put("ppt/_rels/presentation.xml.rels", &rels);
+        for (i, text) in slide_texts.iter().enumerate() {
+            let sp = format!(
+                r#"<p:sp><p:txBody><a:p><a:r><a:t>{text}</a:t></a:r></a:p></p:txBody></p:sp>"#
+            );
+            put(
+                &format!("ppt/slides/slide{}.xml", i + 1),
+                &slide_with_sp_tree(&sp),
+            );
+        }
+        zip.finish().expect("finish zip");
+    }
+    buf.into_inner()
+}
+
+fn slide_text(parsed: &ppt_parse::ParsedPptx, i: usize) -> String {
+    let Shape::TextBox(tf) = &parsed.presentation.slides[i].shapes[0] else {
+        panic!("expected a text box");
+    };
+    tf.paragraphs[0].runs[0].text.clone()
+}
+
+/// 同一张幻灯片在 `p:sldIdLst` 里被引用 1000 次:只解析并保存一份。
+#[test]
+fn slide_referenced_1000_times_is_parsed_once() {
+    let parsed = parse_bytes(&deck(&["only"], &[0; 1000])).expect("parse");
+    assert_eq!(parsed.presentation.slides.len(), 1);
+    assert_eq!(slide_text(&parsed, 0), "only");
+}
+
+/// 重复引用只保留首次出现,保持顺序:A B A C B -> A B C。
+#[test]
+fn duplicate_slide_refs_keep_first_occurrence_order() {
+    let parsed = parse_bytes(&deck(&["A", "B", "C"], &[0, 1, 0, 2, 1])).expect("parse");
+    let texts: Vec<_> = (0..parsed.presentation.slides.len())
+        .map(|i| slide_text(&parsed, i))
+        .collect();
+    assert_eq!(texts, ["A", "B", "C"]);
+}
+
+/// 幻灯片总数超过 `max_slides` 返回类型化错误(不 panic);恰等于上限则通过。
+#[test]
+fn slide_count_over_limit_is_typed_error() {
+    let bytes = deck(&["a", "b", "c", "d"], &[0, 1, 2, 3]);
+    let tight = ZipLimits {
+        max_slides: 3,
+        ..ZipLimits::default()
+    };
+    let (limit, actual) = expect_limit(parse_bytes_with_limits(&bytes, &tight), LimitKind::Slides);
+    assert_eq!((limit, actual), (3, 4));
+    let exact = ZipLimits {
+        max_slides: 4,
+        ..ZipLimits::default()
+    };
+    assert!(parse_bytes_with_limits(&bytes, &exact).is_ok());
 }

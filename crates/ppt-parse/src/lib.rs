@@ -10,7 +10,7 @@ pub mod resolve;
 mod xml;
 mod zip_pkg;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use ppt_core::model::{Background, DocProperties, Presentation, Section, Shape, Slide, TableStyle};
@@ -111,7 +111,7 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
         media.iter().map(|(k, v)| (k.clone(), v.len())).collect();
 
     // 4) 按 presentation.xml 的 r:id 顺序确定 slide 部件;拿不到关系时回退到 slideN 数字序。
-    let ordered_parts = resolve_slide_order(&meta.slide_rids, &pres_rels, &pkg);
+    let ordered_parts = resolve_slide_order(&meta.slide_rids, &pres_rels, &pkg, limits)?;
 
     // 5) 逐张解析 slide(`slide_parts[i]` = `slides[i]` 的部件路径与 rels,供链接后处理)。
     let mut slides = Vec::with_capacity(ordered_parts.len());
@@ -160,6 +160,7 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
         .map(|(i, (part, _))| ((*part).to_string(), i))
         .collect();
     let count = slides.len();
+    let mut chart_cache = charts::ChartCache::new();
     for (i, (slide, (part, rels))) in slides.iter_mut().zip(&slide_parts).enumerate() {
         let ctx = links::LinkCtx {
             rels,
@@ -169,7 +170,7 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
             count,
         };
         links::resolve_links(&mut slide.shapes, &ctx);
-        charts::resolve_charts(&mut slide.shapes, rels, part, &pkg);
+        charts::resolve_charts(&mut slide.shapes, rels, part, &pkg, &mut chart_cache);
     }
 
     if slides.is_empty() && !ordered_parts.is_empty() {
@@ -337,16 +338,22 @@ fn collect_doc_props(pkg: &Package) -> DocProperties {
 
 /// 把 presentation.xml 的 `r:id` 顺序解析成具体 slide 部件路径列表。
 /// 拿不到关系映射时,回退到按 `slideN` 数字升序(确定性兜底)。
+/// 同一部件被 `p:sldIdLst` 重复引用只保留首次出现(保持顺序):合法文件里一个 slide 部件
+/// 只会被引用一次,不去重则一个很小的文件就能把同一页放大成 N 份解析与存储。去重后的数量
+/// 超过 [`ZipLimits::max_slides`] 返回 [`PptError::LimitExceeded`]。
 fn resolve_slide_order(
     rids: &[String],
     pres_rels: &BTreeMap<String, xml::Relationship>,
     pkg: &Package,
-) -> Vec<String> {
-    let mut parts = Vec::new();
+    limits: &ZipLimits,
+) -> Result<Vec<String>> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
     for rid in rids {
         if let Some(rel) = pres_rels.get(rid) {
             let target = xml::normalize_target(&rel.target);
-            if pkg.part_str(&target).is_some() {
+            if !seen.contains(&target) && pkg.part_str(&target).is_some() {
+                seen.insert(target.clone());
                 parts.push(target);
             }
         }
@@ -355,5 +362,12 @@ fn resolve_slide_order(
         // 兜底:直接按 slide 文件名数字序。
         parts = pkg.slide_names_sorted();
     }
-    parts
+    if parts.len() > limits.max_slides {
+        return Err(PptError::LimitExceeded {
+            kind: LimitKind::Slides,
+            limit: limits.max_slides as u64,
+            actual: parts.len() as u64,
+        });
+    }
+    Ok(parts)
 }

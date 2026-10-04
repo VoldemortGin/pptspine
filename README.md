@@ -52,7 +52,7 @@ rejects packages that exceed `ppt_parse::ZipLimits` with
 `PptError::LimitExceeded` (`PptZipError` in Python, message names the limit).
 Defaults: 10,000 entries, 256 MiB per entry, 1 GiB total decompressed, a
 compression ratio of 10,000 (only checked for entries over 1 MiB) and 1024-byte
-entry names. Absolute, drive-letter (`C:`) or `..` entry paths are rejected, and group /
+entry names, and 5,000 slides (counted after de-duplicating repeated `p:sldIdLst` references). Absolute, drive-letter (`C:`) or `..` entry paths are rejected, and group /
 `mc:AlternateContent` nesting deeper than 64 levels is skipped instead of
 recursing. Rust callers can pass custom limits via `parse_bytes_with_limits` /
 `parse_path_with_limits`.

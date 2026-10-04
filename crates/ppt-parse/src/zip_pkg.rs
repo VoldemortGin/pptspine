@@ -29,6 +29,12 @@ pub struct ZipLimits {
     pub max_compression_ratio: u32,
     /// 条目名最大字节长度。
     pub max_name_len: usize,
+    /// 最大幻灯片数(`p:sldIdLst` 去重后的引用数)。
+    ///
+    /// 默认 5 000:现实中最大的演示文稿也只有数百到两三千页,5 000 留足 2 倍以上余量;
+    /// 同时它严格小于默认 `max_entries`(10 000),使页数上限在条目数上限之前生效。
+    /// 重复引用同一部件只算一次(见 `resolve_slide_order`)。
+    pub max_slides: usize,
 }
 
 /// 压缩比检查的起判门槛:解压量不超过 1 MiB 的条目不做压缩比判定(避免误伤小文件)。
@@ -42,6 +48,7 @@ impl Default for ZipLimits {
             max_total_bytes: 1024 * 1024 * 1024,
             max_compression_ratio: 10_000,
             max_name_len: 1024,
+            max_slides: 5_000,
         }
     }
 }
