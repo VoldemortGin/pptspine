@@ -54,7 +54,7 @@ crates/
                    markdown.rs(语义 Markdown:标题占位符 / 列表标记 / 图片 alt / 超链接 / 图表表格)
   ppt-parse/   OOXML 读取:zip 解包 + quick-xml 遍历 -> Presentation。本轮核心。#![forbid(unsafe_code)]
     src/lib.rs     parse_path / parse_bytes -> ParsedPptx { presentation, media }
-    src/zip_pkg.rs zip 读 API:presentation.xml / slides / _rels / media / layouts / masters
+    src/zip_pkg.rs zip 读 API:主部件(经 `_rels/.rels` 的 officeDocument 定位,缺失回退 presentation.xml)/ slides / _rels / media / layouts / masters
     src/links.rs   超链接后处理:rels 回填外链 url,页内跳转折成目标幻灯片序号
     src/charts.rs  图表后处理:占位的 c:chart@r:id 经 slide rels 读 ppt/charts/chartN.xml 回填 chart
     src/diagrams.rs SmartArt 后处理:dgm:relIds@r:dm → data 部件 → drawing 部件(优先,包成 frame 变换的组合)/ 退回 data 文字

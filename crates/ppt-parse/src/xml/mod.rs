@@ -76,17 +76,18 @@ pub fn parse_rels(xml: &str) -> BTreeMap<String, Relationship> {
     map
 }
 
-/// 在一份 `.rels` 里找到第一个 `Type` 包含 `kind` 子串的关系,返回其规范化 `Target`。
+/// 在一份 `.rels` 里找到第一个 `Type` 包含 `kind` 子串的关系,返回其相对**源部件**
+/// `source_part`(该 `.rels` 所属部件)解析出的包内路径。
 /// 例如 `kind = "slideLayout"`、`kind = "slideMaster"`。
-pub fn first_rel_target_with(rels_xml: &str, kind: &str) -> Option<String> {
+pub fn first_rel_target_with(rels_xml: &str, source_part: &str, kind: &str) -> Option<String> {
     let rels = parse_rels(rels_xml);
     rels.values()
         .find(|r| r.rel_type.contains(kind))
-        .map(|r| normalize_target(&r.target))
+        .map(|r| crate::links::resolve_part_path(source_part, &r.target))
 }
 
-/// 把关系 `Target` 规范化为相对 `ppt/` 根的部件路径(去掉前导 `../`)。
-/// OOXML 里 slide 的 rels Target 形如 `../media/image1.png` 或 `../slideLayouts/slideLayout1.xml`。
+/// 把关系 `Target` 规范化为 `ppt/` 下的部件路径(去掉前导 `../`)。**只用于取 media 裸文件名**
+/// (`rsplit('/')` 末段,与主部件位置无关);要定位部件请用 `links::resolve_part_path`。
 pub fn normalize_target(target: &str) -> String {
     let mut t = target;
     while let Some(rest) = t.strip_prefix("../") {

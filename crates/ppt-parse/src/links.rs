@@ -94,18 +94,25 @@ fn show_jump(jump: &str, current: usize, count: usize) -> Option<usize> {
 }
 
 /// 把相对某部件的 rels `Target` 解析成包内绝对部件路径(处理 `../` 与 `./`;
-/// 以 `/` 开头的视为包根绝对路径)。
+/// 以 `/` 开头的视为包根绝对路径;`base_part` 为空串表示相对包根)。
+/// `..` 越出包根的 Target 被**拒绝**:返回空串(包里没有叫 `""` 的部件,取不到任何东西),
+/// 绝不把多出的 `..` 钳在根上去碰别的部件。
 pub(crate) fn resolve_part_path(base_part: &str, target: &str) -> String {
-    if let Some(abs) = target.strip_prefix('/') {
-        return abs.to_string();
-    }
-    let mut segs: Vec<&str> = base_part.split('/').collect();
-    segs.pop(); // 去掉部件文件名,留目录。
-    for seg in target.split('/') {
+    let (mut segs, rel): (Vec<&str>, &str) = match target.strip_prefix('/') {
+        Some(abs) => (Vec::new(), abs),
+        None => {
+            let mut dir: Vec<&str> = base_part.split('/').filter(|s| !s.is_empty()).collect();
+            dir.pop(); // 去掉部件文件名,留目录。
+            (dir, target)
+        }
+    };
+    for seg in rel.split('/') {
         match seg {
             "" | "." => {}
             ".." => {
-                segs.pop();
+                if segs.pop().is_none() {
+                    return String::new();
+                }
             }
             s => segs.push(s),
         }
@@ -131,6 +138,25 @@ mod tests {
             resolve_part_path("ppt/slides/slide1.xml", "/ppt/slides/slide4.xml"),
             "ppt/slides/slide4.xml"
         );
+    }
+
+    #[test]
+    fn part_paths_escaping_the_package_root_are_rejected() {
+        assert_eq!(
+            resolve_part_path("ppt/slides/slide1.xml", "../../x.xml"),
+            "x.xml"
+        );
+        assert_eq!(
+            resolve_part_path("ppt/slides/slide1.xml", "../../../x.xml"),
+            ""
+        );
+        assert_eq!(resolve_part_path("ppt/presentation.xml", "../../x.xml"), "");
+        assert_eq!(resolve_part_path("", "/../x.xml"), "");
+        assert_eq!(
+            resolve_part_path("", "ppt/./presentation.xml"),
+            "ppt/presentation.xml"
+        );
+        assert_eq!(resolve_part_path("", &"../".repeat(500)), "");
     }
 
     #[test]

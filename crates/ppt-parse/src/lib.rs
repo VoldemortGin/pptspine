@@ -140,7 +140,7 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
         // 演讲者备注:经 slide 的 .rels 找到 notesSlide 部件,提取其 body 占位符文字。
         let notes = rels_xml
             .as_deref()
-            .and_then(|r| xml::first_rel_target_with(r, "notesSlide"))
+            .and_then(|r| xml::first_rel_target_with(r, part, "notesSlide"))
             .and_then(|t| pkg.part_str(&t))
             .and_then(|nx| xml::notes::parse(&nx));
 
@@ -198,7 +198,13 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
     inherit.table_styles = collect_table_styles(&pkg, &pres_rels);
 
     // 7) 节(`sldId@id` → 幻灯片序号)与文档属性。
-    let sections = resolve_sections(&meta.sections, &meta.slide_ids, &pres_rels, &part_index);
+    let sections = resolve_sections(
+        &meta.sections,
+        &meta.slide_ids,
+        &pres_rels,
+        &part_index,
+        pkg.main_part(),
+    );
     let properties = collect_doc_props(&pkg);
 
     Ok(ParsedPptx {
@@ -233,7 +239,7 @@ fn collect_inheritance(
         if !inherit.layouts.contains_key(layout_name) {
             if let Some(xml_text) = pkg.layout_part_str(layout_name) {
                 // 经部件自身 rels 解析图片 `r:embed`(版式上的 logo / 图片背景)。
-                let rels = pkg.slide_rels_str(&format!("ppt/slideLayouts/{layout_name}"));
+                let rels = pkg.slide_rels_str(&pkg.layout_path(layout_name));
                 let data = xml::slide::parse_part(&xml_text, rels.as_deref(), media_index);
                 inherit.layouts.insert(
                     layout_name.to_string(),
@@ -256,7 +262,7 @@ fn collect_inheritance(
         };
         if !inherit.masters.contains_key(&master_name) {
             if let Some(xml_text) = pkg.master_part_str(&master_name) {
-                let rels = pkg.slide_rels_str(&format!("ppt/slideMasters/{master_name}"));
+                let rels = pkg.slide_rels_str(&pkg.master_path(&master_name));
                 let data = xml::slide::parse_part(&xml_text, rels.as_deref(), media_index);
                 inherit.masters.insert(
                     master_name.clone(),
@@ -295,10 +301,14 @@ fn collect_comment_authors(
     let mut parts: Vec<String> = pres_rels
         .values()
         .filter(|r| r.rel_type.ends_with("/commentAuthors") || r.rel_type.ends_with("/authors"))
-        .map(|r| xml::normalize_target(&r.target))
+        .map(|r| links::resolve_part_path(pkg.main_part(), &r.target))
         .collect();
     if parts.is_empty() {
-        parts = vec!["ppt/commentAuthors.xml".into(), "ppt/authors.xml".into()];
+        let root = pkg.root();
+        parts = vec![
+            format!("{root}commentAuthors.xml"),
+            format!("{root}authors.xml"),
+        ];
     }
     let mut map = BTreeMap::new();
     for part in parts {
@@ -333,8 +343,8 @@ fn collect_table_styles(
     let part = pres_rels
         .values()
         .find(|r| r.rel_type.ends_with("/tableStyles"))
-        .map(|r| xml::normalize_target(&r.target))
-        .unwrap_or_else(|| "ppt/tableStyles.xml".to_string());
+        .map(|r| links::resolve_part_path(pkg.main_part(), &r.target))
+        .unwrap_or_else(|| format!("{}tableStyles.xml", pkg.root()));
     pkg.part_str(&part)
         .map(|x| xml::table_style::parse(&x))
         .unwrap_or_default()
@@ -346,11 +356,12 @@ fn resolve_sections(
     slide_ids: &[(u32, String)],
     pres_rels: &BTreeMap<String, xml::Relationship>,
     part_index: &BTreeMap<String, usize>,
+    main_part: &str,
 ) -> Vec<Section> {
     let id_to_index: BTreeMap<u32, usize> = slide_ids
         .iter()
         .filter_map(|(id, rid)| {
-            let target = xml::normalize_target(&pres_rels.get(rid)?.target);
+            let target = links::resolve_part_path(main_part, &pres_rels.get(rid)?.target);
             Some((*id, *part_index.get(&target)?))
         })
         .collect();
@@ -405,7 +416,7 @@ fn resolve_slide_order(
     let mut seen: BTreeSet<String> = BTreeSet::new();
     for rid in rids {
         if let Some(rel) = pres_rels.get(rid) {
-            let target = xml::normalize_target(&rel.target);
+            let target = links::resolve_part_path(pkg.main_part(), &rel.target);
             if !seen.contains(&target) && pkg.part_str(&target).is_some() {
                 seen.insert(target.clone());
                 parts.push(target);
