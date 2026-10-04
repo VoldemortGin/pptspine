@@ -13,9 +13,10 @@ use ppt_core::model::{Chart, ChartKind, ChartSeries, DataLabels};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 
+use super::budget::{fit_string, MAX_LABEL_BYTES};
 use super::slide::parse_ln;
 use super::text_style::parse_solid_fill;
-use super::{attr_of, local_name, read_text, skip_element};
+use super::{attr_of, local_name, read_text, read_text_capped, skip_element};
 
 /// 单个缓存的最大点数(超出的 `idx` 丢弃;`ptCount` 截到此值)。
 const MAX_POINTS: usize = 1 << 20;
@@ -266,7 +267,12 @@ fn parse_tx<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<String> {
         buf.clear();
     }
     let t = text.trim();
-    (!t.is_empty()).then(|| t.to_string())
+    (!t.is_empty()).then(|| {
+        // 标题 / 系列名同为短标签:截到标签上限。
+        let mut t = t.to_string();
+        fit_string(&mut t, MAX_LABEL_BYTES);
+        t
+    })
 }
 
 /// `c:rich`(`a:bodyPr` + `a:p*`):各段 `a:t` 文字,段间以空格连接。已消费起始标签。
@@ -709,7 +715,10 @@ fn pad(points: &mut Vec<Option<String>>, len: usize, st: &mut State) {
         return;
     }
     let extra = len - points.len();
-    let take = extra.min(st.budget);
+    // 补空点同样占内存(每点一个 `Option<String>`):除了整图点数预算,也受模型字节预算约束。
+    let per = std::mem::size_of::<Option<String>>();
+    let take = extra.min(st.budget).min(super::budget::bytes_left() / per);
+    let _ = super::budget::take_bytes(take * per);
     if take < extra {
         st.warn("chart data exceeds point budget; truncated".to_string());
     }
@@ -726,7 +735,8 @@ fn read_pt_value<R: std::io::BufRead>(reader: &mut Reader<R>) -> String {
             Ok(Event::Start(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
                 if name.as_slice() == b"v" {
-                    v = read_text(reader);
+                    // 类别名 / 点值是逐 frame 展开、逐行导出的短标签:单值截到标签上限。
+                    v = read_text_capped(reader, MAX_LABEL_BYTES);
                 } else {
                     skip_element(reader, &name);
                 }

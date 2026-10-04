@@ -2,6 +2,7 @@
 //! 找到 `ppt/charts/chartN.xml`,解析其缓存数据回填 [`GraphicPlaceholder::chart`]。
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use ppt_core::model::{Chart, GraphicPlaceholder, Shape};
 use ppt_core::DiagnosticKind;
@@ -16,12 +17,13 @@ thread_local! {
     static PARSE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// 已解析图表缓存:键为解析后的图表部件路径,值为解析结果(部件缺失为 `None`)。
-/// 同一部件被多个 graphicFrame(或多张 slide)引用时只解析一次,每个 frame 克隆一份结果;
-/// 克隆会放大内存,所以每份克隆的数据点数都从全局预算 [`ZipLimits::max_chart_points`] 里扣,
-/// 扣不动的 frame 降级(`chart = None` + `ChartDegraded`)。缓存只省解析,不省克隆。
+/// 已解析图表缓存:键为解析后的图表部件路径,值为解析结果(部件缺失 / 模型字节预算不够为 `None`)。
+/// 同一部件被多个 graphicFrame(或多张 slide)引用时只解析一次,各 frame **共享**同一份数据
+/// (`Arc`),模型字节只在首次解析时扣一次。每个 frame 引用的数据点数仍从
+/// [`ZipLimits::max_chart_points`] 里扣(第二道闸:导出 / 渲染仍按 frame 展开),扣不动的 frame
+/// 降级(`chart = None` + `ChartDegraded`)。
 pub(crate) struct ChartCache {
-    parsed: BTreeMap<String, Option<Chart>>,
+    parsed: BTreeMap<String, Option<Arc<Chart>>>,
     /// 剩余的数据点预算。
     points_left: usize,
 }
@@ -67,11 +69,16 @@ pub(crate) fn resolve_charts(
                     .parsed
                     .entry(path.clone())
                     .or_insert_with_key(|path| {
-                        pkg.part_str(path).map(|x| {
-                            #[cfg(test)]
-                            PARSE_COUNT.with(|c| c.set(c.get() + 1));
-                            xml::chart::parse(&x)
-                        })
+                        let x = pkg.part_str(path)?;
+                        #[cfg(test)]
+                        PARSE_COUNT.with(|c| c.set(c.get() + 1));
+                        let parsed = pkg.budgeted(path, |_| xml::chart::parse(&x));
+                        // 物化后的数据整体计入模型字节(共享,只扣这一次);不够则整张降级。
+                        if !pkg.take_model_bytes(ppt_core::model_bytes::chart_bytes(&parsed)) {
+                            pkg.note(DiagnosticKind::ChartDegraded, path, 1);
+                            return None;
+                        }
+                        Some(Arc::new(parsed))
                     })
                     .as_ref();
                 // 克隆前先过全局点数预算:超出的 frame 不再得到数据副本。
@@ -82,7 +89,7 @@ pub(crate) fn resolve_charts(
                     }
                     Some(c) => {
                         cache.points_left -= chart_points(c);
-                        Some(c.clone())
+                        Some(Arc::clone(c))
                     }
                     None => None,
                 };
@@ -228,7 +235,7 @@ mod tests {
             .shapes
             .iter()
             .filter_map(|s| match s {
-                Shape::Placeholder(GraphicPlaceholder { chart, .. }) => chart.as_ref(),
+                Shape::Placeholder(GraphicPlaceholder { chart, .. }) => chart.as_deref(),
                 _ => None,
             })
             .collect();

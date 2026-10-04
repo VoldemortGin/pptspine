@@ -24,7 +24,7 @@ use ppt_core::{DiagnosticKind, PptError, Result};
 use zip_pkg::Package;
 
 pub use ppt_core::LimitKind;
-pub use resolve::{resolve, resolve_parts};
+pub use resolve::{resolve, resolve_parts, resolve_parts_capped, MAX_INHERITED_SHAPES};
 pub use zip_pkg::ZipLimits;
 
 /// 解析输出:结构化演示文稿 + media 字节(键为裸文件名,如 `image1.png`)
@@ -77,6 +77,22 @@ pub struct MasterPart {
     pub background: Option<Background>,
 }
 
+/// 解析结果的模型字节估算(幻灯片 + layout / master 形状;共享值只计一次,口径见
+/// [`ppt_core::model_bytes`])。解析侧按实际产生的每个字符串 / 节点记账,所以对任何输入都有
+/// `estimated_model_bytes(&parsed) <= limits.max_model_bytes`。
+#[must_use]
+pub fn estimated_model_bytes(p: &ParsedPptx) -> usize {
+    let mut est = ppt_core::model_bytes::Estimator::new();
+    let mut n = est.presentation(&p.presentation);
+    for l in p.inherit.layouts.values() {
+        n += est.shapes(&l.shapes);
+    }
+    for m in p.inherit.masters.values() {
+        n += est.shapes(&m.shapes);
+    }
+    n
+}
+
 /// 从磁盘路径解析一个 `.pptx`。
 pub fn parse_path(path: &Path) -> Result<ParsedPptx> {
     parse_path_with_limits(path, &ZipLimits::default())
@@ -98,15 +114,20 @@ pub fn parse_bytes(bytes: &[u8]) -> Result<ParsedPptx> {
 pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<ParsedPptx> {
     let pkg = Package::open_bytes_with_limits(bytes, limits)?;
 
-    // 1) presentation.xml:画布尺寸 + 幻灯片顺序(r:id 列表)。
+    // 1) presentation 的 rels:把 r:id 映射到具体 slide 部件路径。
     let pres_xml = pkg.presentation_xml()?;
-    let meta = xml::presentation::parse(&pres_xml);
-
-    // 2) presentation 的 rels:把 r:id 映射到具体 slide 部件路径。
     let pres_rels = pkg
         .presentation_rels_str()
         .map(|s| xml::parse_rels(&s))
         .unwrap_or_default();
+
+    // 2) presentation.xml:画布尺寸 + 幻灯片顺序(`sldId` 边读边折成部件路径、边去重,
+    //    收集到 `max_slides + 1` 个就停)。
+    let meta = xml::presentation::parse(&pres_xml, limits.max_slides, |rid| {
+        let rel = pres_rels.get(rid)?;
+        let target = links::resolve_part_path(pkg.main_part(), &rel.target);
+        pkg.has_part(&target).then_some(target)
+    });
 
     // 3) media:一次性收集字节 + 建立长度索引(供 Picture.image_bytes_len 回填)。
     let media = pkg.collect_media();
@@ -114,7 +135,10 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
         media.iter().map(|(k, v)| (k.clone(), v.len())).collect();
 
     // 4) 按 presentation.xml 的 r:id 顺序确定 slide 部件;拿不到关系时回退到 slideN 数字序。
-    let ordered_parts = resolve_slide_order(&meta.slide_rids, &pres_rels, &pkg, limits)?;
+    let ordered_parts = resolve_slide_order(&meta, &pkg, limits)?;
+
+    // 每页一个 `Slide` 骨架总是保留(幻灯片数已受 `max_slides` 约束):先从模型字节预算里预留。
+    pkg.reserve_model_bytes(ordered_parts.len() * std::mem::size_of::<Slide>());
 
     let comment_authors = collect_comment_authors(&pkg, &pres_rels);
     let mut comment_cache = CommentCache::new(limits);
@@ -138,12 +162,15 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
             .as_deref()
             .and_then(|ln| pkg.master_name_for_layout(ln));
 
-        // 演讲者备注:经 slide 的 .rels 找到 notesSlide 部件,提取其 body 占位符文字。
+        // 演讲者备注:经 slide 的 .rels 找到 notesSlide 部件,提取其 body 占位符文字
+        // (与其它部件同一套预算与诊断)。
         let notes = rels_xml
             .as_deref()
             .and_then(|r| xml::first_rel_target_with(r, part, "notesSlide"))
-            .and_then(|t| pkg.part_str(&t))
-            .and_then(|nx| xml::slide::with_default_item_budget(|| xml::notes::parse(&nx)));
+            .and_then(|t| {
+                let nx = pkg.part_str(&t)?;
+                pkg.budgeted(&t, |_| xml::notes::parse(&nx))
+            });
 
         slides.push(Slide {
             index,
@@ -182,6 +209,8 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
             part_index: &part_index,
             current: i,
             count,
+            pkg: &pkg,
+            urls: Default::default(),
         };
         links::resolve_links(&mut slide.shapes, &ctx);
         charts::resolve_charts(&mut slide.shapes, rels, part, &pkg, &mut chart_cache);
@@ -205,13 +234,7 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
     inherit.table_styles = collect_table_styles(&pkg, &pres_rels);
 
     // 7) 节(`sldId@id` → 幻灯片序号)与文档属性。
-    let sections = resolve_sections(
-        &meta.sections,
-        &meta.slide_ids,
-        &pres_rels,
-        &part_index,
-        pkg.main_part(),
-    );
+    let sections = resolve_sections(&meta.sections, &meta.slide_ids, &part_index);
     let properties = collect_doc_props(&pkg);
 
     Ok(ParsedPptx {
@@ -237,13 +260,17 @@ pub(crate) fn parse_shape_part(
     rels_xml: Option<&str>,
     media_index: &BTreeMap<String, usize>,
 ) -> xml::slide::PartData {
-    let data = xml::slide::parse_part(xml_text, rels_xml, media_index, pkg.part_budget());
-    pkg.spend_budget(data.shapes_used, data.items_used);
+    let data = pkg.budgeted(part, |shapes| {
+        xml::slide::parse_part(
+            xml_text,
+            rels_xml,
+            media_index,
+            xml::slide::PartBudget { shapes },
+        )
+    });
+    pkg.spend_shapes(data.shapes_used);
     if data.shapes_dropped > 0 {
         pkg.note(DiagnosticKind::ShapesTruncated, part, data.shapes_dropped);
-    }
-    if data.items_dropped > 0 {
-        pkg.note(DiagnosticKind::ContentTruncated, part, data.items_dropped);
     }
     if data.nesting_skipped > 0 {
         pkg.note(DiagnosticKind::NestingTooDeep, part, data.nesting_skipped);
@@ -335,9 +362,8 @@ fn collect_inheritance(
         };
         if let std::collections::btree_map::Entry::Vacant(slot) = inherit.themes.entry(theme_name) {
             if let Some(xml_text) = pkg.theme_part_str(slot.key()) {
-                slot.insert(xml::slide::with_default_item_budget(|| {
-                    xml::theme::parse(&xml_text)
-                }));
+                let path = pkg.theme_path(slot.key());
+                slot.insert(pkg.budgeted(&path, |_| xml::theme::parse(&xml_text)));
             }
         }
     }
@@ -365,7 +391,7 @@ fn collect_comment_authors(
     let mut map = BTreeMap::new();
     for part in parts {
         if let Some(x) = pkg.part_str(&part) {
-            map.extend(xml::comments::parse_authors(&x));
+            map.extend(pkg.budgeted(&part, |_| xml::comments::parse_authors(&x)));
         }
     }
     map
@@ -390,21 +416,44 @@ impl CommentCache {
     }
 }
 
-/// 从 `src` 里按预算 `budget`(批注 + 回复合计)拷贝前缀;返回拷贝结果。
-fn take_comments(src: &[Comment], budget: &mut usize) -> Vec<Comment> {
+/// 一份批注拷贝(不含回复)的模型字节:结构体 + 正文 + 时间(作者是共享的,不另计)。
+fn comment_copy_bytes(c: &Comment) -> usize {
+    std::mem::size_of::<Comment>()
+        + c.text.as_ref().map_or(0, String::len)
+        + c.datetime.as_ref().map_or(0, String::len)
+}
+
+/// 从 `src` 里按条数预算 `budget`(批注 + 回复合计)与模型字节预算拷贝前缀;返回
+/// `(拷贝结果, 是否因字节预算提前停止)`。
+fn take_comments(pkg: &Package, src: &[Comment], budget: &mut usize) -> (Vec<Comment>, bool) {
     let mut out = Vec::new();
     for c in src {
         if *budget == 0 {
             break;
         }
+        if !pkg.take_model_bytes(comment_copy_bytes(c)) {
+            return (out, true);
+        }
         *budget -= 1;
-        let take = c.replies.len().min(*budget);
-        *budget -= take;
-        let mut copy = c.clone();
-        copy.replies.truncate(take);
+        let mut copy = Comment {
+            author: c.author.clone(),
+            initials: c.initials.clone(),
+            datetime: c.datetime.clone(),
+            text: c.text.clone(),
+            position: c.position,
+            replies: Vec::new(),
+        };
+        for r in c.replies.iter().take(*budget) {
+            if !pkg.take_model_bytes(comment_copy_bytes(r)) {
+                out.push(copy);
+                return (out, true);
+            }
+            *budget -= 1;
+            copy.replies.push(r.clone());
+        }
         out.push(copy);
     }
-    out
+    (out, false)
 }
 
 /// 一张 slide 的批注:其 rels 里所有 `comments` 关系(旧式 / 新式)指向的部件,按 rId 序拼接。
@@ -430,13 +479,22 @@ fn collect_comments(
             }
             continue;
         }
-        let max = cache.max;
+        // 额度已用尽:不再解析(也不拷贝)该部件,只记截断——解析量按**剩余**额度封顶,
+        // 而不是每个部件都按全局上限完整解析一遍。
+        if cache.left == 0 {
+            if pkg.has_part(&path) {
+                pkg.note(DiagnosticKind::CommentsTruncated, &path, 1);
+            }
+            continue;
+        }
+        let max = cache.max.min(cache.left);
         let cached = cache
             .parsed
             .entry(path.clone())
             .or_insert_with(|| {
                 pkg.part_str(&path).map(|x| {
-                    let p = xml::comments::parse_comments(&x, authors, max);
+                    let p =
+                        pkg.budgeted(&path, |_| xml::comments::parse_comments(&x, authors, max));
                     // 批注正文里的嵌套超限只在这里能看到,每个部件只记一次。
                     if p.nesting_skipped > 0 {
                         pkg.note(DiagnosticKind::NestingTooDeep, &path, p.nesting_skipped);
@@ -450,8 +508,9 @@ fn collect_comments(
         };
         let want = xml::comments::count_comments(comments);
         let before = cache.left;
-        out.extend(take_comments(comments, &mut cache.left));
-        if *stopped || before < want {
+        let (copies, out_of_bytes) = take_comments(pkg, comments, &mut cache.left);
+        out.extend(copies);
+        if *stopped || out_of_bytes || before < want {
             pkg.note(DiagnosticKind::CommentsTruncated, &path, 1);
         }
     }
@@ -470,24 +529,19 @@ fn collect_table_styles(
         .map(|r| links::resolve_part_path(pkg.main_part(), &r.target))
         .unwrap_or_else(|| format!("{}tableStyles.xml", pkg.root()));
     pkg.part_str(&part)
-        .map(|x| xml::slide::with_default_item_budget(|| xml::table_style::parse(&x)))
+        .map(|x| pkg.budgeted(&part, |_| xml::table_style::parse(&x)))
         .unwrap_or_default()
 }
 
-/// 节的 `sldId@id` 列表 → 幻灯片序号(经 `@id → r:id → 部件 → 序号`;解析不出的 id 丢弃)。
+/// 节的 `sldId@id` 列表 → 幻灯片序号(经 `@id → 部件 → 序号`;解析不出的 id 丢弃)。
 fn resolve_sections(
     sections: &[(String, Vec<u32>)],
     slide_ids: &[(u32, String)],
-    pres_rels: &BTreeMap<String, xml::Relationship>,
     part_index: &BTreeMap<String, usize>,
-    main_part: &str,
 ) -> Vec<Section> {
     let id_to_index: BTreeMap<u32, usize> = slide_ids
         .iter()
-        .filter_map(|(id, rid)| {
-            let target = links::resolve_part_path(main_part, &pres_rels.get(rid)?.target);
-            Some((*id, *part_index.get(&target)?))
-        })
+        .filter_map(|(id, target)| Some((*id, *part_index.get(target)?)))
         .collect();
     sections
         .iter()
@@ -525,41 +579,152 @@ fn collect_doc_props(pkg: &Package) -> DocProperties {
     props
 }
 
-/// 把 presentation.xml 的 `r:id` 顺序解析成具体 slide 部件路径列表。
-/// 拿不到关系映射时,回退到按 `slideN` 数字升序(确定性兜底)。
-/// 同一部件被 `p:sldIdLst` 重复引用只保留首次出现(保持顺序):合法文件里一个 slide 部件
-/// 只会被引用一次,不去重则一个很小的文件就能把同一页放大成 N 份解析与存储。去重后的数量
-/// 超过 [`ZipLimits::max_slides`] 返回 [`PptError::LimitExceeded`]。
+/// 幻灯片部件列表:`presentation.xml` 的 `sldIdLst` 去重结果(解析时已按 `r:id` 折成部件路径、
+/// 同一部件只保留首次出现);一个都没有时回退到按 `slideN` 数字升序(确定性兜底)。
+/// 重复引用记 [`DiagnosticKind::DuplicateSlideRef`](`part` = 被重复引用的 slide 部件):合法文件里
+/// 一个 slide 部件只会被引用一次,不去重则一个很小的文件就能把同一页放大成 N 份解析与存储。
+/// 去重后的数量超过 [`ZipLimits::max_slides`] 返回 [`PptError::LimitExceeded`](解析在第
+/// `max_slides + 1` 个不同部件处已停止收集,`actual` 因此是下界)。
 fn resolve_slide_order(
-    rids: &[String],
-    pres_rels: &BTreeMap<String, xml::Relationship>,
+    meta: &xml::presentation::PresentationMeta,
     pkg: &Package,
     limits: &ZipLimits,
 ) -> Result<Vec<String>> {
-    let mut parts: Vec<String> = Vec::new();
-    let mut seen: BTreeSet<String> = BTreeSet::new();
-    for rid in rids {
-        if let Some(rel) = pres_rels.get(rid) {
-            let target = links::resolve_part_path(pkg.main_part(), &rel.target);
-            if seen.contains(&target) {
-                // 重复引用只保留首次;被去掉的份数记诊断(`part` = 被重复引用的 slide 部件)。
-                pkg.note(DiagnosticKind::DuplicateSlideRef, &target, 1);
-            } else if pkg.part_str(&target).is_some() {
-                seen.insert(target.clone());
-                parts.push(target);
-            }
-        }
+    for (target, n) in &meta.duplicate_refs {
+        pkg.note(DiagnosticKind::DuplicateSlideRef, target, *n);
     }
+    let mut parts = meta.slide_parts.clone();
     if parts.is_empty() {
         // 兜底:直接按 slide 文件名数字序。
         parts = pkg.slide_names_sorted();
     }
-    if parts.len() > limits.max_slides {
+    if meta.too_many_slides || parts.len() > limits.max_slides {
         return Err(PptError::LimitExceeded {
             kind: LimitKind::Slides,
             limit: limits.max_slides as u64,
-            actual: parts.len() as u64,
+            actual: parts.len().max(limits.max_slides.saturating_add(1)) as u64,
         });
     }
     Ok(parts)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Cursor, Write};
+
+    use zip::write::SimpleFileOptions;
+    use zip::ZipWriter;
+
+    use super::*;
+    use crate::xml::comments::PARSED_ENTRIES;
+
+    const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+
+    /// `slides` 张幻灯片,第 i 张经 rels 引用 `ppt/comments/comment{i}.xml`(内容 `cm(i)`)。
+    fn comment_deck(slides: usize, cm: impl Fn(usize) -> String) -> Vec<u8> {
+        let ns = r#"xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main""#;
+        let ids: String = (0..slides)
+            .map(|i| format!(r#"<p:sldId id="{}" r:id="rId{i}"/>"#, 256 + i))
+            .collect();
+        let pres_rels: String = (0..slides)
+            .map(|i| {
+                format!(
+                    r#"<Relationship Id="rId{i}" Type="{REL}/slide" Target="slides/slide{i}.xml"/>"#
+                )
+            })
+            .collect();
+        let wrap = |b: &str| {
+            format!(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{b}</Relationships>"#
+            )
+        };
+        let mut parts = vec![
+            (
+                "ppt/presentation.xml".to_string(),
+                format!(r#"<p:presentation {ns}><p:sldIdLst>{ids}</p:sldIdLst></p:presentation>"#),
+            ),
+            (
+                "ppt/_rels/presentation.xml.rels".to_string(),
+                wrap(&pres_rels),
+            ),
+        ];
+        for i in 0..slides {
+            parts.push((
+                format!("ppt/slides/slide{i}.xml"),
+                format!(r#"<p:sld {ns}><p:cSld><p:spTree/></p:cSld></p:sld>"#),
+            ));
+            parts.push((
+                format!("ppt/slides/_rels/slide{i}.xml.rels"),
+                wrap(&format!(
+                    r#"<Relationship Id="rId1" Type="{REL}/comments" Target="../comments/comment{i}.xml"/>"#
+                )),
+            ));
+            parts.push((format!("ppt/comments/comment{i}.xml"), cm(i)));
+        }
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut zip = ZipWriter::new(&mut buf);
+            for (name, body) in &parts {
+                zip.start_file(name.as_str(), SimpleFileOptions::default())
+                    .unwrap();
+                zip.write_all(body.as_bytes()).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        buf.into_inner()
+    }
+
+    fn parse_counting(bytes: &[u8], max_comments: usize) -> (ParsedPptx, usize) {
+        let limits = ZipLimits {
+            max_comments,
+            ..ZipLimits::default()
+        };
+        PARSED_ENTRIES.with(|c| c.set(0));
+        let p = parse_bytes_with_limits(bytes, &limits).unwrap();
+        (p, PARSED_ENTRIES.with(std::cell::Cell::get))
+    }
+
+    /// 40 张幻灯片各一个 1 000 条的批注部件、总预算 500:解析量按**剩余额度**封顶
+    /// (不是每个部件都按全局上限完整解析一遍),额度用尽后的部件直接跳过不解析。
+    #[test]
+    fn comment_parsing_stops_at_the_remaining_budget() {
+        let bytes = comment_deck(40, |_| {
+            format!(
+                r#"<p:cmLst xmlns:p="urn:p">{}</p:cmLst>"#,
+                "<p:cm><p:text>x</p:text></p:cm>".repeat(1_000)
+            )
+        });
+        let (p, parsed) = parse_counting(&bytes, 500);
+        let kept: usize = p.presentation.slides.iter().map(|s| s.comments.len()).sum();
+        assert_eq!(kept, 500);
+        assert_eq!(parsed, 500, "只解析到剩余额度为止");
+        let truncated = p
+            .presentation
+            .diagnostics
+            .iter()
+            .filter(|d| d.kind == DiagnosticKind::CommentsTruncated)
+            .count();
+        assert_eq!(truncated, 40, "每个被截断 / 跳过的部件都有一条诊断");
+    }
+
+    /// 线程式批注的回复同样计入解析额度。
+    #[test]
+    fn threaded_replies_count_against_the_parse_budget() {
+        let bytes = comment_deck(10, |_| {
+            format!(
+                r#"<p188:cmLst xmlns:p188="urn:p188"><p188:cm><p188:replyLst>{}</p188:replyLst></p188:cm></p188:cmLst>"#,
+                "<p188:reply/>".repeat(1_000)
+            )
+        });
+        let (p, parsed) = parse_counting(&bytes, 300);
+        let kept: usize = p
+            .presentation
+            .slides
+            .iter()
+            .flat_map(|s| &s.comments)
+            .map(|c| 1 + c.replies.len())
+            .sum();
+        assert_eq!(kept, 300);
+        assert_eq!(parsed, 300);
+    }
 }

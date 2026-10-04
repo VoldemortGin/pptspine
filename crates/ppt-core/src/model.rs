@@ -2,6 +2,12 @@
 //!
 //! 目标是**信息无损**:把 OOXML 里的幻灯片 / 文本 / 表格 / 图片 / 自选图形原样搬进
 //! 这些朴素的 `struct` / `enum`。本轮不要求 serde,只派生 `Debug`/`Clone`/`PartialEq`。
+//!
+//! 被多处引用的值用共享所有权(`Arc`)而不是逐处克隆:超链接目标、批注作者 / 缩写、图表数据
+//! (同一部件被多个 frame 引用时各 frame 共享一份)。克隆一个 `Arc` 只增加引用计数,所以
+//! "小文件 × 大量引用"不会把同一份字节复制成 N 份。
+
+use std::sync::Arc;
 
 use crate::color::ColorSpec;
 use crate::custgeom::CustGeom;
@@ -82,8 +88,9 @@ pub struct Hyperlink {
     pub action: Option<String>,
     /// `@tooltip`。
     pub tooltip: Option<String>,
-    /// 外部链接目标(rels `Target`,仅非 `ppaction://` 链接);内部跳转为 `None`。
-    pub url: Option<String>,
+    /// 外部链接目标(rels `Target`,仅非 `ppaction://` 链接);内部跳转为 `None`。同一部件里指向
+    /// 同一关系的所有链接共享同一份字符串。
+    pub url: Option<Arc<str>>,
     /// 内部跳转的目标幻灯片零基序号(`hlinksldjump` 经 rels 定位,或
     /// `hlinkshowjump` 的 first/last/next/previous 相对当前页计算);解析不出为 `None`。
     pub slide_index: Option<usize>,
@@ -121,9 +128,10 @@ pub struct Slide {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Comment {
     /// 作者名(经 `authorId` 查 `commentAuthors.xml` / `authors.xml`);查不到为 `None`。
-    pub author: Option<String>,
-    /// 作者缩写。
-    pub initials: Option<String>,
+    /// 同一作者的所有批注共享同一份字符串。
+    pub author: Option<Arc<str>>,
+    /// 作者缩写(共享同上)。
+    pub initials: Option<Arc<str>>,
     /// 时间戳原文(旧式 `@dt` / 新式 `@created`)。
     pub datetime: Option<String>,
     /// 批注正文(旧式 `p:text`;新式 `p188:txBody` 各段以 `\n` 连接)。
@@ -604,7 +612,8 @@ pub struct GraphicPlaceholder {
     /// 图表关系 id(`a:graphicData > c:chart@r:id`);非图表为 `None`。
     pub chart_rel_id: Option<String>,
     /// 图表缓存数据(经 slide rels 读 `ppt/charts/chartN.xml`);非图表 / 部件缺失为 `None`。
-    pub chart: Option<Chart>,
+    /// 引用同一图表部件的所有 frame 共享同一份数据。
+    pub chart: Option<Arc<Chart>>,
     /// SmartArt 数据部件关系 id(`a:graphicData > dgm:relIds@r:dm`);非 SmartArt 为 `None`。
     pub diagram_rel_id: Option<String>,
     /// SmartArt 退回 data 部件时抽出的文字(`dgm:pt > dgm:t` 的非空段落,文档顺序);

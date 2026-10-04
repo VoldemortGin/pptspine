@@ -399,6 +399,7 @@ pub fn exercise_exports(parsed: &ppt_parse::ParsedPptx) -> ppt_core::ResolvedPre
             let opts = ExportOptions {
                 order,
                 include_hidden,
+                ..ExportOptions::default()
             };
             let _ = presentation_text_with(&parsed.presentation, None, &opts);
             let _ = presentation_text_with(&parsed.presentation, Some(&resolved), &opts);

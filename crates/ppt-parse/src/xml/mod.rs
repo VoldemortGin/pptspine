@@ -9,6 +9,7 @@
 //! 本模块根放**关系(`.rels`)解析**这类被多处复用的小工具。所有 walker 都遵循家族约定:
 //! 未知元素跳过、缺失属性 → `None`、**绝不 panic**。
 
+pub(crate) mod budget;
 pub mod chart;
 pub mod comments;
 mod custgeom;
@@ -149,11 +150,15 @@ pub fn local_name(qname: &[u8]) -> &[u8] {
     }
 }
 
-/// 把一个属性的值解码成 `String`(容错:解码失败给空串)。
+/// 把一个属性的值解码成 `String`(容错:解码失败给空串)。单值截到
+/// [`budget::MAX_ATTR_BYTES`],并按实际字节计入当前模型字节预算(见 [`budget`])。
 pub fn attr_string(attr: &quick_xml::events::attributes::Attribute) -> String {
-    attr.unescape_value()
+    let mut s = attr
+        .unescape_value()
         .map(|c| c.into_owned())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    budget::fit_string(&mut s, budget::MAX_ATTR_BYTES);
+    s
 }
 
 /// 取元素的某个属性值(按本地名匹配,忽略命名空间前缀)。
@@ -176,8 +181,14 @@ pub fn ooxml_bool(v: String) -> bool {
     v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("on")
 }
 
-/// 读取当前已打开元素的纯文本内容,直到其结束标签。已消费该元素的起始标签。
+/// 读取当前已打开元素的纯文本内容,直到其结束标签。已消费该元素的起始标签。单个文本节点截到
+/// [`budget::MAX_TEXT_BYTES`],并按实际字节计入当前模型字节预算。
 pub fn read_text<R: std::io::BufRead>(reader: &mut Reader<R>) -> String {
+    read_text_capped(reader, budget::MAX_TEXT_BYTES)
+}
+
+/// 同 [`read_text`],单值上限为 `cap` 字节(图表标签等短值用更小的上限)。
+pub fn read_text_capped<R: std::io::BufRead>(reader: &mut Reader<R>, cap: usize) -> String {
     let mut out = String::new();
     let mut buf = Vec::new();
     loop {
@@ -196,7 +207,13 @@ pub fn read_text<R: std::io::BufRead>(reader: &mut Reader<R>) -> String {
             _ => {}
         }
         buf.clear();
+        // 流式封顶:超长文本节点不先整段读进内存(截断判定留给下面的 fit_string)。
+        if out.len() > cap {
+            skip_element(reader, b"");
+            break;
+        }
     }
+    budget::fit_string(&mut out, cap);
     out
 }
 

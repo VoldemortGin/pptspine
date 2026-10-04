@@ -9,19 +9,36 @@
 //! 只构造模型,不写任何告警 / 日志。容错:未知元素跳过、畸形输入返回已得部分、绝不 panic。
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use ppt_core::model::Comment;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 
+use super::budget::{fit_string, MAX_LABEL_BYTES};
 use super::slide::parse_txbody;
 use super::{attr_of, local_name, read_text, skip_element};
 
-/// 作者表条目(`@name` / `@initials`)。
+// 测试用:本线程内批注部件解析出的条目数(批注 + 回复),断言"解析量按剩余额度封顶"。
+#[cfg(test)]
+thread_local! {
+    pub(crate) static PARSED_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// 作者表条目(`@name` / `@initials`)。共享所有权:同一作者的每条批注引用同一份字符串
+/// (一个很长的作者名 × 海量批注不会被复制成 N 份);长度截到 [`MAX_LABEL_BYTES`]。
 #[derive(Debug, Clone, Default)]
 pub struct Author {
-    pub name: Option<String>,
-    pub initials: Option<String>,
+    pub name: Option<Arc<str>>,
+    pub initials: Option<Arc<str>>,
+}
+
+/// 作者名 / 缩写:截到标签上限后转成共享字符串。
+fn label(v: Option<String>) -> Option<Arc<str>> {
+    v.map(|mut s| {
+        fit_string(&mut s, MAX_LABEL_BYTES);
+        Arc::from(s)
+    })
 }
 
 /// 解析作者部件(`p:cmAuthorLst` 或 `p188:authorLst`)→ `id -> Author`。
@@ -37,8 +54,8 @@ pub fn parse_authors(xml: &str) -> BTreeMap<String, Author> {
                         map.insert(
                             id,
                             Author {
-                                name: attr_of(&e, b"name"),
-                                initials: attr_of(&e, b"initials"),
+                                name: label(attr_of(&e, b"name")),
+                                initials: label(attr_of(&e, b"initials")),
                             },
                         );
                     }
@@ -71,11 +88,14 @@ struct Budget {
 impl Budget {
     /// 取走一条;预算已空则标记截断并返回 `false`。
     fn take(&mut self) -> bool {
-        if self.left == 0 {
+        // 条数额度 + 模型字节预算(结构体本身;作者是共享的,不另计)。
+        if self.left == 0 || !super::budget::take_item(std::mem::size_of::<Comment>()) {
             self.truncated = true;
             return false;
         }
         self.left -= 1;
+        #[cfg(test)]
+        PARSED_ENTRIES.with(|c| c.set(c.get() + 1));
         true
     }
 }

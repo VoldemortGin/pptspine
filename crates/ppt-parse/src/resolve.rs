@@ -16,12 +16,14 @@
 //! - **形状样式**:`p:style` fillRef/lnRef 经主题 `fmtScheme` 纯色解析
 //!   (`phClr` 以引用色替换;非纯色项降级为代表色)。
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use ppt_core::color::{apply_transforms, ColorSpec, ResolvedColor};
 use ppt_core::geom::Rect;
 use ppt_core::model::{
-    AutoShape, Autofit, Background, BodyProps, Cell, Connector, Fill, GraphicPlaceholder,
+    AutoShape, Autofit, Background, BodyProps, Cell, Chart, Connector, Fill, GraphicPlaceholder,
     Paragraph, Presentation, RunKind, Shape, Slide, Stroke, Table, TableFlags, TablePartStyle,
     TableStyle, TextFrame, TextRun,
 };
@@ -46,19 +48,55 @@ pub fn resolve(parsed: &ParsedPptx) -> ResolvedPresentation {
     resolve_parts(&parsed.presentation, &parsed.inherit)
 }
 
+/// 整份文稿最多物化的继承形状(master / layout 的非占位符形状,每页各一份)实例数。
+///
+/// 继承形状逐页克隆进终态 IR(渲染按页绘制):母版上 2 万个形状 × 80 页就是 160 万份。
+/// 现实模板的母版 + 版式装饰形状至多一两百个,2 000 页 × 100 个 = 20 万;取其 2 倍。超出后
+/// 后续页不再带继承形状(记入 [`ResolvedPresentation::inherited_dropped`],渲染侧告警)。
+pub const MAX_INHERITED_SHAPES: usize = 400_000;
+
 /// 同 [`resolve`],但接受拆开的两部分(py-bindings 各自持有 `Arc` 时无需重组克隆)。
 pub fn resolve_parts(
     presentation: &Presentation,
     inherit: &InheritanceParts,
 ) -> ResolvedPresentation {
+    resolve_parts_capped(presentation, inherit, MAX_INHERITED_SHAPES)
+}
+
+/// 同 [`resolve_parts`],继承形状实例上限由调用方给出(缺省 [`MAX_INHERITED_SHAPES`])。
+pub fn resolve_parts_capped(
+    presentation: &Presentation,
+    inherit: &InheritanceParts,
+    max_inherited_shapes: usize,
+) -> ResolvedPresentation {
+    let shared = Shared {
+        charts: RefCell::new(BTreeMap::new()),
+        inherited_left: std::cell::Cell::new(max_inherited_shapes),
+        inherited_dropped: std::cell::Cell::new(0),
+    };
+    let slides = presentation
+        .slides
+        .iter()
+        .map(|s| resolve_slide(s, inherit, presentation.first_slide_num, &shared))
+        .collect();
     ResolvedPresentation {
         slide_size: presentation.slide_size,
-        slides: presentation
-            .slides
-            .iter()
-            .map(|s| resolve_slide(s, inherit, presentation.first_slide_num))
-            .collect(),
+        slides,
+        inherited_dropped: shared.inherited_dropped.get(),
     }
+}
+
+/// 终端化后的图表缓存键:(源图表指针, 各系列色 + 逐点色的终端 RGB)。
+type ChartKey = (usize, Vec<Option<[u8; 3]>>);
+
+/// 跨 slide 共享的解析状态。
+struct Shared {
+    /// 已终端化配色的图表:源图表相同、终端颜色也相同的 frame 共享同一份(不逐 frame 复制类别名)。
+    charts: RefCell<BTreeMap<ChartKey, Arc<Chart>>>,
+    /// 剩余可物化的继承形状实例数(见 [`MAX_INHERITED_SHAPES`])。
+    inherited_left: std::cell::Cell<usize>,
+    /// 因 [`MAX_INHERITED_SHAPES`] 未物化的继承形状实例数。
+    inherited_dropped: std::cell::Cell<usize>,
 }
 
 /// 单张 slide 的解析上下文(链上各级的只读视图)。
@@ -72,9 +110,16 @@ struct Ctx<'a> {
     table_styles: &'a BTreeMap<String, TableStyle>,
     /// 当前 slide 的显示页码(`a:fld type="slidenum"` 的求值结果)。
     slide_number: i64,
+    /// 跨 slide 共享的状态。
+    shared: &'a Shared,
 }
 
-fn resolve_slide(slide: &Slide, inherit: &InheritanceParts, first_slide_num: i32) -> ResolvedSlide {
+fn resolve_slide(
+    slide: &Slide,
+    inherit: &InheritanceParts,
+    first_slide_num: i32,
+    shared: &Shared,
+) -> ResolvedSlide {
     let layout = slide
         .layout_name
         .as_deref()
@@ -103,6 +148,7 @@ fn resolve_slide(slide: &Slide, inherit: &InheritanceParts, first_slide_num: i32
         // 显示页码 = 放映序号 + firstSlideNum − 1。隐藏页(`show="0"`)照常占号:PowerPoint 的
         // 页码按幻灯片在文稿里的位置算,导出 / 放映跳过隐藏页后其余页码不重排。
         slide_number: i64::from(first_slide_num) + slide.index as i64,
+        shared,
     };
     // B-10:背景继承链 slide → layout → master(第一个存在的赢,不逐字段合并)。
     let background = slide
@@ -138,12 +184,22 @@ fn resolve_inherited(slide: &Slide, layout: Option<&LayoutPart>, ctx: &Ctx) -> V
     }
     let show_master = layout.and_then(|l| l.show_master_sp).unwrap_or(true);
     let master_shapes = if show_master { ctx.master_shapes } else { &[] };
-    master_shapes
+    let mut out = Vec::new();
+    for sh in master_shapes
         .iter()
         .chain(ctx.layout_shapes)
         .filter(|sh| ph_of(sh).is_none())
-        .map(|sh| resolve_shape(sh, ctx, None))
-        .collect()
+    {
+        let left = ctx.shared.inherited_left.get();
+        if left == 0 {
+            let d = &ctx.shared.inherited_dropped;
+            d.set(d.get().saturating_add(1));
+            continue;
+        }
+        ctx.shared.inherited_left.set(left - 1);
+        out.push(resolve_shape(sh, ctx, None));
+    }
+    out
 }
 
 /// B-10:`p:bg` → 终态背景(纯色 / 图片 / 主题引用降级为代表色)。
@@ -254,15 +310,37 @@ fn resolve_shape(shape: &Shape, ctx: &Ctx, inherited: Option<&Fill>) -> Resolved
 
 /// 图表帧:系列色 / 逐点色里的 schemeClr(及变换)经 clrMap + clrScheme 终端化为显式 srgb
 /// (不带变换),渲染侧直接取色;alpha 丢弃(图表按不透明画)。
+/// 图表数据是共享的(`Arc`):终端颜色相同的 frame 共享同一份终端化副本,不逐 frame 复制。
 fn resolve_graphic(gp: &GraphicPlaceholder, ctx: &Ctx) -> GraphicPlaceholder {
     let mut gp = gp.clone();
-    let terminal = |spec: &ColorSpec| ColorSpec::srgb(resolve_color(ctx, spec, None).rgb);
-    for s in gp.chart.iter_mut().flat_map(|c| c.series.iter_mut()) {
-        s.color = s.color.as_ref().map(terminal);
-        for (_, c) in &mut s.point_colors {
-            *c = terminal(c);
+    let Some(src) = gp.chart.as_ref() else {
+        return gp;
+    };
+    let rgb = |spec: &ColorSpec| resolve_color(ctx, spec, None).rgb;
+    let colors: Vec<Option<[u8; 3]>> = src
+        .series
+        .iter()
+        .flat_map(|s| {
+            std::iter::once(s.color.as_ref().map(rgb))
+                .chain(s.point_colors.iter().map(|(_, c)| Some(rgb(c))))
+        })
+        .collect();
+    let key = (Arc::as_ptr(src) as usize, colors);
+    let mut cache = ctx.shared.charts.borrow_mut();
+    let resolved = cache.entry(key).or_insert_with_key(|(_, colors)| {
+        let mut c = Chart::clone(src);
+        let mut it = colors.iter();
+        for s in &mut c.series {
+            s.color = it.next().copied().flatten().map(ColorSpec::srgb);
+            for (_, pc) in &mut s.point_colors {
+                if let Some(Some(v)) = it.next() {
+                    *pc = ColorSpec::srgb(*v);
+                }
+            }
         }
-    }
+        Arc::new(c)
+    });
+    gp.chart = Some(Arc::clone(resolved));
     gp
 }
 

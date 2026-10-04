@@ -78,21 +78,16 @@ pub struct PartData {
     pub custgeom_degraded: usize,
     /// 本部件实际解析的形状元素数(含组合 / 组合内后代;记入演示文稿级总预算)。
     pub shapes_used: usize,
-    /// 因形状预算耗尽而被跳过的形状元素数(诊断用)。
+    /// 因形状 / 模型字节预算耗尽而被跳过的形状元素数(含被跳过组合的后代;诊断用)。
     pub shapes_dropped: usize,
-    /// 本部件实际建模的文本 / 表格节点数(记入演示文稿级总预算,见 [`take_item`])。
-    pub items_used: usize,
-    /// 因节点预算耗尽而被跳过的节点数(诊断用)。
-    pub items_dropped: usize,
 }
 
-/// 一个形部件的解析预算(由 `ZipLimits` 的 `max_part_*` 与演示文稿级剩余额度取小得到)。
+/// 一个形部件的形状预算(由 `ZipLimits` 的 `max_part_shapes` 与演示文稿级剩余额度取小得到;
+/// 节点数与模型字节预算由调用方经 [`super::budget::begin`] 设置)。
 #[derive(Debug, Clone, Copy)]
 pub struct PartBudget {
     /// 本部件最多解析的形状元素数。
     pub shapes: usize,
-    /// 本部件最多建模的文本 / 表格节点数。
-    pub items: usize,
 }
 
 /// 解析一个形部件。`rels_xml` 是该部件的 `.rels` 文本(用于把图片 `r:embed` 映射到
@@ -106,7 +101,6 @@ pub fn parse_part(
     let rels = rels_xml.map(parse_rels).unwrap_or_default();
     NEST_SKIPPED.with(|c| c.set(0));
     CUSTGEOM_DEGRADED.with(|c| c.set(0));
-    begin_items(budget.items);
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
     let mut buf = Vec::new();
@@ -158,7 +152,6 @@ pub fn parse_part(
     out.custgeom_degraded = CUSTGEOM_DEGRADED.with(std::cell::Cell::take);
     out.shapes_used = budget.shapes - ctx.shapes_left.get();
     out.shapes_dropped = ctx.shapes_dropped.get();
-    (out.items_used, out.items_dropped) = end_items(budget.items);
     out
 }
 
@@ -337,66 +330,72 @@ thread_local! {
     static CUSTGEOM_DEGRADED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-thread_local! {
-    /// 本次解析还能建模的文本 / 表格节点数。`usize::MAX` = 不设限(`parse_part` 之外的入口默认如此)。
-    /// 文本体 / 段落 / 表格的解析函数不带 `Ctx`,与 [`NEST_SKIPPED`] 同理用线程局部计数。
-    static ITEMS_LEFT: std::cell::Cell<usize> = const { std::cell::Cell::new(usize::MAX) };
-    /// 因 [`ITEMS_LEFT`] 耗尽而被跳过的节点数。
-    static ITEMS_DROPPED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-/// 开始一个部件的节点预算(与 [`end_items`] 配对)。
-pub(super) fn begin_items(n: usize) {
-    ITEMS_LEFT.with(|c| c.set(n));
-    ITEMS_DROPPED.with(|c| c.set(0));
-}
-
-/// 结束节点预算,恢复为不设限;返回 `(实际建模数, 被跳过数)`(`n` 为开始时给的额度)。
-pub(super) fn end_items(n: usize) -> (usize, usize) {
-    let left = ITEMS_LEFT.with(|c| c.replace(usize::MAX));
-    (
-        n.saturating_sub(left),
-        ITEMS_DROPPED.with(std::cell::Cell::take),
-    )
-}
-
-/// 申请建模一个文本 / 表格节点(段落 / run / 表格行 / 单元格 / 网格列 / 渐变停靠点 / 制表位 /
-/// 颜色变换 / 形状调节值):额度用尽返回 `false`,调用方应跳过该元素(整体 `skip_element`,
-/// 不建模、不占内存)。这些节点的 XML 很短(`<a:p/>` 仅 7 字节)而模型对象要几百字节,
-/// 不设上限时一个小部件能放大成 GB 级内存。
-pub(super) fn take_item() -> bool {
-    ITEMS_LEFT.with(|c| {
-        let left = c.get();
-        if left == 0 {
-            ITEMS_DROPPED.with(|d| d.set(d.get().saturating_add(1)));
-            false
-        } else {
-            c.set(left - 1);
-            true
-        }
-    })
-}
-
-/// 在一份默认单部件节点预算(`ZipLimits::default().max_part_items`)下运行 `f`——给 `parse_part`
-/// 之外的部件(主题 / 备注 / 表格样式)用:它们的列表同样是"短 XML → 大模型"的放大点。
-pub(crate) fn with_default_item_budget<T>(f: impl FnOnce() -> T) -> T {
-    begin_items(crate::ZipLimits::default().max_part_items);
-    let out = f();
-    end_items(0);
-    out
+/// 申请建模一个结构体大小为 `T` 的文本 / 表格节点(段落 / run / 表格行 / 单元格 / 网格列 /
+/// 渐变停靠点 / 颜色变换 / 形状调节值 / 主题样式):节点数或模型字节额度用尽返回 `false`,调用方
+/// 应整体跳过该元素(见 [`skip_dropped`],不建模、不占内存)。这些节点的 XML 很短(`<a:p/>` 仅
+/// 7 字节)而模型对象要几百字节,不设上限时一个小部件能放大成 GB 级内存。
+pub(super) fn take_item_of<T>() -> bool {
+    super::budget::take_item(std::mem::size_of::<T>())
 }
 
 /// 清零嵌套超限计数(`parse_part` 之外复用 [`parse_txbody`] 的解析入口——批注 / SmartArt data——
 /// 在解析前调用,与 [`take_nest_skipped`] 配对,免得计数被下一次 `parse_part` 开头清零而丢失)。
 pub(super) fn reset_nest_skipped() {
     NEST_SKIPPED.with(|c| c.set(0));
-    begin_items(crate::ZipLimits::default().max_part_items);
 }
 
 /// 取走(并清零)当前嵌套超限计数。
 pub(super) fn take_nest_skipped() -> usize {
-    end_items(0);
     NEST_SKIPPED.with(std::cell::Cell::take)
+}
+
+/// 预算耗尽时整体跳过一个元素,并把它内部被一并丢掉的节点 / 形状如实计数:元素自身已在
+/// `take_*` 失败时记过一次,这里只数后代(段落 / run / 行 / 单元格等节点记进节点丢弃数,形状
+/// 元素记进 `shapes_dropped`)。诊断的 `count` 因此反映实际丢掉的内容量,而不只是被跳过的
+/// 容器个数。已消费该元素的起始标签。
+pub(super) fn skip_dropped<R: std::io::BufRead>(
+    reader: &mut Reader<R>,
+    shapes_dropped: Option<&std::cell::Cell<usize>>,
+) {
+    let mut depth = 1usize;
+    let (mut items, mut shapes) = (0usize, 0usize);
+    let mut buf = Vec::new();
+    loop {
+        let ev = reader.read_event_into(&mut buf);
+        match ev {
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                match local_name(e.name().as_ref()) {
+                    b"sp" | b"pic" | b"cxnSp" | b"graphicFrame" | b"grpSp" => shapes += 1,
+                    n if is_item_name(n) => items += 1,
+                    _ => {}
+                }
+                if matches!(ev, Ok(Event::Start(_))) {
+                    depth += 1;
+                }
+            }
+            Ok(Event::End(_)) => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    super::budget::note_dropped(items);
+    if let Some(c) = shapes_dropped {
+        c.set(c.get().saturating_add(shapes));
+    }
+}
+
+/// 计入节点预算的元素本地名(被跳过时如实计数用)。
+fn is_item_name(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"p" | b"r" | b"br" | b"fld" | b"m" | b"tr" | b"tc" | b"gridCol" | b"gs" | b"gd"
+    )
 }
 
 /// 记一棵因嵌套过深被跳过的子树。
@@ -416,10 +415,11 @@ struct Ctx<'a> {
 }
 
 impl Ctx<'_> {
-    /// 申请解析一个形状元素;额度用尽返回 `false`(调用方整体跳过,已解析的保留)。
+    /// 申请解析一个形状元素(形状数 + 模型字节各扣一份);额度用尽返回 `false`(调用方整体跳过,
+    /// 已解析的保留)。
     fn take_shape(&self) -> bool {
         let left = self.shapes_left.get();
-        if left == 0 {
+        if left == 0 || !super::budget::take_bytes(std::mem::size_of::<Shape>()) {
             self.shapes_dropped
                 .set(self.shapes_dropped.get().saturating_add(1));
             false
@@ -480,8 +480,8 @@ fn dispatch_shape<R: std::io::BufRead>(
     out: &mut Vec<Shape>,
 ) -> bool {
     if matches!(name, b"sp" | b"graphicFrame" | b"pic" | b"cxnSp" | b"grpSp") && !ctx.take_shape() {
-        // 形状预算耗尽:提前停止本部件的形状解析,其余形状只扫描跳过(不建模)。
-        skip_element(reader, name);
+        // 形状预算耗尽:提前停止本部件的形状解析,其余形状只扫描跳过(不建模),后代如实计数。
+        skip_dropped(reader, Some(&ctx.shapes_dropped));
         return true;
     }
     match name {
@@ -729,10 +729,16 @@ fn parse_sp<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Option<Sh
         || (pr.custom_geometry && style_paint)
     {
         // 段落非空,或带 lstStyle(layout/master 占位符常态——继承链需要),才保留文字体。
+        // 装箱的文字体本身也计入模型字节;额度不够则丢弃文字体(段落记入丢弃数)。
         let text = if has_txbody
             && (!text_frame.paragraphs.is_empty() || text_frame.list_style.is_some())
         {
-            Some(Box::new(text_frame))
+            if super::budget::take_bytes(std::mem::size_of::<TextFrame>()) {
+                Some(Box::new(text_frame))
+            } else {
+                super::budget::note_dropped(text_frame.paragraphs.len());
+                None
+            }
         } else {
             None
         };
@@ -1092,12 +1098,12 @@ fn parse_av_lst<R: std::io::BufRead>(reader: &mut Reader<R>) -> Vec<(String, i64
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
                 depth += 1;
-                if let Some(gd) = gd_of(&e).filter(|_| take_item()) {
+                if let Some(gd) = gd_of(&e).filter(|_| take_item_of::<(String, i64)>()) {
                     adjusts.push(gd);
                 }
             }
             Ok(Event::Empty(e)) => {
-                if let Some(gd) = gd_of(&e).filter(|_| take_item()) {
+                if let Some(gd) = gd_of(&e).filter(|_| take_item_of::<(String, i64)>()) {
                     adjusts.push(gd);
                 }
             }
@@ -1144,7 +1150,7 @@ fn parse_grad_fill<R: std::io::BufRead>(reader: &mut Reader<R>) -> Vec<ColorSpec
                 if name.as_slice() == b"gs" {
                     // parse_color_in 消费到 </a:gs>,不影响 depth。
                     if let Some(spec) = parse_color_in(reader) {
-                        if take_item() {
+                        if take_item_of::<ColorSpec>() {
                             stops.push(spec);
                         }
                     }
@@ -1373,7 +1379,7 @@ pub(super) fn parse_txbody<R: std::io::BufRead>(reader: &mut Reader<R>) -> TxBod
             Ok(Event::Start(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
                 match name.as_slice() {
-                    b"p" if !take_item() => skip_element(reader, &name),
+                    b"p" if !take_item_of::<Paragraph>() => skip_dropped(reader, None),
                     b"p" => body.paragraphs.push(parse_paragraph(reader)),
                     b"bodyPr" => body.body = parse_body_pr(reader, &e),
                     b"lstStyle" => {
@@ -1389,7 +1395,7 @@ pub(super) fn parse_txbody<R: std::io::BufRead>(reader: &mut Reader<R>) -> TxBod
                 // `<a:bodyPr .../>` 常见自闭合(占位符缺省形)。
                 b"bodyPr" => body.body = body_pr_attrs(&e),
                 // 自闭合空段落 `<a:p/>` 与 `<a:p></a:p>` 等价:保留一个空段落(占一行高度)。
-                b"p" if take_item() => body.paragraphs.push(Paragraph::default()),
+                b"p" if take_item_of::<Paragraph>() => body.paragraphs.push(Paragraph::default()),
                 _ => {}
             },
             Ok(Event::End(_)) => break,
@@ -1511,7 +1517,7 @@ fn run_elem_start<R: std::io::BufRead>(
 ) -> bool {
     match name {
         // 节点预算耗尽:整体跳过该 run(含公式),不建模。
-        b"r" | b"br" | b"fld" | b"m" if !take_item() => skip_element(reader, name),
+        b"r" | b"br" | b"fld" | b"m" if !take_item_of::<TextRun>() => skip_dropped(reader, None),
         b"r" => runs.push(parse_run_like(reader, RunKind::Text)),
         b"br" => {
             // `<a:br>` 可带 `a:rPr` 子元素,整体消费掉;换行本身无文字样式语义。
@@ -1538,7 +1544,7 @@ fn run_elem_start<R: std::io::BufRead>(
 
 /// 段落内 run 类元素的自闭合形式(`<a:br/>` / `<a:fld/>`)。
 fn run_elem_empty(name: &[u8], e: &BytesStart, runs: &mut Vec<TextRun>) {
-    if matches!(name, b"br" | b"fld") && !take_item() {
+    if matches!(name, b"br" | b"fld") && !take_item_of::<TextRun>() {
         return;
     }
     match name {
@@ -1779,8 +1785,12 @@ fn math_note_prop(props: &mut MathProps, name: &[u8], e: &BytesStart) {
         b"sepChr" => &mut props.sep,
         _ => return,
     };
-    // 元素在但没写 `m:val` 视同缺省(None);写了空串则是"无字符"。
-    *slot = attr_of(e, b"val");
+    // 元素在但没写 `m:val` 视同缺省(None);写了空串则是"无字符"。规范上这些值是单个字符,
+    // 截到 2 个字符(容纳组合字符),免得一个超长分隔符被每个 `m:e` 各拼一次。
+    *slot = attr_of(e, b"val").map(|mut v| {
+        super::budget::fit_chars(&mut v, 2);
+        v
+    });
 }
 
 /// 是否一对相互匹配的括号。
@@ -2053,7 +2063,9 @@ fn parse_math<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<TextRun> {
             math_merge(parent, done);
         }
     }
-    let text = stack.pop().map(|f| f.text).unwrap_or_default();
+    let mut text = stack.pop().map(|f| f.text).unwrap_or_default();
+    // 线性化补出的括号 / 运算符不在源 `m:t` 里:整段结果按实际长度再记一次账(并受单值上限)。
+    super::budget::fit_string(&mut text, super::budget::MAX_TEXT_BYTES);
     if text.is_empty() {
         return None;
     }
@@ -2071,6 +2083,8 @@ fn ppr_level(e: &BytesStart) -> u8 {
 
 /// 一个段内硬换行 run(`a:br`):`text` 固定 `"\n"`,使拼接文字自然还原换行。
 fn break_run() -> TextRun {
+    // 换行符本身(1 字节)也记账,与模型字节估算同口径。
+    let _ = super::budget::take_bytes(1);
     TextRun {
         text: "\n".to_string(),
         kind: RunKind::Break,
@@ -2238,7 +2252,7 @@ fn parse_table<R: std::io::BufRead>(reader: &mut Reader<R>, rect: Option<Rect>) 
                         flags = tbl_pr_flags(&e);
                         table_style_id = parse_tbl_pr(reader).or(table_style_id);
                     }
-                    b"tr" if !take_item() => skip_element(reader, &name),
+                    b"tr" if !take_item_of::<Row>() => skip_dropped(reader, None),
                     b"tr" => {
                         let height = attr_of(&e, b"h").and_then(|s| s.parse().ok());
                         let cells = parse_table_row(reader);
@@ -2317,13 +2331,13 @@ fn parse_tbl_grid<R: std::io::BufRead>(reader: &mut Reader<R>) -> Vec<Emu> {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Empty(e)) => {
-                if local_name(e.name().as_ref()) == b"gridCol" && take_item() {
+                if local_name(e.name().as_ref()) == b"gridCol" && take_item_of::<Emu>() {
                     widths.push(grid_col_width(&e));
                 }
             }
             Ok(Event::Start(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
-                if name.as_slice() == b"gridCol" && take_item() {
+                if name.as_slice() == b"gridCol" && take_item_of::<Emu>() {
                     widths.push(grid_col_width(&e));
                 }
                 // gridCol 可带 extLst 子元素;其余未知元素同样整体跳过。
@@ -2352,16 +2366,18 @@ fn parse_table_row<R: std::io::BufRead>(reader: &mut Reader<R>) -> Vec<Cell> {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
-                if name.as_slice() == b"tc" && take_item() {
+                if name.as_slice() != b"tc" {
+                    skip_element(reader, &name);
+                } else if take_item_of::<Cell>() {
                     cells.push(parse_table_cell(reader, &e));
                 } else {
-                    skip_element(reader, &name);
+                    skip_dropped(reader, None);
                 }
             }
             Ok(Event::Empty(e)) => {
                 // 自闭合的 `<a:tc .../>`(纯合并延续格)。
                 let name = local_name(e.name().as_ref()).to_vec();
-                if name.as_slice() == b"tc" && take_item() {
+                if name.as_slice() == b"tc" && take_item_of::<Cell>() {
                     cells.push(cell_skeleton(&e));
                 }
             }

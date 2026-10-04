@@ -12,7 +12,7 @@ use ppt_core::style::{Bullet, Caps, RunStyle, Spacing, TextLevelStyle, TextStyle
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 
-use super::slide::take_item;
+use super::slide::take_item_of;
 use super::{attr_of, local_name, ooxml_bool, skip_element};
 
 // ---- 颜色 spec ------------------------------------------------------------
@@ -52,15 +52,17 @@ fn parse_transforms<R: std::io::BufRead>(reader: &mut Reader<R>) -> Vec<ColorTra
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Empty(e)) => {
-                if let Some(t) =
-                    transform_of(local_name(e.name().as_ref()), &e).filter(|_| take_item())
+                if let Some(t) = transform_of(local_name(e.name().as_ref()), &e)
+                    .filter(|_| take_item_of::<ColorTransform>())
                 {
                     out.push(t);
                 }
             }
             Ok(Event::Start(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
-                if let Some(t) = transform_of(&name, &e).filter(|_| take_item()) {
+                if let Some(t) =
+                    transform_of(&name, &e).filter(|_| take_item_of::<ColorTransform>())
+                {
                     out.push(t);
                 }
                 skip_element(reader, &name);

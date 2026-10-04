@@ -29,11 +29,16 @@ thread_local! {
 /// 超过视为畸形 / 恶意,按"解析不出形状"降级(与全局预算无关)。
 const MAX_DRAWING_SHAPES: usize = 10_000;
 
-/// 一个已解析的 drawing:形状 + 一次展开的代价(形状总数、文字字节数,解析时只算一次)。
+/// 一个已解析的 drawing:形状 + 一次展开的代价(形状总数、文字字节数、模型字节数,解析时只算一次)。
+///
+/// 展开是逐 frame **克隆**(形状树挂在每个 frame 的组合下,导出 / 渲染 / 继承解析都按普通形状
+/// 处理;改成共享需要模型里出现共享子树,牵动整条下游,本轮不做),所以每份克隆的模型字节都从
+/// [`ZipLimits::max_model_bytes`] 里扣。
 struct Drawing {
     shapes: Vec<Shape>,
     shape_count: usize,
     text_bytes: usize,
+    model_bytes: usize,
 }
 
 /// 已解析 SmartArt 缓存:键为部件路径。同一部件被多个 frame(或多张 slide)引用时只解析一次,
@@ -147,7 +152,7 @@ fn fill_diagram(
         .entry(data_path.clone())
         .or_insert_with(|| {
             pkg.part_str(&data_path).map(|x| {
-                let d = parse_data(&x);
+                let d = pkg.budgeted(&data_path, |_| parse_data(&x));
                 // data 部件里的嵌套超限(文字段落层)只在这里能看到,每个部件只记一次。
                 if d.nesting_skipped > 0 {
                     pkg.note(
@@ -173,9 +178,11 @@ fn fill_diagram(
             .or_insert_with(|| parse_drawing(pkg, &drawing_path, media_index))
             .as_ref();
         // 克隆前先过全局预算:超出的 frame 不展开,退回占位框(+ data 文字,同样受预算约束)。
-        if let Some(d) = drawing
-            .filter(|d| d.shape_count <= cache.shapes_left && d.text_bytes <= cache.text_left)
-        {
+        if let Some(d) = drawing.filter(|d| {
+            d.shape_count <= cache.shapes_left
+                && d.text_bytes <= cache.text_left
+                && pkg.take_model_bytes(d.model_bytes)
+        }) {
             cache.shapes_left -= d.shape_count;
             cache.text_left -= d.text_bytes;
             let child_rect = gp.rect.map(|r| Rect::new(0, 0, r.w, r.h));
@@ -189,7 +196,8 @@ fn fill_diagram(
     }
     pkg.note(DiagnosticKind::SmartArtDegraded, &data_path, 1);
     let text_bytes: usize = data.texts.iter().map(String::len).sum();
-    if text_bytes <= cache.text_left {
+    let copy_bytes = text_bytes + data.texts.len() * std::mem::size_of::<String>();
+    if text_bytes <= cache.text_left && pkg.take_model_bytes(copy_bytes) {
         cache.text_left -= text_bytes;
         gp.diagram_text = data.texts.clone();
     }
@@ -240,10 +248,12 @@ fn parse_drawing(
     let shapes =
         crate::parse_shape_part(pkg, path, &xml_text, rels_xml.as_deref(), media_index).shapes;
     let (shape_count, text_bytes) = tree_cost(&shapes);
+    let model_bytes = ppt_core::model_bytes::shapes_bytes(&shapes);
     (shape_count > 0 && shape_count <= MAX_DRAWING_SHAPES).then_some(Drawing {
         shapes,
         shape_count,
         text_bytes,
+        model_bytes,
     })
 }
 

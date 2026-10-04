@@ -95,6 +95,17 @@ pub struct ZipLimits {
     /// 默认 1 000 000:5 000 页 × 每页 200 个节点恰为此数;按平均约 400 B 估算,封在约 400 MB。
     /// 超出后的节点被丢弃,记 `content-truncated` 诊断。
     pub max_total_items: usize,
+    /// **模型字节预算**:整个演示文稿解析出的模型(形状 / 节点 / 字符串 / 批注 / 图表 / SmartArt
+    /// 展开副本,含 layout / master / 主题 / 表格样式 / 备注)按估算字节累计的上限。
+    ///
+    /// 计入口径:每产生一个**非共享**的节点按其结构体大小扣、每个字符串按实际字节扣;共享的值
+    /// (超链接目标、批注作者、图表数据,见 `ppt_core::model`)只在首次创建时扣一次;逐 frame /
+    /// 逐 slide 克隆的副本(SmartArt drawing、批注拷贝)每份都扣。估算见
+    /// `ppt_core::model_bytes`(不含分配器开销与 `Vec` 余量,实际 RSS 约为其 1.3–2 倍)。
+    /// 耗尽后按"提前停止"约定丢弃后续内容,记 `content-truncated` / `value-truncated` /
+    /// `chart-degraded` / `smartart-degraded` 诊断。个数预算(`max_*_shapes` / `max_*_items` 等)
+    /// 保留为第二道闸。
+    pub max_model_bytes: usize,
 }
 
 /// 压缩比检查的起判门槛:解压量不超过 1 MiB 的条目不做压缩比判定(避免误伤小文件)。
@@ -117,6 +128,7 @@ impl Default for ZipLimits {
             max_total_shapes: 200_000,
             max_part_items: 200_000,
             max_total_items: 1_000_000,
+            max_model_bytes: 1024 * 1024 * 1024,
         }
     }
 }
@@ -186,6 +198,7 @@ struct ParseBudget {
     shapes_left: usize,
     part_items: usize,
     items_left: usize,
+    bytes_left: usize,
 }
 
 /// 不同 `(kind, part)` 诊断条目数上限:超出后新的条目并入"每种 kind 一条、`part` 为空串"的
@@ -316,6 +329,7 @@ impl Package {
                 shapes_left: limits.max_total_shapes,
                 part_items: limits.max_part_items,
                 items_left: limits.max_total_items,
+                bytes_left: limits.max_model_bytes,
             }),
         })
     }
@@ -351,21 +365,52 @@ impl Package {
         }
     }
 
-    /// 下一个形部件的解析预算:单部件上限与演示文稿级剩余额度取小。
-    pub(crate) fn part_budget(&self) -> crate::xml::slide::PartBudget {
+    /// 在包的解析预算下解析部件 `part`:节点数取"单部件上限与演示文稿级剩余额度"之小、模型字节取
+    /// 剩余额度,经线程局部状态([`crate::xml::budget`])交给 walker;`f` 收到本部件可用的形状数。
+    /// 结束后把实际用量从演示文稿级额度里扣掉,并把被丢弃的节点 / 被截短的值记成
+    /// `content-truncated` / `value-truncated` 诊断(`part` = 本部件)。所有部件(形部件、备注、
+    /// 主题、表格样式、批注、SmartArt data、图表)都经这里——同一套预算、同一套诊断。
+    pub(crate) fn budgeted<T>(&self, part: &str, f: impl FnOnce(usize) -> T) -> T {
         let b = self.budget.get();
-        crate::xml::slide::PartBudget {
-            shapes: b.part_shapes.min(b.shapes_left),
-            items: b.part_items.min(b.items_left),
+        let saved = crate::xml::budget::begin(b.part_items.min(b.items_left), b.bytes_left);
+        let out = f(b.part_shapes.min(b.shapes_left));
+        let usage = crate::xml::budget::end(saved);
+        let mut b = self.budget.get();
+        b.items_left = b.items_left.saturating_sub(usage.items_used);
+        b.bytes_left = b.bytes_left.saturating_sub(usage.bytes_used);
+        self.budget.set(b);
+        if usage.items_dropped > 0 {
+            self.note(DiagnosticKind::ContentTruncated, part, usage.items_dropped);
         }
+        if usage.values_truncated > 0 {
+            self.note(DiagnosticKind::ValueTruncated, part, usage.values_truncated);
+        }
+        out
     }
 
-    /// 一个形部件解析完后,把它实际用掉的形状 / 节点数从演示文稿级额度里扣掉。
-    pub(crate) fn spend_budget(&self, shapes: usize, items: usize) {
+    /// 一个形部件解析完后,把它实际用掉的形状数从演示文稿级额度里扣掉。
+    pub(crate) fn spend_shapes(&self, shapes: usize) {
         let mut b = self.budget.get();
         b.shapes_left = b.shapes_left.saturating_sub(shapes);
-        b.items_left = b.items_left.saturating_sub(items);
         self.budget.set(b);
+    }
+
+    /// 从模型字节预算里预留 `bytes`(不够则扣到 0;用于必须保留的骨架结构)。
+    pub(crate) fn reserve_model_bytes(&self, bytes: usize) {
+        let mut b = self.budget.get();
+        b.bytes_left = b.bytes_left.saturating_sub(bytes);
+        self.budget.set(b);
+    }
+
+    /// 直接从模型字节预算里申请 `bytes`(解析之后的克隆 / 共享值首次创建用):不够返回 `false`(不扣)。
+    pub(crate) fn take_model_bytes(&self, bytes: usize) -> bool {
+        let mut b = self.budget.get();
+        if b.bytes_left < bytes {
+            return false;
+        }
+        b.bytes_left -= bytes;
+        self.budget.set(b);
+        true
     }
 
     /// 取走已收集的全部诊断(按首次出现顺序)。
@@ -555,9 +600,14 @@ impl Package {
         self.part_str(&self.master_path(master_name))
     }
 
+    /// 主题部件路径(裸名如 `theme1.xml`)。
+    pub fn theme_path(&self, theme_name: &str) -> String {
+        format!("{}theme/{theme_name}", self.root)
+    }
+
     /// 主题部件文本(裸名如 `theme1.xml`)。
     pub fn theme_part_str(&self, theme_name: &str) -> Option<String> {
-        self.part_str(&format!("{}theme/{theme_name}", self.root))
+        self.part_str(&self.theme_path(theme_name))
     }
 }
 

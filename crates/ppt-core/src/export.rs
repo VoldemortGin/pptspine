@@ -15,8 +15,11 @@ use crate::model::{
 };
 use crate::resolved::{ResolvedCell, ResolvedParagraph, ResolvedRun, ResolvedTable};
 
-pub use markdown::presentation_markdown_with;
-pub use view::{presentation_text_with, slide_text_with, ExportOptions, TextOrder};
+pub use markdown::{presentation_markdown_bounded, presentation_markdown_with};
+pub use view::{
+    presentation_text_bounded, presentation_text_with, slide_text_with, ExportOptions, TextExport,
+    TextOrder, DEFAULT_MAX_OUTPUT_BYTES, TRUNCATION_MARKER,
+};
 
 /// 一张幻灯片的正文文字(所有文本框 / 自选图形文字 / 表格,按视觉阅读顺序;**不含备注**)。
 /// 无继承链信息(占位符继承几何缺失的形状排在最后);需要更准的顺序用 [`slide_text_with`]。
@@ -377,6 +380,96 @@ mod tests {
             show_master_sp: true,
             comments: Vec::new(),
         }
+    }
+
+    /// 生成器:同一张共享图表(类别名 `cat_len` 字节 × `cats` 个)被 `frames` 个 frame 引用。
+    fn chart_frames(cat_len: usize, cats: usize, frames: usize) -> Presentation {
+        let chart = std::sync::Arc::new(Chart {
+            kind: ChartKind::Bar,
+            title: None,
+            categories: (0..cats)
+                .map(|i| format!("{i}{}", "K".repeat(cat_len)))
+                .collect(),
+            series: vec![crate::model::ChartSeries {
+                values: vec![Some(1.0); cats],
+                ..Default::default()
+            }],
+            bar_dir: None,
+            grouping: None,
+            three_d: false,
+            combo: false,
+            of_pie: false,
+            warnings: Vec::new(),
+        });
+        let frame = || {
+            Shape::Placeholder(crate::model::GraphicPlaceholder {
+                rect: None,
+                kind: None,
+                chart_rel_id: None,
+                chart: Some(std::sync::Arc::clone(&chart)),
+                diagram_rel_id: None,
+                diagram_text: Vec::new(),
+            })
+        };
+        Presentation {
+            slides: vec![slide_with((0..frames).map(|_| frame()).collect(), None)],
+            slide_size: (0, 0),
+            sections: Vec::new(),
+            properties: Default::default(),
+            first_slide_num: 1,
+            diagnostics: Vec::new(),
+        }
+    }
+
+    /// 共享的模型在导出时仍按 frame 展开:输出字节有上限,超出按字符边界截断、带标记、`truncated`。
+    #[test]
+    fn text_and_markdown_exports_are_bounded() {
+        let pres = chart_frames(1_000, 50, 200); // 不设限时约 10 MB
+        let opts = ExportOptions {
+            max_output_bytes: 100_000,
+            ..ExportOptions::default()
+        };
+        for out in [
+            presentation_text_bounded(&pres, None, &opts),
+            presentation_markdown_bounded(&pres, None, &opts),
+        ] {
+            assert!(out.truncated);
+            let (body, marker) = out.text.rsplit_once('\n').expect("marker line");
+            assert!(body.len() <= 100_000, "{}", body.len());
+            assert!(body.len() > 90_000);
+            assert!(marker.starts_with(TRUNCATION_MARKER));
+        }
+        // 缺省上限下同一输入完整输出,不带标记。
+        let full = presentation_text_bounded(&pres, None, &ExportOptions::default());
+        assert!(!full.truncated);
+        assert!(full.text.len() > 5_000_000);
+        assert!(!full.text.contains(TRUNCATION_MARKER));
+    }
+
+    /// 截断按字符边界:多字节字符不被切开。
+    #[test]
+    fn export_truncation_respects_char_boundaries() {
+        let tb = Shape::TextBox(TextFrame {
+            paragraphs: vec![para(&"é".repeat(100), 0)],
+            ..TextFrame::default()
+        });
+        let pres = Presentation {
+            slides: vec![slide_with(vec![tb], None)],
+            slide_size: (0, 0),
+            sections: Vec::new(),
+            properties: Default::default(),
+            first_slide_num: 1,
+            diagnostics: Vec::new(),
+        };
+        let opts = ExportOptions {
+            max_output_bytes: 30, // "--- slide 1 ---\n" 16 字节 + 7 个 é = 30
+            ..ExportOptions::default()
+        };
+        let out = presentation_text_bounded(&pres, None, &opts);
+        assert!(out.truncated);
+        assert!(out
+            .text
+            .starts_with(&format!("--- slide 1 ---\n{}\n", "é".repeat(7))));
     }
 
     #[test]

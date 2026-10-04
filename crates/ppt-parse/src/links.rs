@@ -4,11 +4,16 @@
 //!
 //! 放在解析全部 slide 之后做:跳转目标需要"部件路径 → 幻灯片序号"的全量映射。
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use ppt_core::model::{Hyperlink, Paragraph, Shape};
+use ppt_core::DiagnosticKind;
 
+use crate::xml::budget::MAX_URL_BYTES;
 use crate::xml::Relationship;
+use crate::zip_pkg::Package;
 
 /// 内部跳转动作前缀(PowerPoint 动作 URI)。
 const PPACTION: &str = "ppaction://";
@@ -25,6 +30,40 @@ pub(crate) struct LinkCtx<'a> {
     pub current: usize,
     /// 幻灯片总数。
     pub count: usize,
+    /// 包(模型字节预算与诊断)。
+    pub pkg: &'a Package,
+    /// 本部件已物化的外链目标(关系 id → 共享字符串):同一关系被多少个 run / 形状引用,
+    /// 都共享同一份字符串,只在首次创建时计入模型字节预算。
+    pub urls: RefCell<BTreeMap<String, Option<Arc<str>>>>,
+}
+
+impl LinkCtx<'_> {
+    /// 关系 `id` 的外链目标(共享;截到 [`MAX_URL_BYTES`],超长 / 预算耗尽记 `value-truncated`)。
+    fn url(&self, id: &str, rel: &Relationship) -> Option<Arc<str>> {
+        self.urls
+            .borrow_mut()
+            .entry(id.to_string())
+            .or_insert_with(|| {
+                let mut t = rel.target.clone();
+                if t.is_empty() {
+                    return None;
+                }
+                if t.len() > MAX_URL_BYTES {
+                    let mut end = MAX_URL_BYTES;
+                    while !t.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    t.truncate(end);
+                    self.pkg.note(DiagnosticKind::ValueTruncated, self.part, 1);
+                }
+                if !self.pkg.take_model_bytes(t.len()) {
+                    self.pkg.note(DiagnosticKind::ValueTruncated, self.part, 1);
+                    return None;
+                }
+                Some(Arc::from(t))
+            })
+            .clone()
+    }
 }
 
 /// 回填一棵形状树里所有超链接(形状级 + run 级,含组合 / 表格单元格)。
@@ -76,8 +115,13 @@ fn fill(link: Option<&mut Hyperlink>, ctx: &LinkCtx) {
                 None
             };
         }
-        // 无动作(或非 ppaction 动作)= 普通超链接:目标即 rels 的 Target。
-        _ => link.url = rel.map(|r| r.target.clone()).filter(|t| !t.is_empty()),
+        // 无动作(或非 ppaction 动作)= 普通超链接:目标即 rels 的 Target(共享)。
+        _ => {
+            link.url = match (link.rel_id.as_deref(), rel) {
+                (Some(id), Some(r)) => ctx.url(id, r),
+                _ => None,
+            }
+        }
     }
 }
 

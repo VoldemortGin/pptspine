@@ -17,7 +17,9 @@ use crate::resolved::{
 use crate::style::Bullet;
 
 use super::reading_order::FlatShape;
-use super::view::{exported_slides, ordered_shapes, placeholder_kind, ExportOptions};
+use super::view::{
+    exported_slides, ordered_shapes, placeholder_kind, ExportOptions, OutBuf, TextExport,
+};
 use super::{
     chart_label, chart_table, escape_pipe, notes_text, paragraph_text_with, run_text,
     table_markdown,
@@ -30,10 +32,26 @@ pub fn presentation_markdown_with(
     resolved: Option<&ResolvedPresentation>,
     opts: &ExportOptions,
 ) -> String {
-    exported_slides(pres, resolved, opts)
-        .map(|(slide, rs)| slide_markdown(slide, rs, pres, opts))
-        .collect::<Vec<_>>()
-        .join("\n\n")
+    presentation_markdown_bounded(pres, resolved, opts).text
+}
+
+/// 同 [`presentation_markdown_with`],另报告是否因 [`ExportOptions::max_output_bytes`] 被截断。
+pub fn presentation_markdown_bounded(
+    pres: &Presentation,
+    resolved: Option<&ResolvedPresentation>,
+    opts: &ExportOptions,
+) -> TextExport {
+    let mut out = OutBuf::new(opts.max_output_bytes);
+    for (n, (slide, rs)) in exported_slides(pres, resolved, opts).enumerate() {
+        if out.full() {
+            break;
+        }
+        if n > 0 {
+            out.push("\n\n");
+        }
+        slide_markdown(slide, rs, pres, opts, &mut out);
+    }
+    out.finish()
 }
 
 fn slide_markdown(
@@ -41,9 +59,10 @@ fn slide_markdown(
     resolved: Option<&ResolvedSlide>,
     pres: &Presentation,
     opts: &ExportOptions,
-) -> String {
+    out: &mut OutBuf,
+) {
     let shapes = ordered_shapes(slide, resolved, pres.slide_size, opts.order);
-    let mut out = format!("## Slide {}", slide.index + 1);
+    out.push(&format!("## Slide {}", slide.index + 1));
 
     // 标题:首个有文字的 title / ctrTitle 占位符;没有则回退到首个非空文本框的首段。
     let title_at = shapes.iter().position(|f| {
@@ -66,20 +85,24 @@ fn slide_markdown(
         }),
     };
     if let Some(t) = title {
-        out.push_str("\n\n### ");
-        out.push_str(&t);
+        out.push("\n\n### ");
+        out.push(&t);
     }
 
-    let mut blocks: Vec<String> = Vec::new();
+    // 逐个形状生成并写出(写满即停,不先攒齐整页的块)。
     for (i, f) in shapes.iter().enumerate() {
+        if out.full() {
+            return;
+        }
         if Some(i) == title_at {
             continue;
         }
+        let mut blocks: Vec<String> = Vec::new();
         shape_blocks(f, skip_first_para_of == Some(i), &mut blocks);
-    }
-    for block in blocks {
-        out.push_str("\n\n");
-        out.push_str(&block);
+        for block in blocks {
+            out.push("\n\n");
+            out.push(&block);
+        }
     }
 
     if let Some(notes) = notes_text(slide) {
@@ -88,10 +111,9 @@ fn slide_markdown(
             .map(|l| format!("> {l}"))
             .collect::<Vec<_>>()
             .join("\n");
-        out.push_str("\n\n> Notes:\n");
-        out.push_str(&quoted);
+        out.push("\n\n> Notes:\n");
+        out.push(&quoted);
     }
-    out
 }
 
 /// 形状的文字体(文本框 / 自选图形内文字)。
@@ -371,7 +393,7 @@ mod tests {
     fn linked(text: &str, url: &str) -> TextRun {
         TextRun {
             hyperlink: Some(Hyperlink {
-                url: Some(url.to_string()),
+                url: Some(url.into()),
                 ..Hyperlink::default()
             }),
             ..run(text)

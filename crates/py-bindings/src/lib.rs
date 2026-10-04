@@ -12,13 +12,14 @@
 //! 绝不持有 Rust 借用。重活(解析 / OCR)在 [`Python::detach`] 下释放 GIL 运行。错误折成
 //! 以 `_core.PptError` 为根的类型化异常层级。
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use ppt_core::color::ColorSpec;
 use ppt_core::export::{
-    presentation_markdown_with, presentation_text_with, slide_text_with, ExportOptions, TextOrder,
+    presentation_markdown_bounded, presentation_text_bounded, slide_text_with, ExportOptions,
+    TextOrder,
 };
 use ppt_core::geom::emu_to_points;
 use ppt_core::model::{
@@ -37,7 +38,7 @@ use ppt_render::{render_pdf, ExportResult, ExportWarning, RenderOptions};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyFileNotFoundError, PyIndexError, PyOSError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyBytes, PyDict, PyList};
+use pyo3::types::{PyBool, PyBytes, PyDict, PyList, PyString};
 
 /// 包版本(镜像 Rust workspace 版本)。
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -135,17 +136,47 @@ fn placeholder_py<'py>(
     Ok(Some(d))
 }
 
+/// 一次转换调用内的共享字符串缓存:同一份共享字节(`Arc<str>` 超链接目标 / 批注作者,共享图表
+/// 里的类别名 / 系列名)只建一个 Python `str`,按数据指针 + 长度去重——模型里的共享在 Python
+/// 边界不会被放大回 N 份。
+struct Strs<'py> {
+    py: Python<'py>,
+    map: HashMap<(usize, usize), Bound<'py, PyString>>,
+}
+
+impl<'py> Strs<'py> {
+    fn new(py: Python<'py>) -> Self {
+        Strs {
+            py,
+            map: HashMap::new(),
+        }
+    }
+
+    fn get(&mut self, s: &str) -> Bound<'py, PyString> {
+        let py = self.py;
+        self.map
+            .entry((s.as_ptr() as usize, s.len()))
+            .or_insert_with(|| PyString::new(py, s))
+            .clone()
+    }
+
+    fn opt(&mut self, s: Option<&str>) -> Option<Bound<'py, PyString>> {
+        s.map(|s| self.get(s))
+    }
+}
+
 /// 超链接 → `{"url", "slide_index", "action", "tooltip"}` dict;无链接 → `None`。
 /// 外链只填 `url`;内部跳转(`ppaction://`)只填 `slide_index`(解析不出为 `None`)。
 fn hyperlink_py<'py>(
     py: Python<'py>,
     link: Option<&Hyperlink>,
+    strs: &mut Strs<'py>,
 ) -> PyResult<Option<Bound<'py, PyDict>>> {
     let Some(link) = link else {
         return Ok(None);
     };
     let d = PyDict::new(py);
-    d.set_item("url", link.url.as_deref())?;
+    d.set_item("url", strs.opt(link.url.as_deref()))?;
     d.set_item("slide_index", link.slide_index)?;
     d.set_item("action", link.action.as_deref())?;
     d.set_item("tooltip", link.tooltip.as_deref())?;
@@ -164,7 +195,11 @@ fn parse_order(order: &str) -> PyResult<TextOrder> {
 // --- dict 构造:把领域模型映射成可自省的 list[dict] ----------------------
 
 /// 一个 [`TextRun`] -> dict。
-fn run_dict<'py>(py: Python<'py>, run: &TextRun) -> PyResult<Bound<'py, PyDict>> {
+fn run_dict<'py>(
+    py: Python<'py>,
+    run: &TextRun,
+    strs: &mut Strs<'py>,
+) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     let (kind, field_type): (&str, Option<&str>) = match &run.kind {
         RunKind::Text => ("text", None),
@@ -194,16 +229,20 @@ fn run_dict<'py>(py: Python<'py>, run: &TextRun) -> PyResult<Bound<'py, PyDict>>
         Caps::All => "all",
     });
     d.set_item("cap", cap)?;
-    d.set_item("hyperlink", hyperlink_py(py, run.hyperlink.as_ref())?)?;
+    d.set_item("hyperlink", hyperlink_py(py, run.hyperlink.as_ref(), strs)?)?;
     Ok(d)
 }
 
 /// 一个 [`Paragraph`] -> dict。
-fn paragraph_dict<'py>(py: Python<'py>, para: &Paragraph) -> PyResult<Bound<'py, PyDict>> {
+fn paragraph_dict<'py>(
+    py: Python<'py>,
+    para: &Paragraph,
+    strs: &mut Strs<'py>,
+) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     let runs = PyList::empty(py);
     for r in &para.runs {
-        runs.append(run_dict(py, r)?)?;
+        runs.append(run_dict(py, r, strs)?)?;
     }
     // 便利字段:整段拼接文字。
     let text: String = para.runs.iter().map(|r| r.text.as_str()).collect();
@@ -218,20 +257,25 @@ fn paragraph_dict<'py>(py: Python<'py>, para: &Paragraph) -> PyResult<Bound<'py,
 fn paragraphs_py<'py>(
     py: Python<'py>,
     paragraphs: &[Paragraph],
+    strs: &mut Strs<'py>,
 ) -> PyResult<(Bound<'py, PyList>, String)> {
     let list = PyList::empty(py);
     let mut texts: Vec<String> = Vec::new();
     for p in paragraphs {
-        list.append(paragraph_dict(py, p)?)?;
+        list.append(paragraph_dict(py, p, strs)?)?;
         texts.push(p.runs.iter().map(|r| r.text.as_str()).collect());
     }
     Ok((list, texts.join("\n")))
 }
 
 /// 一个 [`TextFrame`] -> dict(供文本框 / autoshape 内嵌文字复用)。
-fn text_frame_dict<'py>(py: Python<'py>, tf: &TextFrame) -> PyResult<Bound<'py, PyDict>> {
+fn text_frame_dict<'py>(
+    py: Python<'py>,
+    tf: &TextFrame,
+    strs: &mut Strs<'py>,
+) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
-    let (paras, text) = paragraphs_py(py, &tf.paragraphs)?;
+    let (paras, text) = paragraphs_py(py, &tf.paragraphs, strs)?;
     let (rect_emu, rect_pts) = rect_to_py(py, tf.rect);
     d.set_item("kind", "text")?;
     d.set_item("rect", rect_emu)?;
@@ -239,14 +283,18 @@ fn text_frame_dict<'py>(py: Python<'py>, tf: &TextFrame) -> PyResult<Bound<'py, 
     d.set_item("paragraphs", paras)?;
     d.set_item("text", text)?;
     d.set_item("placeholder", placeholder_py(py, tf.placeholder.as_ref())?)?;
-    d.set_item("hyperlink", hyperlink_py(py, tf.hyperlink.as_ref())?)?;
+    d.set_item("hyperlink", hyperlink_py(py, tf.hyperlink.as_ref(), strs)?)?;
     Ok(d)
 }
 
 /// 一个 [`Cell`] -> dict。
-fn cell_dict<'py>(py: Python<'py>, cell: &Cell) -> PyResult<Bound<'py, PyDict>> {
+fn cell_dict<'py>(
+    py: Python<'py>,
+    cell: &Cell,
+    strs: &mut Strs<'py>,
+) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
-    let (paras, text) = paragraphs_py(py, &cell.paragraphs)?;
+    let (paras, text) = paragraphs_py(py, &cell.paragraphs, strs)?;
     d.set_item("paragraphs", paras)?;
     d.set_item("text", text)?;
     d.set_item("col_span", cell.col_span)?;
@@ -257,12 +305,12 @@ fn cell_dict<'py>(py: Python<'py>, cell: &Cell) -> PyResult<Bound<'py, PyDict>> 
 }
 
 /// 一个 [`Row`] -> dict(`cells` + 便利的 `text` 列表)。
-fn row_dict<'py>(py: Python<'py>, row: &Row) -> PyResult<Bound<'py, PyDict>> {
+fn row_dict<'py>(py: Python<'py>, row: &Row, strs: &mut Strs<'py>) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     let cells = PyList::empty(py);
     let texts = PyList::empty(py);
     for c in &row.cells {
-        let cd = cell_dict(py, c)?;
+        let cd = cell_dict(py, c, strs)?;
         texts.append(cd.get_item("text")?)?;
         cells.append(cd)?;
     }
@@ -273,11 +321,15 @@ fn row_dict<'py>(py: Python<'py>, row: &Row) -> PyResult<Bound<'py, PyDict>> {
 }
 
 /// 一张 [`Table`] -> dict。
-fn table_dict<'py>(py: Python<'py>, table: &Table) -> PyResult<Bound<'py, PyDict>> {
+fn table_dict<'py>(
+    py: Python<'py>,
+    table: &Table,
+    strs: &mut Strs<'py>,
+) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     let rows = PyList::empty(py);
     for r in &table.rows {
-        rows.append(row_dict(py, r)?)?;
+        rows.append(row_dict(py, r, strs)?)?;
     }
     let (rect_emu, rect_pts) = rect_to_py(py, table.rect);
     d.set_item("kind", "table")?;
@@ -290,7 +342,11 @@ fn table_dict<'py>(py: Python<'py>, table: &Table) -> PyResult<Bound<'py, PyDict
 }
 
 /// 一张 [`Picture`] -> dict。
-fn picture_dict<'py>(py: Python<'py>, pic: &Picture) -> PyResult<Bound<'py, PyDict>> {
+fn picture_dict<'py>(
+    py: Python<'py>,
+    pic: &Picture,
+    strs: &mut Strs<'py>,
+) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     let (rect_emu, rect_pts) = rect_to_py(py, pic.rect);
     d.set_item("kind", "picture")?;
@@ -302,7 +358,7 @@ fn picture_dict<'py>(py: Python<'py>, pic: &Picture) -> PyResult<Bound<'py, PyDi
     d.set_item("name", pic.name.as_deref())?;
     d.set_item("alt_text", pic.alt_text.as_deref())?;
     d.set_item("title", pic.title.as_deref())?;
-    d.set_item("hyperlink", hyperlink_py(py, pic.hyperlink.as_ref())?)?;
+    d.set_item("hyperlink", hyperlink_py(py, pic.hyperlink.as_ref(), strs)?)?;
     d.set_item("placeholder", placeholder_py(py, pic.placeholder.as_ref())?)?;
     Ok(d)
 }
@@ -320,7 +376,11 @@ fn set_stroke_items(d: &Bound<'_, PyDict>, stroke: Option<&Stroke>) -> PyResult<
 }
 
 /// 一个 [`AutoShape`] -> dict。
-fn autoshape_dict<'py>(py: Python<'py>, sh: &AutoShape) -> PyResult<Bound<'py, PyDict>> {
+fn autoshape_dict<'py>(
+    py: Python<'py>,
+    sh: &AutoShape,
+    strs: &mut Strs<'py>,
+) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     let (rect_emu, rect_pts) = rect_to_py(py, sh.rect);
     d.set_item("kind", "auto")?;
@@ -331,7 +391,7 @@ fn autoshape_dict<'py>(py: Python<'py>, sh: &AutoShape) -> PyResult<Bound<'py, P
     set_stroke_items(&d, sh.stroke.as_ref())?;
     match &sh.text {
         Some(tf) => {
-            let (paras, text) = paragraphs_py(py, &tf.paragraphs)?;
+            let (paras, text) = paragraphs_py(py, &tf.paragraphs, strs)?;
             d.set_item("paragraphs", paras)?;
             d.set_item("text", text)?;
         }
@@ -346,7 +406,7 @@ fn autoshape_dict<'py>(py: Python<'py>, sh: &AutoShape) -> PyResult<Bound<'py, P
         .hyperlink
         .as_ref()
         .or_else(|| sh.text.as_ref().and_then(|t| t.hyperlink.as_ref()));
-    d.set_item("hyperlink", hyperlink_py(py, link)?)?;
+    d.set_item("hyperlink", hyperlink_py(py, link, strs)?)?;
     Ok(d)
 }
 
@@ -365,7 +425,11 @@ fn connector_dict<'py>(py: Python<'py>, c: &Connector) -> PyResult<Bound<'py, Py
 }
 
 /// 一个非表格 graphicFrame 占位 [`GraphicPlaceholder`] -> dict。
-fn placeholder_dict<'py>(py: Python<'py>, p: &GraphicPlaceholder) -> PyResult<Bound<'py, PyDict>> {
+fn placeholder_dict<'py>(
+    py: Python<'py>,
+    p: &GraphicPlaceholder,
+    strs: &mut Strs<'py>,
+) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     let (rect_emu, rect_pts) = rect_to_py(py, p.rect);
     d.set_item("kind", "placeholder")?;
@@ -373,7 +437,7 @@ fn placeholder_dict<'py>(py: Python<'py>, p: &GraphicPlaceholder) -> PyResult<Bo
     d.set_item("rect_points", rect_pts)?;
     d.set_item("uri", p.kind.as_deref())?;
     match &p.chart {
-        Some(c) => d.set_item("chart", chart_dict(py, c)?)?,
+        Some(c) => d.set_item("chart", chart_dict(py, c, strs)?)?,
         None => d.set_item("chart", py.None())?,
     }
     d.set_item("text", &p.diagram_text)?;
@@ -383,15 +447,23 @@ fn placeholder_dict<'py>(py: Python<'py>, p: &GraphicPlaceholder) -> PyResult<Bo
 
 /// 图表缓存数据 [`Chart`] -> dict(`kind` / `title` / `categories` / `series` / `bar_dir` /
 /// `grouping` / `three_d` / `combo` / `of_pie` / `warnings`)。
-fn chart_dict<'py>(py: Python<'py>, c: &Chart) -> PyResult<Bound<'py, PyDict>> {
+fn chart_dict<'py>(
+    py: Python<'py>,
+    c: &Chart,
+    strs: &mut Strs<'py>,
+) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     d.set_item("kind", c.kind.name())?;
-    d.set_item("title", c.title.as_deref())?;
-    d.set_item("categories", &c.categories)?;
+    d.set_item("title", strs.opt(c.title.as_deref()))?;
+    let cats = PyList::empty(py);
+    for cat in &c.categories {
+        cats.append(strs.get(cat))?;
+    }
+    d.set_item("categories", cats)?;
     let series = PyList::empty(py);
     for s in &c.series {
         let sd = PyDict::new(py);
-        sd.set_item("name", s.name.as_deref())?;
+        sd.set_item("name", strs.opt(s.name.as_deref()))?;
         sd.set_item("values", &s.values)?;
         sd.set_item("format_code", s.format_code.as_deref())?;
         sd.set_item("color", s.color.as_ref().and_then(spec_hex))?;
@@ -423,35 +495,43 @@ fn chart_dict<'py>(py: Python<'py>, c: &Chart) -> PyResult<Bound<'py, PyDict>> {
 }
 
 /// 一条批注 / 回复 [`Comment`] -> dict。
-fn comment_dict<'py>(py: Python<'py>, c: &Comment) -> PyResult<Bound<'py, PyDict>> {
+fn comment_dict<'py>(
+    py: Python<'py>,
+    c: &Comment,
+    strs: &mut Strs<'py>,
+) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
-    d.set_item("author", c.author.as_deref())?;
-    d.set_item("initials", c.initials.as_deref())?;
+    d.set_item("author", strs.opt(c.author.as_deref()))?;
+    d.set_item("initials", strs.opt(c.initials.as_deref()))?;
     d.set_item("datetime", c.datetime.as_deref())?;
     d.set_item("text", c.text.as_deref())?;
     d.set_item("position", c.position)?;
     let replies = PyList::empty(py);
     for r in &c.replies {
-        replies.append(comment_dict(py, r)?)?;
+        replies.append(comment_dict(py, r, strs)?)?;
     }
     d.set_item("replies", replies)?;
     Ok(d)
 }
 
 /// 一个 [`Shape`] -> dict(组合递归到 `children`)。
-fn shape_dict<'py>(py: Python<'py>, shape: &Shape) -> PyResult<Bound<'py, PyDict>> {
+fn shape_dict<'py>(
+    py: Python<'py>,
+    shape: &Shape,
+    strs: &mut Strs<'py>,
+) -> PyResult<Bound<'py, PyDict>> {
     match shape {
-        Shape::TextBox(tf) => text_frame_dict(py, tf),
-        Shape::Table(t) => table_dict(py, t),
-        Shape::Picture(p) => picture_dict(py, p),
-        Shape::Auto(a) => autoshape_dict(py, a),
+        Shape::TextBox(tf) => text_frame_dict(py, tf, strs),
+        Shape::Table(t) => table_dict(py, t, strs),
+        Shape::Picture(p) => picture_dict(py, p, strs),
+        Shape::Auto(a) => autoshape_dict(py, a, strs),
         Shape::Connector(c) => connector_dict(py, c),
-        Shape::Placeholder(p) => placeholder_dict(py, p),
+        Shape::Placeholder(p) => placeholder_dict(py, p, strs),
         Shape::Group(g) => {
             let d = PyDict::new(py);
             let kids = PyList::empty(py);
             for c in &g.children {
-                kids.append(shape_dict(py, c)?)?;
+                kids.append(shape_dict(py, c, strs)?)?;
             }
             d.set_item("kind", "group")?;
             d.set_item("children", kids)?;
@@ -502,13 +582,22 @@ impl PyPresentation {
         py: Python<'_>,
         font_map: Option<BTreeMap<String, String>>,
         include_hidden: bool,
+        max_page_ops: Option<&Bound<'_, PyAny>>,
+        max_total_ops: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<ExportResult> {
         let inner = Arc::clone(&self.inner);
         let media = Arc::clone(&self.media);
         let inherit = Arc::clone(&self.inherit);
-        let opts = RenderOptions {
+        let mut opts = RenderOptions {
             font_map: font_map.unwrap_or_default(),
+            ..RenderOptions::default()
         };
+        if let Some(n) = usize_arg("max_page_ops", max_page_ops)? {
+            opts.max_page_ops = n;
+        }
+        if let Some(n) = usize_arg("max_total_ops", max_total_ops)? {
+            opts.max_total_ops = n;
+        }
         py.detach(move || {
             let mut resolved = resolve_parts(&inner, &inherit);
             if !include_hidden {
@@ -525,11 +614,20 @@ impl PyPresentation {
         .map_err(map_err)
     }
 
-    fn export_options(order: &str, include_hidden: bool) -> PyResult<ExportOptions> {
-        Ok(ExportOptions {
+    fn export_options(
+        order: &str,
+        include_hidden: bool,
+        max_output_bytes: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<ExportOptions> {
+        let mut opts = ExportOptions {
             order: parse_order(order)?,
             include_hidden,
-        })
+            ..ExportOptions::default()
+        };
+        if let Some(n) = usize_arg("max_output_bytes", max_output_bytes)? {
+            opts.max_output_bytes = n;
+        }
+        Ok(opts)
     }
 }
 
@@ -609,25 +707,38 @@ impl PyPresentation {
 
     /// 整份演示文稿的纯文本(各 slide 以 `--- slide N ---` 分隔,含演讲者备注)。
     /// `order="visual"`(缺省)按视觉阅读顺序,`"document"` 按 spTree 文档顺序;
-    /// 隐藏页缺省跳过(`include_hidden=True` 纳入)。
-    #[pyo3(signature = (*, order="visual", include_hidden=false))]
-    fn to_text(&self, py: Python<'_>, order: &str, include_hidden: bool) -> PyResult<String> {
-        let opts = Self::export_options(order, include_hidden)?;
+    /// 隐藏页缺省跳过(`include_hidden=True` 纳入)。输出超过 `max_output_bytes`(缺省 64 MiB)
+    /// 时截断,末尾追加 `[pptspine: output truncated at N bytes]` 标记行,并 `warnings.warn`。
+    #[pyo3(signature = (*, order="visual", include_hidden=false, max_output_bytes=None))]
+    fn to_text(
+        &self,
+        py: Python<'_>,
+        order: &str,
+        include_hidden: bool,
+        max_output_bytes: Option<Bound<'_, PyAny>>,
+    ) -> PyResult<String> {
+        let opts = Self::export_options(order, include_hidden, max_output_bytes.as_ref())?;
         let resolved = resolved_of(py, &self.resolved, &self.inner, &self.inherit);
-        Ok(presentation_text_with(&self.inner, Some(resolved), &opts))
+        let out = presentation_text_bounded(&self.inner, Some(resolved), &opts);
+        warn_truncated(py, "text", out.truncated, opts.max_output_bytes)?;
+        Ok(out.text)
     }
 
     /// 整份演示文稿的 Markdown(每页一节;标题取 title 占位符,列表标记 / 图片 / 外链
     /// 语义化;表格用 GFM,含合并单元格时退回 HTML `<table>`)。参数同 [`Self::to_text`]。
-    #[pyo3(signature = (*, order="visual", include_hidden=false))]
-    fn to_markdown(&self, py: Python<'_>, order: &str, include_hidden: bool) -> PyResult<String> {
-        let opts = Self::export_options(order, include_hidden)?;
+    #[pyo3(signature = (*, order="visual", include_hidden=false, max_output_bytes=None))]
+    fn to_markdown(
+        &self,
+        py: Python<'_>,
+        order: &str,
+        include_hidden: bool,
+        max_output_bytes: Option<Bound<'_, PyAny>>,
+    ) -> PyResult<String> {
+        let opts = Self::export_options(order, include_hidden, max_output_bytes.as_ref())?;
         let resolved = resolved_of(py, &self.resolved, &self.inner, &self.inherit);
-        Ok(presentation_markdown_with(
-            &self.inner,
-            Some(resolved),
-            &opts,
-        ))
+        let out = presentation_markdown_bounded(&self.inner, Some(resolved), &opts);
+        warn_truncated(py, "markdown", out.truncated, opts.max_output_bytes)?;
+        Ok(out.text)
     }
 
     /// 节(`p14:sectionLst`):`[(name, [slide_index, ...])]`;无节为空列表。
@@ -688,28 +799,46 @@ impl PyPresentation {
     /// 文件路径或替代族名,叠加在内置替换表之上。降级(字体替换 / 预设退化 / 图片
     /// 丢弃等)以 `warnings.warn` 逐种类上浮一次。隐藏页缺省不导出(与 PowerPoint 一致),
     /// `include_hidden=True` 纳入。
-    #[pyo3(signature = (*, font_map=None, include_hidden=false))]
+    /// `max_page_ops` / `max_total_ops` 是单页 / 全文的渲染 op 预算(缺省 20 万 / 1 200 万),
+    /// 超出后后续形状不再绘制并告警(`render-budget`)。
+    #[pyo3(signature = (*, font_map=None, include_hidden=false, max_page_ops=None, max_total_ops=None))]
     fn to_pdf<'py>(
         &self,
         py: Python<'py>,
         font_map: Option<BTreeMap<String, String>>,
         include_hidden: bool,
+        max_page_ops: Option<Bound<'py, PyAny>>,
+        max_total_ops: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        let result = self.render_pdf_result(py, font_map, include_hidden)?;
+        let result = self.render_pdf_result(
+            py,
+            font_map,
+            include_hidden,
+            max_page_ops.as_ref(),
+            max_total_ops.as_ref(),
+        )?;
         surface_warnings(py, &result.warnings)?;
         Ok(PyBytes::new(py, &result.pdf))
     }
 
     /// 导出 PDF 并写到 `path`(`to_pdf` 的落盘便捷;签名同 §6 锁定 API)。
-    #[pyo3(signature = (path, *, font_map=None, include_hidden=false))]
+    #[pyo3(signature = (path, *, font_map=None, include_hidden=false, max_page_ops=None, max_total_ops=None))]
     fn save_pdf(
         &self,
         py: Python<'_>,
         path: PathBuf,
         font_map: Option<BTreeMap<String, String>>,
         include_hidden: bool,
+        max_page_ops: Option<Bound<'_, PyAny>>,
+        max_total_ops: Option<Bound<'_, PyAny>>,
     ) -> PyResult<()> {
-        let result = self.render_pdf_result(py, font_map, include_hidden)?;
+        let result = self.render_pdf_result(
+            py,
+            font_map,
+            include_hidden,
+            max_page_ops.as_ref(),
+            max_total_ops.as_ref(),
+        )?;
         surface_warnings(py, &result.warnings)?;
         std::fs::write(&path, &result.pdf).map_err(|e| map_err(PptError::Io(e)))
     }
@@ -794,8 +923,9 @@ impl PySlide {
     /// 顶层形状,作为 `list[dict]`。
     fn shapes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let list = PyList::empty(py);
+        let mut strs = Strs::new(py);
         for sh in &self.core().shapes {
-            list.append(shape_dict(py, sh)?)?;
+            list.append(shape_dict(py, sh, &mut strs)?)?;
         }
         Ok(list)
     }
@@ -805,8 +935,9 @@ impl PySlide {
     /// `replies`(新式线程回复,同样的键,`replies` 恒为空)。属性缺失为 `None`。
     fn comments<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let list = PyList::empty(py);
+        let mut strs = Strs::new(py);
         for c in &self.core().comments {
-            list.append(comment_dict(py, c)?)?;
+            list.append(comment_dict(py, c, &mut strs)?)?;
         }
         Ok(list)
     }
@@ -839,6 +970,28 @@ fn limit_arg(name: &str, v: Option<&Bound<'_, PyAny>>) -> PyResult<Option<u64>> 
     }
 }
 
+/// 一个正整数关键字参数(`None` = 沿用缺省;规则同 [`limit_arg`]),折成 `usize`。
+fn usize_arg(name: &str, v: Option<&Bound<'_, PyAny>>) -> PyResult<Option<usize>> {
+    limit_arg(name, v)?
+        .map(|n| {
+            usize::try_from(n).map_err(|_| PyValueError::new_err(format!("{name} is too large")))
+        })
+        .transpose()
+}
+
+/// 文本导出被输出上限截断时经 `warnings.warn` 告知(调用方不必去找标记行)。
+fn warn_truncated(py: Python<'_>, what: &str, truncated: bool, cap: usize) -> PyResult<()> {
+    if truncated {
+        py.import("warnings")?.call_method1(
+            "warn",
+            (format!(
+                "pptspine {what} export: output truncated at max_output_bytes={cap}"
+            ),),
+        )?;
+    }
+    Ok(())
+}
+
 /// 把可选关键字参数叠加到缺省 [`ZipLimits`] 上(缺省值与不传完全相同)。
 #[allow(clippy::too_many_arguments)]
 fn zip_limits(
@@ -856,6 +1009,7 @@ fn zip_limits(
     max_total_shapes: Option<&Bound<'_, PyAny>>,
     max_part_items: Option<&Bound<'_, PyAny>>,
     max_total_items: Option<&Bound<'_, PyAny>>,
+    max_model_bytes: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<ZipLimits> {
     let mut l = ZipLimits::default();
     let too_big = |name: &str| PyValueError::new_err(format!("{name} is too large"));
@@ -902,6 +1056,9 @@ fn zip_limits(
     if let Some(n) = limit_arg("max_total_items", max_total_items)? {
         l.max_total_items = usize::try_from(n).map_err(|_| too_big("max_total_items"))?;
     }
+    if let Some(n) = limit_arg("max_model_bytes", max_model_bytes)? {
+        l.max_model_bytes = usize::try_from(n).map_err(|_| too_big("max_model_bytes"))?;
+    }
     Ok(l)
 }
 
@@ -912,7 +1069,7 @@ fn zip_limits(
 #[pyo3(signature = (path, *, max_entries=None, max_entry_bytes=None, max_total_bytes=None,
                     max_compression_ratio=None, max_name_len=None, max_slides=None, max_diagram_shapes=None,
                     max_diagram_text_bytes=None, max_chart_points=None, max_comments=None, max_part_shapes=None,
-                    max_total_shapes=None, max_part_items=None, max_total_items=None))]
+                    max_total_shapes=None, max_part_items=None, max_total_items=None, max_model_bytes=None))]
 fn open(
     py: Python<'_>,
     path: PathBuf,
@@ -930,6 +1087,7 @@ fn open(
     max_total_shapes: Option<Bound<'_, PyAny>>,
     max_part_items: Option<Bound<'_, PyAny>>,
     max_total_items: Option<Bound<'_, PyAny>>,
+    max_model_bytes: Option<Bound<'_, PyAny>>,
 ) -> PyResult<PyPresentation> {
     let limits = zip_limits(
         max_entries.as_ref(),
@@ -946,6 +1104,7 @@ fn open(
         max_total_shapes.as_ref(),
         max_part_items.as_ref(),
         max_total_items.as_ref(),
+        max_model_bytes.as_ref(),
     )?;
     let parsed = py
         .detach(|| parse_path_with_limits(&path, &limits))
@@ -959,7 +1118,7 @@ fn open(
 #[pyo3(signature = (data, *, max_entries=None, max_entry_bytes=None, max_total_bytes=None,
                     max_compression_ratio=None, max_name_len=None, max_slides=None, max_diagram_shapes=None,
                     max_diagram_text_bytes=None, max_chart_points=None, max_comments=None, max_part_shapes=None,
-                    max_total_shapes=None, max_part_items=None, max_total_items=None))]
+                    max_total_shapes=None, max_part_items=None, max_total_items=None, max_model_bytes=None))]
 fn open_bytes(
     py: Python<'_>,
     data: &[u8],
@@ -977,6 +1136,7 @@ fn open_bytes(
     max_total_shapes: Option<Bound<'_, PyAny>>,
     max_part_items: Option<Bound<'_, PyAny>>,
     max_total_items: Option<Bound<'_, PyAny>>,
+    max_model_bytes: Option<Bound<'_, PyAny>>,
 ) -> PyResult<PyPresentation> {
     let limits = zip_limits(
         max_entries.as_ref(),
@@ -993,6 +1153,7 @@ fn open_bytes(
         max_total_shapes.as_ref(),
         max_part_items.as_ref(),
         max_total_items.as_ref(),
+        max_model_bytes.as_ref(),
     )?;
     let owned = data.to_vec();
     let parsed = py

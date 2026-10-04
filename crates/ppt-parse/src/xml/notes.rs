@@ -8,7 +8,7 @@ use quick_xml::events::Event;
 use quick_xml::Reader;
 
 use super::local_name;
-use super::slide::take_item;
+use super::slide::take_item_of;
 
 /// 从一份 notesSlide XML 提取演讲者备注文本。无文字返回 `None`。
 pub fn parse(xml: &str) -> Option<String> {
@@ -147,7 +147,7 @@ fn txbody_paragraphs<R: std::io::BufRead>(reader: &mut Reader<R>) -> Vec<String>
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
-                if name.as_slice() == b"p" && take_item() {
+                if name.as_slice() == b"p" && take_item_of::<String>() {
                     paras.push(paragraph_text(reader));
                 } else {
                     skip_element(reader);
@@ -204,6 +204,8 @@ fn paragraph_text<R: std::io::BufRead>(reader: &mut Reader<R>) -> String {
         }
         buf.clear();
     }
+    // 单段备注同样受单值上限与模型字节预算约束(按实际字节记账)。
+    super::budget::fit_string(&mut out, super::budget::MAX_TEXT_BYTES);
     out
 }
 

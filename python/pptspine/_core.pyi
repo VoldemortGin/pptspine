@@ -84,16 +84,29 @@ class Presentation:
     def media_names(self) -> list[str]: ...
     def image_bytes(self, media_name: str) -> bytes | None: ...
     def to_text(
-        self, *, order: Literal["visual", "document"] = "visual", include_hidden: bool = False
+        self,
+        *,
+        order: Literal["visual", "document"] = "visual",
+        include_hidden: bool = False,
+        max_output_bytes: int | None = None,
     ) -> str: ...
     def to_markdown(
-        self, *, order: Literal["visual", "document"] = "visual", include_hidden: bool = False
+        self,
+        *,
+        order: Literal["visual", "document"] = "visual",
+        include_hidden: bool = False,
+        max_output_bytes: int | None = None,
     ) -> str: ...
     def sections(self) -> list[tuple[str, list[int]]]: ...
     def diagnostics(self) -> list[dict[str, str | int]]: ...
     def core_properties(self) -> dict[str, str | None]: ...
     def to_pdf(
-        self, *, font_map: dict[str, str] | None = None, include_hidden: bool = False
+        self,
+        *,
+        font_map: dict[str, str] | None = None,
+        include_hidden: bool = False,
+        max_page_ops: int | None = None,
+        max_total_ops: int | None = None,
     ) -> bytes: ...
     def save_pdf(
         self,
@@ -101,6 +114,8 @@ class Presentation:
         *,
         font_map: dict[str, str] | None = None,
         include_hidden: bool = False,
+        max_page_ops: int | None = None,
+        max_total_ops: int | None = None,
     ) -> None: ...
     def __len__(self) -> int: ...
 
@@ -122,6 +137,7 @@ def open(
     max_total_shapes: int | None = None,
     max_part_items: int | None = None,
     max_total_items: int | None = None,
+    max_model_bytes: int | None = None,
 ) -> Presentation:
     """解析 ``.pptx``。可选关键字参数调整 zip 解压限额(正整数,``None`` = 缺省:条目数 10000、
     单条目 256 MiB、总解压 1 GiB、压缩比 10000、条目名 1024 字节、幻灯片数 5000);非法值
@@ -148,6 +164,7 @@ def open_bytes(
     max_total_shapes: int | None = None,
     max_part_items: int | None = None,
     max_total_items: int | None = None,
+    max_model_bytes: int | None = None,
 ) -> Presentation:
     """同 :func:`open`,输入为内存字节。"""
 def ocr_image(data: bytes) -> list[dict[str, Any]]: ...

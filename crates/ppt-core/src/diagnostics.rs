@@ -43,6 +43,11 @@ pub enum DiagnosticKind {
     /// `ZipLimits::max_total_items`:超出的节点被丢弃。`part` = 被截断的部件,`count` = 被丢弃
     /// 的节点数。
     ContentTruncated,
+    /// 单个字符串值超过长度上限(属性值 64 KiB、文本节点 1 MiB、批注作者 / 图表类别名等短标签
+    /// 4 KiB、超链接目标 16 KiB、公式定界符 / 运算符 2 个字符),或模型字节预算
+    /// (`ZipLimits::max_model_bytes`)耗尽:该值被截短(按字符边界)。`part` = 所在部件,
+    /// `count` = 被截短的值个数。
+    ValueTruncated,
 }
 
 impl DiagnosticKind {
@@ -61,6 +66,7 @@ impl DiagnosticKind {
             DiagnosticKind::CommentsTruncated => "comments-truncated",
             DiagnosticKind::ShapesTruncated => "shapes-truncated",
             DiagnosticKind::ContentTruncated => "content-truncated",
+            DiagnosticKind::ValueTruncated => "value-truncated",
         }
     }
 }

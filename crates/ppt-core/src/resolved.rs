@@ -33,6 +33,9 @@ pub const DEFAULT_ACCENTS: [[u8; 3]; 6] = [
 pub struct ResolvedPresentation {
     pub slide_size: (Emu, Emu),
     pub slides: Vec<ResolvedSlide>,
+    /// 因整份文稿的继承形状实例上限(`ppt_parse::resolve::MAX_INHERITED_SHAPES`)未物化的
+    /// master / layout 继承形状实例数;渲染侧据此告警。正常文稿为 0。
+    pub inherited_dropped: usize,
 }
 
 /// 一张已解析的幻灯片(形状按 spTree 文档顺序 = 绘制顺序)。
@@ -349,5 +352,6 @@ pub struct ResolvedRun {
     /// 大写变换(链上全缺为 [`Caps::None`])。
     pub cap: Caps,
     /// run 级外链目标(`a:hlinkClick` 经 rels 回填的 URL 原文,未按 scheme 过滤;页内跳转为 `None`)。
-    pub link: Option<String>,
+    /// 与模型里的超链接共享同一份字符串。
+    pub link: Option<std::sync::Arc<str>>,
 }

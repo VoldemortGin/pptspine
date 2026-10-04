@@ -32,12 +32,53 @@ use pdf_typeset::{Matrix, Op, PageOps, Rect, Typesetter};
 
 use transform::{group_transform, Flatten, GroupTransform};
 
+/// 单页渲染 op 预算的缺省值(按 [`op_weight`] 计)。
+///
+/// 合法大页的实测需求:50 × 20 的表格一页约 1.1 万(每格填充 / 边线 / 文字),100 个文本框一页
+/// 约 300;20 万留足一个数量级以上余量,又把一页的 op 内存封在数十 MB。
+pub const DEFAULT_MAX_PAGE_OPS: usize = 200_000;
+/// 整份文稿渲染 op 预算的缺省值(按 [`op_weight`] 计)。
+///
+/// 合法大文稿实测:500 页 × 50 × 20 表格约 560 万,2 000 页 × 100 个形状约 60 万;取前者约 2 倍。
+/// 每个 op 在引擎里几十到上百字节、序列化后约 20–60 字节,把 op 内存与 PDF 大小封在 GB 以内。
+pub const DEFAULT_MAX_TOTAL_OPS: usize = 12_000_000;
+
 /// 渲染选项(PRD §5:`font_map` 覆盖喂给 TS-2 字体解析器)。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct RenderOptions {
     /// 请求字体族 → 覆盖目标。值为**存在的文件路径**时,把该字体文件注入解析器
     /// (文件须包含所请求的字体族);否则视为**替代字体族名**,叠加进 TS-2 替换表。
     pub font_map: BTreeMap<String, String>,
+    /// 单页 op 预算(缺省 [`DEFAULT_MAX_PAGE_OPS`]):超出后该页后续形状不再绘制(已画的保留),
+    /// 记 `render-budget` 告警。
+    pub max_page_ops: usize,
+    /// 整份文稿 op 预算(缺省 [`DEFAULT_MAX_TOTAL_OPS`]):耗尽后后续页只剩背景,同样告警。
+    pub max_total_ops: usize,
+}
+
+impl Default for RenderOptions {
+    fn default() -> Self {
+        RenderOptions {
+            font_map: BTreeMap::new(),
+            max_page_ops: DEFAULT_MAX_PAGE_OPS,
+            max_total_ops: DEFAULT_MAX_TOTAL_OPS,
+        }
+    }
+}
+
+/// 一个 op 的预算权重:每个 op 记 1,外加其内含的可变长数据(路径段数、文字 / 链接每 64 字节、
+/// 组合内的子 op 与裁剪路径段)——与 op 的内存和序列化体积同阶。
+#[must_use]
+pub fn op_weight(op: &Op) -> usize {
+    match op {
+        Op::Text { text, .. } => 1 + text.len() / 64,
+        Op::Link { uri, .. } => 1 + uri.len() / 64,
+        Op::Path { segs, .. } => 1 + segs.len(),
+        Op::Group { clip, ops, .. } => {
+            1 + clip.as_ref().map_or(0, Vec::len) + ops.iter().map(op_weight).sum::<usize>()
+        }
+        _ => 1,
+    }
 }
 
 /// 把终态 IR 渲染成 PDF:每张 slide 一页,页面尺寸 = 画布尺寸(EMU → pt)。
@@ -64,6 +105,23 @@ pub fn render_pdf(
         (720.0, 540.0)
     };
 
+    let (pages, warnings) = build_pages(&mut ts, pres, media, opts, width, height);
+    let mut result = ts
+        .emit(&pages)
+        .map_err(|e| PptError::Render(e.to_string()))?;
+    result.warnings.extend(warnings);
+    Ok(result)
+}
+
+/// 逐页装配引擎 op(受 [`RenderOptions`] 的 op 预算约束),返回各页 op 与渲染侧告警。
+fn build_pages(
+    ts: &mut Typesetter,
+    pres: &ResolvedPresentation,
+    media: &BTreeMap<String, Vec<u8>>,
+    opts: &RenderOptions,
+    width: f64,
+    height: f64,
+) -> (Vec<PageOps>, Vec<ExportWarning>) {
     let mut ctx = RenderCtx {
         media,
         image_ids: BTreeMap::new(),
@@ -72,22 +130,44 @@ pub fn render_pdf(
         small_caps_warned: false,
         math_warned: false,
         accents: ppt_core::resolved::DEFAULT_ACCENTS,
+        page_left: 0,
+        page_full: false,
+        pages_cut: 0,
+        shapes_cut: 0,
     };
-    let pages: Vec<PageOps> = pres
-        .slides
-        .iter()
-        .map(|slide| PageOps {
-            width,
-            height,
-            ops: slide_ops(&mut ts, &mut ctx, slide, width, height),
-        })
-        .collect();
+    let mut total_left = opts.max_total_ops;
+    let mut pages: Vec<PageOps> = Vec::with_capacity(pres.slides.len());
+    for slide in &pres.slides {
+        let allow = opts.max_page_ops.min(total_left);
+        ctx.page_left = allow;
+        ctx.page_full = false;
+        let ops = slide_ops(ts, &mut ctx, slide, width, height);
+        total_left -= allow - ctx.page_left;
+        if ctx.page_full {
+            ctx.pages_cut += 1;
+        }
+        pages.push(PageOps { width, height, ops });
+    }
+    if ctx.pages_cut > 0 {
+        ctx.warnings.push(ExportWarning::Custom {
+            kind: "render-budget".into(),
+            detail: format!(
+                "渲染 op 预算耗尽:{} 页的后续 {} 个形状未绘制(单页 {} / 全文 {})",
+                ctx.pages_cut, ctx.shapes_cut, opts.max_page_ops, opts.max_total_ops
+            ),
+        });
+    }
+    if pres.inherited_dropped > 0 {
+        ctx.warnings.push(ExportWarning::Custom {
+            kind: "inherited-shapes-truncated".into(),
+            detail: format!(
+                "母版 / 版式继承形状超过全文实例上限,{} 个实例未绘制",
+                pres.inherited_dropped
+            ),
+        });
+    }
 
-    let mut result = ts
-        .emit(&pages)
-        .map_err(|e| PptError::Render(e.to_string()))?;
-    result.warnings.extend(ctx.warnings);
-    Ok(result)
+    (pages, ctx.warnings)
 }
 
 /// 渲染期跨形状共享的状态:media 字节表、图片 id 缓存(同图多次放置只 embed 一份,
@@ -104,9 +184,29 @@ struct RenderCtx<'a> {
     math_warned: bool,
     /// 当前 slide 的主题 accent1..6(图表系列配色)。
     accents: [[u8; 3]; 6],
+    /// 当前页剩余的 op 预算(按 [`op_weight`] 计)。
+    page_left: usize,
+    /// 当前页预算已耗尽(后续形状不再绘制)。
+    page_full: bool,
+    /// 预算耗尽的页数 / 未绘制的形状数(汇总成一条告警)。
+    pages_cut: usize,
+    shapes_cut: usize,
 }
 
 impl RenderCtx<'_> {
+    /// 把 `ops[from..]`(刚为一个形状产出的 op)记入本页预算:放得下就扣减并返回 `true`;
+    /// 放不下就丢弃这些 op、把本页标记为已满并返回 `false`(调用方停止本页后续形状)。
+    fn charge_ops(&mut self, ops: &mut Vec<Op>, from: usize) -> bool {
+        let w: usize = ops[from..].iter().map(op_weight).sum();
+        if w > self.page_left {
+            ops.truncate(from);
+            self.page_full = true;
+            return false;
+        }
+        self.page_left -= w;
+        !self.page_full
+    }
+
     /// 公式 run(`RunKind::Math`,文本是线性化纯文本)无排版,按普通文字画;整篇首次遇到时告警一次。
     fn note_math(&mut self, paragraphs: &[ppt_core::resolved::ResolvedParagraph]) {
         if self.math_warned {
@@ -158,11 +258,38 @@ fn slide_ops(
     // B-10:整页背景(`ResolvedSlide.background` 已含 slide → layout → master 继承)。
     if let Some(bg) = &slide.background {
         background_ops(ts, ctx, bg, width, height, &mut ops);
+        ctx.charge_ops(&mut ops, 0);
     }
-    for shape in slide.inherited_shapes.iter().chain(&slide.shapes) {
-        shape_ops(ts, ctx, shape, Flatten::IDENTITY, &mut ops);
-    }
+    budgeted_shapes(
+        ts,
+        ctx,
+        slide.inherited_shapes.iter().chain(&slide.shapes),
+        Flatten::IDENTITY,
+        &mut ops,
+    );
     ops
+}
+
+/// 逐个绘制形状并记入本页 op 预算;预算耗尽后其余形状不画(计入未绘制数)。组合的子形状
+/// 同样经这里,所以一个装着海量子形状的组合也在预算处停下,而不是先全部产出再丢弃。
+fn budgeted_shapes<'s>(
+    ts: &mut Typesetter,
+    ctx: &mut RenderCtx<'_>,
+    shapes: impl Iterator<Item = &'s ResolvedShape>,
+    flat: Flatten,
+    ops: &mut Vec<Op>,
+) {
+    for shape in shapes {
+        if ctx.page_full {
+            ctx.shapes_cut += 1;
+            continue;
+        }
+        let from = ops.len();
+        shape_ops(ts, ctx, shape, flat, ops);
+        if !ctx.charge_ops(ops, from) {
+            ctx.shapes_cut += 1;
+        }
+    }
 }
 
 /// B-10:整页背景 → 满页填充 / 图片。
@@ -284,17 +411,18 @@ fn shape_ops(
         ResolvedShape::Connector(conn) => shapes::connector_ops(ctx, conn, flat, ops),
         ResolvedShape::Picture(pic) => shapes::picture_ops(ts, ctx, pic, flat, ops),
         ResolvedShape::Group(g) => match group_transform(g) {
+            // 子形状逐个记账:先扣的子 op 在外层对整个组合记账前退还,避免重复计数。
             GroupTransform::Flat(f) => {
                 let combined = flat.after(f);
-                for child in &g.children {
-                    shape_ops(ts, ctx, child, combined, ops);
-                }
+                let before = ctx.page_left;
+                budgeted_shapes(ts, ctx, g.children.iter(), combined, ops);
+                ctx.page_left = before;
             }
             GroupTransform::Full(m) => {
                 let mut inner = Vec::new();
-                for child in &g.children {
-                    shape_ops(ts, ctx, child, Flatten::IDENTITY, &mut inner);
-                }
+                let before = ctx.page_left;
+                budgeted_shapes(ts, ctx, g.children.iter(), Flatten::IDENTITY, &mut inner);
+                ctx.page_left = before;
                 if !inner.is_empty() {
                     ops.push(Op::Group {
                         transform: Some(Matrix::concat(&m, &flat.to_matrix())),
@@ -374,12 +502,15 @@ fn table_ops(
         ys.push(yacc);
     }
 
-    for (ri, row) in table.rows.iter().enumerate() {
+    // 单元格逐个记入本页 op 预算(大表在预算处停下,保留已画的前缀行 / 格)。
+    let mut used = 0usize;
+    'rows: for (ri, row) in table.rows.iter().enumerate() {
         // 每个 `a:tc` 恰占一个网格列(gridSpan 首格宽绘 + 后随 hMerge 占位格)。
         for (c, cell) in row.cells.iter().enumerate() {
             if c >= ncols {
                 break;
             }
+            let cell_from = ops.len();
             if !cell.merged {
                 let cspan = (cell.col_span.max(1) as usize).min(ncols - c);
                 let rspan = (cell.row_span.max(1) as usize).min(nrows - ri);
@@ -399,6 +530,12 @@ fn table_ops(
                 ctx.note_math(&cell.paragraphs);
                 let spec = text::text_box_spec(crect, 0.0, &body, &cell.paragraphs);
                 ops.extend(ts.layout_text_box(&spec));
+            }
+            used += ops[cell_from..].iter().map(op_weight).sum::<usize>();
+            if used > ctx.page_left {
+                ops.truncate(cell_from);
+                ctx.page_full = true;
+                break 'rows;
             }
         }
     }
@@ -602,6 +739,7 @@ mod tests {
         ResolvedPresentation {
             slide_size: (12_192_000, 6_858_000), // 16:9 => 960x540 pt
             slides,
+            inherited_dropped: 0,
         }
     }
 
@@ -617,6 +755,114 @@ mod tests {
 
     fn render(p: &ResolvedPresentation) -> ExportResult {
         render_pdf(p, &BTreeMap::new(), &RenderOptions::default()).expect("render")
+    }
+
+    // ---- 渲染 op 预算 ---------------------------------------------------------
+
+    /// 生成器:`pages` 页,每页 `inherited` 个继承形状(母版装饰)+ 1 个本页文本框。
+    fn master_heavy(pages: usize, inherited: usize) -> ResolvedPresentation {
+        let deco = |i: usize| text_box(Rect::new(i as i64 * 10_000, 0, 9_000, 9_000), 0, "m");
+        pres(
+            (0..pages)
+                .map(|p| ResolvedSlide {
+                    index: p,
+                    background: None,
+                    inherited_shapes: (0..inherited).map(deco).collect(),
+                    shapes: vec![text_box(
+                        Rect::new(0, 3_000_000, 6_000_000, 600_000),
+                        0,
+                        "BODY",
+                    )],
+                    accents: ppt_core::resolved::DEFAULT_ACCENTS,
+                })
+                .collect(),
+        )
+    }
+
+    fn page_weights(
+        p: &ResolvedPresentation,
+        opts: &RenderOptions,
+    ) -> (Vec<usize>, Vec<ExportWarning>) {
+        let mut ts = Typesetter::with_system_fonts();
+        let (pages, warnings) = build_pages(&mut ts, p, &BTreeMap::new(), opts, 960.0, 540.0);
+        let w = pages
+            .iter()
+            .map(|pg| pg.ops.iter().map(op_weight).sum())
+            .collect();
+        (w, warnings)
+    }
+
+    /// 母版形状按页重复绘制:每页 op 权重不超过单页预算、全文不超过总预算,超出时告警;
+    /// 已画的前缀保留(每页都有内容,而不是后半本空白)。
+    #[test]
+    fn render_ops_are_bounded_per_page_and_in_total() {
+        let p = master_heavy(12, 300);
+        let opts = RenderOptions {
+            max_page_ops: 200,
+            max_total_ops: 1_000,
+            ..RenderOptions::default()
+        };
+        let (w, warnings) = page_weights(&p, &opts);
+        assert!(w.iter().all(|&x| x <= 200), "{w:?}");
+        assert!(w.iter().sum::<usize>() <= 1_000, "{w:?}");
+        assert!(w[0] > 150, "预算内的前缀照画:{w:?}");
+        assert!(warnings
+            .iter()
+            .any(|x| matches!(x, ExportWarning::Custom { kind, .. } if kind == "render-budget")));
+
+        let (full, warnings) = page_weights(&master_heavy(3, 20), &RenderOptions::default());
+        assert!(full.iter().all(|&x| x > 20));
+        assert!(!warnings
+            .iter()
+            .any(|x| matches!(x, ExportWarning::Custom { kind, .. } if kind == "render-budget")));
+    }
+
+    /// 大表在单元格粒度停下:保留已画的前缀格,而不是整表丢弃。
+    #[test]
+    fn render_budget_keeps_a_prefix_of_large_tables() {
+        use ppt_core::resolved::{ResolvedCell, ResolvedRow, ResolvedTable};
+        let cell = |t: &str| ResolvedCell {
+            paragraphs: vec![para(t)],
+            col_span: 1,
+            row_span: 1,
+            fill: Some(ResolvedColor::opaque([200, 200, 200])),
+            merged: false,
+            mar_l: 91_440,
+            mar_r: 91_440,
+            mar_t: 45_720,
+            mar_b: 45_720,
+            anchor: ppt_core::resolved::ResolvedAnchor::default(),
+            borders: ppt_core::resolved::ResolvedCellBorders::default(),
+        };
+        let table = ResolvedShape::Table(ResolvedTable {
+            rect: Some(Rect::new(0, 0, 9_000_000, 6_000_000)),
+            col_widths: vec![900_000; 10],
+            rows: (0..50)
+                .map(|_| ResolvedRow {
+                    cells: (0..10).map(|_| cell("v")).collect(),
+                    height: Some(100_000),
+                })
+                .collect(),
+            table_style_id: None,
+            style_resolved: false,
+        });
+        let opts = RenderOptions {
+            max_page_ops: 60,
+            ..RenderOptions::default()
+        };
+        let (w, _) = page_weights(&one_slide(vec![table]), &opts);
+        assert!(w[0] > 0 && w[0] <= 60, "{w:?}");
+    }
+
+    /// 继承形状实例被 `resolve` 封顶时,渲染侧发告警。
+    #[test]
+    fn inherited_shape_cap_is_reported() {
+        let mut p = master_heavy(1, 1);
+        p.inherited_dropped = 7;
+        let r = render(&p);
+        assert!(r.warnings.iter().any(
+            |x| matches!(x, ExportWarning::Custom { kind, .. } if kind == "inherited-shapes-truncated")
+        ));
     }
 
     fn connector(rect: Rect, xfrm: Xfrm, dash: Option<&str>) -> ResolvedShape {
@@ -1074,7 +1320,7 @@ mod tests {
     /// 带链接的文本框:`link` 为 `Some` 的整段 run(`plain` 为不带链接的前后缀)。
     fn linked_box(rect: Rect, link: Option<&str>, text: &str) -> ResolvedShape {
         let mut linked = run(text);
-        linked.link = link.map(str::to_string);
+        linked.link = link.map(Into::into);
         let ResolvedShape::TextBox(mut tf) = text_box(rect, 0, "") else {
             unreachable!()
         };
@@ -2012,8 +2258,15 @@ mod tests {
             "Zephyrmark Serif".to_string(),
             path.to_string_lossy().into_owned(),
         );
-        let exp = render_pdf(&mk(), &BTreeMap::new(), &RenderOptions { font_map })
-            .expect("render with font_map");
+        let exp = render_pdf(
+            &mk(),
+            &BTreeMap::new(),
+            &RenderOptions {
+                font_map,
+                ..RenderOptions::default()
+            },
+        )
+        .expect("render with font_map");
 
         // 1) 注入后不再对该族降级。
         assert!(
@@ -2069,7 +2322,7 @@ mod tests {
             rect: Some(Rect::new(914_400, 914_400, 6_400_800, 4_572_000)),
             kind: Some(uri.to_string()),
             chart_rel_id: Some("rId2".into()),
-            chart,
+            chart: chart.map(std::sync::Arc::new),
             diagram_rel_id: None,
             diagram_text: Vec::new(),
         })

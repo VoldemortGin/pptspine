@@ -11,6 +11,7 @@ pub mod error;
 pub mod export;
 pub mod geom;
 pub mod model;
+pub mod model_bytes;
 pub mod resolved;
 pub mod style;
 pub mod theme;
