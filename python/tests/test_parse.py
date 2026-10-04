@@ -154,11 +154,11 @@ def test_b3_run_fonts_and_decorations(b3_pptx_bytes):
     assert plain["ea_font"] is None
 
 
-def test_b3_alternate_content_takes_fallback(b3_pptx_bytes):
-    """``mc:AlternateContent`` 降入 Fallback:形状不再整块消失,Choice 被跳过。"""
+def test_b3_alternate_content_takes_choice(b3_pptx_bytes):
+    """``mc:AlternateContent`` 先取能解析出内容的 Choice;Fallback 不再同时取(内容不重复)。"""
     texts = [s["text"] for s in _b3_shapes(b3_pptx_bytes) if s["kind"] == "text"]
-    assert any("Fallback shape" in t for t in texts)
-    assert not any("NEWER CHOICE" in t for t in texts)
+    assert any("NEWER CHOICE" in t for t in texts)
+    assert not any("Fallback shape" in t for t in texts)
 
 
 def test_b3_connector_shape(b3_pptx_bytes):

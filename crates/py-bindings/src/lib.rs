@@ -166,6 +166,7 @@ fn run_dict<'py>(py: Python<'py>, run: &TextRun) -> PyResult<Bound<'py, PyDict>>
         RunKind::Text => ("text", None),
         RunKind::Break => ("break", None),
         RunKind::Field { field_type } => ("field", field_type.as_deref()),
+        RunKind::Math => ("math", None),
     };
     d.set_item("text", &run.text)?;
     d.set_item("kind", kind)?;

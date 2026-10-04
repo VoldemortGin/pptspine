@@ -9,7 +9,8 @@
 //! - `p:pic`  —— 图片
 //! - `p:grpSp` —— 组合(递归)
 //! - `p:cxnSp` —— 连接线
-//! - `mc:AlternateContent` —— 按锁定策略降入 `mc:Fallback`(跳过 `mc:Choice`)
+//! - `mc:AlternateContent` —— 先试 `mc:Choice`(文档顺序第一个解析出内容的),全空才取 `mc:Fallback`
+//!   (形状树层与 `a:p` 段落层同策略,与 docspine 对齐;绝不同时取两支)
 //!
 //! 部件级还捕获:`p:clrMap`(master)、`p:clrMapOvr`(slide/layout 的
 //! `a:overrideClrMapping`)、`p:txStyles`(master 三桶文本样式)。
@@ -436,22 +437,37 @@ fn parse_grp_sppr<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<XfrmDat
     xfrm
 }
 
-/// 解析 `mc:AlternateContent`:按锁定策略降入 `mc:Fallback`(兼容表示),把其中的形状
-/// 追加到 `out`;所有 `mc:Choice`(及其它子元素)整体跳过。已消费起始标签。
+/// 解析 `mc:AlternateContent`(Markup Compatibility,ECMA-376 Part 3),与 docspine 同策略:
+/// 按文档顺序把每个 `mc:Choice` 交给形状解析试一遍,第一个**产出非空形状**的被选中;
+/// Choice 里常是本仓不认识的新版元素(`p14:` / `a14:` …),解析为空是预期的,此时回落
+/// `mc:Fallback`。流式 reader 无法回退,故各分支顺序解析、选中后其余丢弃——Choice 与
+/// Fallback 内容绝不同时输出。已消费起始标签。
 fn parse_alternate_content<R: std::io::BufRead>(
     reader: &mut Reader<R>,
     ctx: &Ctx,
     out: &mut Vec<Shape>,
 ) {
+    let mut chosen: Option<Vec<Shape>> = None;
+    let mut fallback: Option<Vec<Shape>> = None;
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
-                if name.as_slice() == b"Fallback" {
-                    parse_shapes_into(reader, ctx, out);
-                } else {
-                    skip_element(reader, &name);
+                match name.as_slice() {
+                    b"Choice" if chosen.is_none() => {
+                        let mut shapes = Vec::new();
+                        parse_shapes_into(reader, ctx, &mut shapes);
+                        if !shapes.is_empty() {
+                            chosen = Some(shapes);
+                        }
+                    }
+                    b"Fallback" if chosen.is_none() && fallback.is_none() => {
+                        let mut shapes = Vec::new();
+                        parse_shapes_into(reader, ctx, &mut shapes);
+                        fallback = Some(shapes);
+                    }
+                    _ => skip_element(reader, &name),
                 }
             }
             Ok(Event::End(_)) => break,
@@ -461,6 +477,7 @@ fn parse_alternate_content<R: std::io::BufRead>(
         }
         buf.clear();
     }
+    out.extend(chosen.or(fallback).unwrap_or_default());
 }
 
 /// 解析一个 `p:sp`(文本框或自选图形)。已消费 `<p:sp>` 起始标签。
@@ -1189,7 +1206,8 @@ fn autofit_of(bp: &mut BodyProps, name: &[u8], e: &BytesStart) {
 }
 
 /// 解析 `a:p`(段落):`a:pPr`(完整段落属性)、`a:r`(run)、`a:br`(段内硬换行)、
-/// `a:fld`(字段,如页码/日期)。已消费 `<a:p>` 起始标签。
+/// `a:fld`(字段,如页码/日期)、`a14:m`(公式)、`mc:AlternateContent`(先 Choice 后 Fallback)。
+/// 已消费 `<a:p>` 起始标签。
 fn parse_paragraph<R: std::io::BufRead>(reader: &mut Reader<R>) -> Paragraph {
     let mut para = Paragraph::default();
     let mut buf = Vec::new();
@@ -1197,45 +1215,22 @@ fn parse_paragraph<R: std::io::BufRead>(reader: &mut Reader<R>) -> Paragraph {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
-                match name.as_slice() {
-                    b"pPr" => {
-                        para.level = ppr_level(&e);
-                        para.props = parse_level_style(reader, &e);
-                        para.align = para.props.align.clone();
-                    }
-                    b"r" => para.runs.push(parse_run_like(reader, RunKind::Text)),
-                    b"br" => {
-                        // `<a:br>` 可带 `a:rPr` 子元素,整体消费掉;换行本身无文字样式语义。
-                        skip_element(reader, &name);
-                        para.runs.push(break_run());
-                    }
-                    b"fld" => {
-                        let field_type = attr_of(&e, b"type");
-                        para.runs
-                            .push(parse_run_like(reader, RunKind::Field { field_type }));
-                    }
-                    _ => skip_element(reader, &name),
+                if name.as_slice() == b"pPr" {
+                    para.level = ppr_level(&e);
+                    para.props = parse_level_style(reader, &e);
+                    para.align = para.props.align.clone();
+                } else if !run_elem_start(&name, &e, reader, 0, &mut para.runs) {
+                    skip_element(reader, &name);
                 }
             }
             Ok(Event::Empty(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
-                match name.as_slice() {
-                    b"pPr" => {
-                        para.level = ppr_level(&e);
-                        para.props = level_style_attrs(&e);
-                        para.align = para.props.align.clone();
-                    }
-                    b"br" => para.runs.push(break_run()),
-                    b"fld" => {
-                        // 自闭合字段:无缓存文本,仍保留字段类型(信息无损)。
-                        para.runs.push(TextRun {
-                            kind: RunKind::Field {
-                                field_type: attr_of(&e, b"type"),
-                            },
-                            ..TextRun::default()
-                        });
-                    }
-                    _ => {}
+                if name.as_slice() == b"pPr" {
+                    para.level = ppr_level(&e);
+                    para.props = level_style_attrs(&e);
+                    para.align = para.props.align.clone();
+                } else {
+                    run_elem_empty(&name, &e, &mut para.runs);
                 }
             }
             Ok(Event::End(_)) => break,
@@ -1246,6 +1241,344 @@ fn parse_paragraph<R: std::io::BufRead>(reader: &mut Reader<R>) -> Paragraph {
         buf.clear();
     }
     para
+}
+
+/// 段落内 run 类元素(`a:r` / `a:br` / `a:fld` / `a14:m` / `mc:AlternateContent`)的起始标签
+/// 分发,把产出的 run 追加到 `runs`。非 run 类元素返回 `false`(调用方自行跳过)。
+/// `alt_depth` 是已嵌套的 AlternateContent 层数,超过 [`MAX_NEST_DEPTH`] 整棵跳过。
+fn run_elem_start<R: std::io::BufRead>(
+    name: &[u8],
+    e: &BytesStart,
+    reader: &mut Reader<R>,
+    alt_depth: u32,
+    runs: &mut Vec<TextRun>,
+) -> bool {
+    match name {
+        b"r" => runs.push(parse_run_like(reader, RunKind::Text)),
+        b"br" => {
+            // `<a:br>` 可带 `a:rPr` 子元素,整体消费掉;换行本身无文字样式语义。
+            skip_element(reader, name);
+            runs.push(break_run());
+        }
+        b"fld" => {
+            let field_type = attr_of(e, b"type");
+            runs.push(parse_run_like(reader, RunKind::Field { field_type }));
+        }
+        b"m" => runs.extend(parse_math(reader)),
+        b"AlternateContent" => {
+            if alt_depth >= MAX_NEST_DEPTH {
+                skip_element(reader, name);
+            } else {
+                runs.extend(parse_alt_runs(reader, alt_depth + 1));
+            }
+        }
+        _ => return false,
+    }
+    true
+}
+
+/// 段落内 run 类元素的自闭合形式(`<a:br/>` / `<a:fld/>`)。
+fn run_elem_empty(name: &[u8], e: &BytesStart, runs: &mut Vec<TextRun>) {
+    match name {
+        b"br" => runs.push(break_run()),
+        b"fld" => {
+            // 自闭合字段:无缓存文本,仍保留字段类型(信息无损)。
+            runs.push(TextRun {
+                kind: RunKind::Field {
+                    field_type: attr_of(e, b"type"),
+                },
+                ..TextRun::default()
+            });
+        }
+        _ => {}
+    }
+}
+
+/// 段落内 `mc:AlternateContent` -> 选中分支的 run 序列;策略同形状层
+/// ([`parse_alternate_content`]):第一个产出带文字 run 的 Choice,否则 Fallback。已消费起始标签。
+fn parse_alt_runs<R: std::io::BufRead>(reader: &mut Reader<R>, alt_depth: u32) -> Vec<TextRun> {
+    let mut chosen: Option<Vec<TextRun>> = None;
+    let mut fallback: Option<Vec<TextRun>> = None;
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                let name = local_name(e.name().as_ref()).to_vec();
+                match name.as_slice() {
+                    b"Choice" if chosen.is_none() => {
+                        let runs = parse_run_container(reader, alt_depth);
+                        if runs.iter().any(|r| !r.text.is_empty()) {
+                            chosen = Some(runs);
+                        }
+                    }
+                    b"Fallback" if chosen.is_none() && fallback.is_none() => {
+                        fallback = Some(parse_run_container(reader, alt_depth));
+                    }
+                    _ => skip_element(reader, &name),
+                }
+            }
+            Ok(Event::End(_)) => break,
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    chosen.or(fallback).unwrap_or_default()
+}
+
+/// 解析 `mc:Choice` / `mc:Fallback` 在段落内的 run 序列,直到其结束标签。
+fn parse_run_container<R: std::io::BufRead>(
+    reader: &mut Reader<R>,
+    alt_depth: u32,
+) -> Vec<TextRun> {
+    let mut runs = Vec::new();
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                let name = local_name(e.name().as_ref()).to_vec();
+                if !run_elem_start(&name, &e, reader, alt_depth, &mut runs) {
+                    skip_element(reader, &name);
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                let name = local_name(e.name().as_ref()).to_vec();
+                run_elem_empty(&name, &e, &mut runs);
+            }
+            Ok(Event::End(_)) => break,
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    runs
+}
+
+// ============================================================ 公式 (a14:m / m:oMath)
+//
+// 线性化规则与兄弟仓 docspine(`doc-parse/src/xml/document.rs` 的 `parse_math`)保持一致,
+// 两仓各自独立实现、无跨仓依赖:`m:f` -> `分子/分母`、`m:sSup` -> `x^2`、`m:sSub` -> `x_i`、
+// `m:rad` -> `sqrt(x)`(带次数 `root(3,x)`);某一项含多于一个文字片段或本身是复合结构时
+// 加括号;其它结构按文档顺序纯拼接 `m:t`。
+
+/// 公式里需要线性化的结构。
+#[derive(Clone, Copy, PartialEq)]
+enum MathStruct {
+    Frac,
+    Sup,
+    Sub,
+    Rad,
+}
+
+/// 结构内的槽位元素。
+#[derive(Clone, Copy, PartialEq)]
+enum MathSlot {
+    Num,
+    Den,
+    Base,
+    Sup,
+    Sub,
+    Deg,
+}
+
+/// 公式遍历栈上的一帧:容器 / 结构 / 槽位各自攒一份文字。其余嵌套元素不开帧,只在帧内记
+/// `other_depth`,文字直接并入当前帧(纯拼接且不随深度反复复制)。
+struct MathFrame {
+    /// 本帧是哪种结构(`None` = 容器或槽位)。
+    kind: Option<MathStruct>,
+    /// 本帧若是槽位,它是哪个槽。
+    slot: Option<MathSlot>,
+    text: String,
+    /// 本帧内 `m:t` 文字片段数(复合子项记 2),决定线性化时是否加括号。
+    frags: usize,
+    /// 结构帧:已收齐的槽位 `(槽, 文字, 片段数)`。
+    slots: Vec<(MathSlot, String, usize)>,
+    /// 帧内未开帧的嵌套元素深度。
+    other_depth: usize,
+}
+
+impl MathFrame {
+    fn new(kind: Option<MathStruct>, slot: Option<MathSlot>) -> Self {
+        MathFrame {
+            kind,
+            slot,
+            text: String::new(),
+            frags: 0,
+            slots: Vec::new(),
+            other_depth: 0,
+        }
+    }
+}
+
+fn math_struct_of(name: &[u8]) -> Option<MathStruct> {
+    match name {
+        b"f" => Some(MathStruct::Frac),
+        b"sSup" => Some(MathStruct::Sup),
+        b"sSub" => Some(MathStruct::Sub),
+        b"rad" => Some(MathStruct::Rad),
+        _ => None,
+    }
+}
+
+/// 槽位元素本地名 -> 在给定结构里的槽位(不属于该结构的名字不算槽位)。
+fn math_slot_of(kind: MathStruct, name: &[u8]) -> Option<MathSlot> {
+    match (kind, name) {
+        (MathStruct::Frac, b"num") => Some(MathSlot::Num),
+        (MathStruct::Frac, b"den") => Some(MathSlot::Den),
+        (MathStruct::Sup, b"e") | (MathStruct::Sub, b"e") | (MathStruct::Rad, b"e") => {
+            Some(MathSlot::Base)
+        }
+        (MathStruct::Sup, b"sup") => Some(MathSlot::Sup),
+        (MathStruct::Sub, b"sub") => Some(MathSlot::Sub),
+        (MathStruct::Rad, b"deg") => Some(MathSlot::Deg),
+        _ => None,
+    }
+}
+
+/// 多于一个文字片段(或复合子项)时用括号包起来。
+fn math_wrap(text: &str, frags: usize) -> String {
+    if frags > 1 {
+        format!("({text})")
+    } else {
+        text.to_string()
+    }
+}
+
+/// 把一个结构帧收拢成线性记法文本;所有槽位都为空时返回空串。
+fn math_linearize(kind: MathStruct, slots: &[(MathSlot, String, usize)]) -> String {
+    if slots.iter().all(|(_, t, _)| t.is_empty()) {
+        return String::new();
+    }
+    let slot = |want: MathSlot| {
+        slots
+            .iter()
+            .find(|(s, _, _)| *s == want)
+            .map(|(_, t, n)| (t.as_str(), *n))
+            .unwrap_or(("", 0))
+    };
+    let wrapped = |want: MathSlot| {
+        let (t, n) = slot(want);
+        math_wrap(t, n)
+    };
+    match kind {
+        MathStruct::Frac => format!("{}/{}", wrapped(MathSlot::Num), wrapped(MathSlot::Den)),
+        MathStruct::Sup => format!("{}^{}", wrapped(MathSlot::Base), wrapped(MathSlot::Sup)),
+        MathStruct::Sub => format!("{}_{}", wrapped(MathSlot::Base), wrapped(MathSlot::Sub)),
+        MathStruct::Rad => {
+            let (base, _) = slot(MathSlot::Base);
+            match slot(MathSlot::Deg) {
+                ("", _) => format!("sqrt({base})"),
+                (deg, _) => format!("root({deg},{base})"),
+            }
+        }
+    }
+}
+
+/// 把结束的帧并入父帧:槽位 -> 父结构的槽表;结构 -> 线性化文字(作复合项,记 2 片段)。
+fn math_merge(parent: &mut MathFrame, done: MathFrame) {
+    if let (Some(slot), true) = (done.slot, parent.kind.is_some()) {
+        parent.slots.push((slot, done.text, done.frags));
+    } else if let Some(kind) = done.kind {
+        let out = math_linearize(kind, &done.slots);
+        if !out.is_empty() {
+            parent.text.push_str(&out);
+            parent.frags += 2;
+        }
+    }
+}
+
+/// 解析 `a14:m`(内含 `m:oMathPara` / `m:oMath`)-> 一个 [`RunKind::Math`] run;抽不出文字
+/// 返回 `None`。已消费起始标签。**迭代**遍历(显式栈,不递归),结构帧深度受
+/// [`MAX_NEST_DEPTH`] 约束(更深的结构退化为纯拼接),深嵌套不会栈溢出;畸形(Eof 时帧未
+/// 闭合)自内向外并入父帧,文字不丢。`m:oMathPara` 内多个 `m:oMath` 以空格分隔。
+fn parse_math<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<TextRun> {
+    let mut stack = vec![MathFrame::new(None, None)];
+    let mut struct_depth = 0u32;
+    // 根帧上透明展开的 `m:oMathPara` / `m:oMath` 外壳层数(`a14:m` 内总有这层包装)。
+    let mut wrappers = 0usize;
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                let name = local_name(e.name().as_ref()).to_vec();
+                let name = name.as_slice();
+                // 栈永不为空(根帧只在容器结束时才处理),下面的 last_mut 都成立。
+                let at_root = stack.len() == 1;
+                let Some(top) = stack.last_mut() else { break };
+                match name {
+                    b"oMathPara" | b"oMath" if at_root && top.other_depth == 0 => {
+                        if name == b"oMath" && !top.text.is_empty() {
+                            top.text.push(' ');
+                        }
+                        wrappers += 1;
+                    }
+                    b"t" => {
+                        let t = read_text(reader);
+                        if !t.is_empty() {
+                            top.text.push_str(&t);
+                            top.frags += 1;
+                        }
+                    }
+                    _ if top.other_depth == 0 && top.kind.is_some() => {
+                        // 结构帧的直接子元素:认得的槽位开新帧,其余当普通嵌套。
+                        match top.kind.and_then(|k| math_slot_of(k, name)) {
+                            Some(slot) => stack.push(MathFrame::new(None, Some(slot))),
+                            None => top.other_depth += 1,
+                        }
+                    }
+                    _ if top.other_depth == 0 && struct_depth < MAX_NEST_DEPTH => {
+                        match math_struct_of(name) {
+                            Some(kind) => {
+                                struct_depth += 1;
+                                stack.push(MathFrame::new(Some(kind), None));
+                            }
+                            None => top.other_depth += 1,
+                        }
+                    }
+                    _ => top.other_depth += 1,
+                }
+            }
+            Ok(Event::End(_)) => {
+                let Some(top) = stack.last_mut() else { break };
+                if top.other_depth > 0 {
+                    top.other_depth -= 1;
+                } else if stack.len() == 1 {
+                    if wrappers == 0 {
+                        break; // `a14:m` 自身结束。
+                    }
+                    wrappers -= 1;
+                } else if let Some(done) = stack.pop() {
+                    if done.kind.is_some() {
+                        struct_depth -= 1;
+                    }
+                    if let Some(parent) = stack.last_mut() {
+                        math_merge(parent, done);
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    while stack.len() > 1 {
+        let Some(done) = stack.pop() else { break };
+        if let Some(parent) = stack.last_mut() {
+            math_merge(parent, done);
+        }
+    }
+    let text = stack.pop().map(|f| f.text).unwrap_or_default();
+    if text.is_empty() {
+        return None;
+    }
+    Some(TextRun {
+        text,
+        kind: RunKind::Math,
+        ..TextRun::default()
+    })
 }
 
 /// `a:pPr@lvl`(缺省 0)。

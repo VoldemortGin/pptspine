@@ -314,10 +314,10 @@ fn fld_becomes_field_run_with_cached_text() {
     assert_eq!(run.bold, Some(true));
 }
 
-/// §3.u:`mc:AlternateContent` 不再整块跳过——按锁定策略降入 `mc:Fallback`,
-/// `mc:Choice`(可能带不认识的新命名空间)整体跳过。
+/// §3.u(任务 A 修订):`mc:AlternateContent` 先试 `mc:Choice`,Choice 解析出内容就用它、
+/// 绝不再取 `mc:Fallback`(否则同一内容出现两次)。
 #[test]
-fn alternate_content_descends_into_fallback() {
+fn alternate_content_prefers_choice_over_fallback() {
     let shapes = shapes_of(
         r#"<mc:AlternateContent>
              <mc:Choice Requires="cx1">
@@ -328,11 +328,251 @@ fn alternate_content_descends_into_fallback() {
              </mc:Fallback>
            </mc:AlternateContent>"#,
     );
-    assert_eq!(shapes.len(), 1, "exactly the Fallback shape");
-    let Shape::TextBox(tf) = &shapes[0] else {
-        panic!("expected a text box from mc:Fallback");
+    assert_eq!(shapes.len(), 1, "Choice 与 Fallback 内容只能出现一次");
+    assert_eq!(first_text(&shapes[0]), "CHOICE");
+}
+
+/// 只有 `mc:Choice`、没有 `mc:Fallback`:内容不能丢。
+#[test]
+fn alternate_content_choice_without_fallback_is_kept() {
+    let shapes = shapes_of(
+        r#"<mc:AlternateContent>
+             <mc:Choice Requires="p14">
+               <p:sp><p:txBody><a:p><a:r><a:t>ONLY</a:t></a:r></a:p></p:txBody></p:sp>
+             </mc:Choice>
+           </mc:AlternateContent>"#,
+    );
+    assert_eq!(shapes.len(), 1);
+    assert_eq!(first_text(&shapes[0]), "ONLY");
+}
+
+/// Choice 里是本仓不认识的新版元素(解析为空)→ 回落 `mc:Fallback`。
+#[test]
+fn alternate_content_unknown_choice_falls_back() {
+    let shapes = shapes_of(
+        r#"<mc:AlternateContent>
+             <mc:Choice Requires="p15"><p15:threadingInfo><p15:x/></p15:threadingInfo></mc:Choice>
+             <mc:Fallback>
+               <p:sp><p:txBody><a:p><a:r><a:t>FALLBACK</a:t></a:r></a:p></p:txBody></p:sp>
+             </mc:Fallback>
+           </mc:AlternateContent>"#,
+    );
+    assert_eq!(shapes.len(), 1);
+    assert_eq!(first_text(&shapes[0]), "FALLBACK");
+}
+
+/// 多个 Choice:取文档顺序第一个能解析出内容的;空 Choice 被越过,其后的 Fallback 不取。
+#[test]
+fn alternate_content_first_non_empty_choice_wins() {
+    let shapes = shapes_of(
+        r#"<mc:AlternateContent>
+             <mc:Choice Requires="x1"><p15:unknown/></mc:Choice>
+             <mc:Choice Requires="x2">
+               <p:sp><p:txBody><a:p><a:r><a:t>SECOND</a:t></a:r></a:p></p:txBody></p:sp>
+             </mc:Choice>
+             <mc:Choice Requires="x3">
+               <p:sp><p:txBody><a:p><a:r><a:t>THIRD</a:t></a:r></a:p></p:txBody></p:sp>
+             </mc:Choice>
+             <mc:Fallback>
+               <p:sp><p:txBody><a:p><a:r><a:t>FALLBACK</a:t></a:r></a:p></p:txBody></p:sp>
+             </mc:Fallback>
+           </mc:AlternateContent>"#,
+    );
+    assert_eq!(shapes.len(), 1);
+    assert_eq!(first_text(&shapes[0]), "SECOND");
+}
+
+/// 形状树层面 5000 层嵌套 AlternateContent 不栈溢出、不 panic。
+#[test]
+fn deeply_nested_shape_alternate_content_does_not_overflow() {
+    let n = 5000;
+    let xml = format!(
+        "{}{}{}",
+        r#"<mc:AlternateContent><mc:Choice Requires="x">"#.repeat(n),
+        "<p:sp><p:txBody><a:p><a:r><a:t>DEEP</a:t></a:r></a:p></p:txBody></p:sp>",
+        "</mc:Choice></mc:AlternateContent>".repeat(n),
+    );
+    let _ = shapes_of(&xml);
+}
+
+fn first_text(shape: &Shape) -> String {
+    let Shape::TextBox(tf) = shape else {
+        panic!("expected a text box, got {shape:?}");
     };
-    assert_eq!(tf.paragraphs[0].runs[0].text, "FALLBACK");
+    tf.paragraphs
+        .iter()
+        .flat_map(|p| &p.runs)
+        .map(|r| r.text.as_str())
+        .collect()
+}
+
+/// 用一个文本框包住 `a:p` 内容,返回其第一个段落的 run。
+fn runs_of_paragraph(p_inner: &str) -> Vec<ppt_core::model::TextRun> {
+    let shapes = shapes_of(&format!(
+        "<p:sp><p:txBody><a:p>{p_inner}</a:p></p:txBody></p:sp>"
+    ));
+    let Shape::TextBox(tf) = &shapes[0] else {
+        panic!("expected a text box");
+    };
+    tf.paragraphs[0].runs.clone()
+}
+
+fn math(inner: &str) -> String {
+    format!("<a14:m><m:oMathPara><m:oMath>{inner}</m:oMath></m:oMathPara></a14:m>")
+}
+
+fn mr(t: &str) -> String {
+    format!("<m:r><m:t>{t}</m:t></m:r>")
+}
+
+fn math_text(inner: &str) -> String {
+    let runs = runs_of_paragraph(&math(inner));
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    assert_eq!(runs[0].kind, RunKind::Math);
+    runs[0].text.clone()
+}
+
+/// 段落内 `mc:AlternateContent`:`a14:m` 公式在 Choice,普通 run 在 Fallback → 取公式,不重复。
+#[test]
+fn paragraph_alternate_content_prefers_choice_math() {
+    let runs = runs_of_paragraph(&format!(
+        r#"<a:r><a:t>E=</a:t></a:r>
+           <mc:AlternateContent>
+             <mc:Choice Requires="a14">{}</mc:Choice>
+             <mc:Fallback><a:r><a:t>FALLBACK</a:t></a:r></mc:Fallback>
+           </mc:AlternateContent>"#,
+        math(&mr("mc2"))
+    ));
+    let texts: Vec<_> = runs.iter().map(|r| r.text.as_str()).collect();
+    assert_eq!(texts, ["E=", "mc2"]);
+    assert_eq!(runs[0].kind, RunKind::Text);
+    assert_eq!(runs[1].kind, RunKind::Math);
+}
+
+/// 段内 Choice 不认识 → 回落 Fallback 的 run;只有 Choice 也保留。
+#[test]
+fn paragraph_alternate_content_fallback_and_choice_only() {
+    let runs = runs_of_paragraph(
+        r#"<mc:AlternateContent>
+             <mc:Choice Requires="p15"><p15:foo/></mc:Choice>
+             <mc:Fallback><a:r><a:t>FB</a:t></a:r></mc:Fallback>
+           </mc:AlternateContent>"#,
+    );
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].text, "FB");
+    let runs = runs_of_paragraph(
+        r#"<mc:AlternateContent>
+             <mc:Choice Requires="p14"><a:r><a:t>CH</a:t></a:r><a:br/></mc:Choice>
+           </mc:AlternateContent>"#,
+    );
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].text, "CH");
+    assert_eq!(runs[1].kind, RunKind::Break);
+}
+
+/// 公式线性化(与 docspine 同规则):分式 / 上下标 / 根号 / 括号 / 纯拼接。
+#[test]
+fn math_linearization_rules() {
+    let frac = |n: &str, d: &str| format!("<m:f><m:num>{n}</m:num><m:den>{d}</m:den></m:f>");
+    assert_eq!(math_text(&frac(&mr("1"), &mr("2"))), "1/2");
+    assert_eq!(
+        math_text(&frac(
+            &format!("{}{}{}", mr("a"), mr("+"), mr("b")),
+            &mr("c")
+        )),
+        "(a+b)/c"
+    );
+    assert_eq!(
+        math_text(&format!(
+            "<m:sSup><m:e>{}</m:e><m:sup>{}</m:sup></m:sSup>",
+            mr("x"),
+            mr("2")
+        )),
+        "x^2"
+    );
+    assert_eq!(
+        math_text(&format!(
+            "<m:sSub><m:e>{}</m:e><m:sub>{}</m:sub></m:sSub>",
+            mr("x"),
+            mr("i")
+        )),
+        "x_i"
+    );
+    assert_eq!(
+        math_text(&format!(
+            "<m:rad><m:radPr/><m:deg/><m:e>{}</m:e></m:rad>",
+            mr("x")
+        )),
+        "sqrt(x)"
+    );
+    assert_eq!(
+        math_text(&format!(
+            "<m:rad><m:deg>{}</m:deg><m:e>{}</m:e></m:rad>",
+            mr("3"),
+            mr("x")
+        )),
+        "root(3,x)"
+    );
+    // 其它结构(定界符)按文档顺序纯拼接。
+    assert_eq!(
+        math_text(&format!(
+            "{}<m:d><m:e>{}</m:e></m:d>{}",
+            mr("f"),
+            mr("x"),
+            mr("=1")
+        )),
+        "fx=1"
+    );
+}
+
+/// 公式文本进入 `to_text` 导出。
+#[test]
+fn math_text_reaches_text_export() {
+    let pptx = pptx_with_sp_tree(&format!(
+        "<p:sp><p:txBody><a:p><a:r><a:t>area=</a:t></a:r>{}</a:p></p:txBody></p:sp>",
+        math(&format!(
+            "<m:sSup><m:e>{}</m:e><m:sup>{}</m:sup></m:sSup>",
+            mr("r"),
+            mr("2")
+        ))
+    ));
+    let parsed = parse_bytes(&pptx).expect("parse");
+    let text = ppt_core::export::presentation_text_with(
+        &parsed.presentation,
+        None,
+        &ppt_core::export::ExportOptions::default(),
+    );
+    assert!(text.contains("area=r^2"), "{text}");
+}
+
+/// 5000 层嵌套的公式结构与段内 AlternateContent 都不栈溢出。
+#[test]
+fn deeply_nested_math_and_paragraph_alt_content_do_not_overflow() {
+    let n = 5000;
+    let inner = format!(
+        "{}{}{}",
+        "<m:sSup><m:e>".repeat(n),
+        mr("x"),
+        "</m:e><m:sup></m:sup></m:sSup>".repeat(n)
+    );
+    let runs = runs_of_paragraph(&math(&inner));
+    assert!(runs.iter().any(|r| r.text.contains('x')), "{runs:?}");
+    let alt = format!(
+        "{}<a:r><a:t>DEEP</a:t></a:r>{}",
+        r#"<mc:AlternateContent><mc:Choice Requires="x">"#.repeat(n),
+        "</mc:Choice></mc:AlternateContent>".repeat(n)
+    );
+    let _ = runs_of_paragraph(&alt);
+}
+
+/// 畸形(公式 / AlternateContent 不闭合)不 panic,已读到的文字不丢。
+#[test]
+fn malformed_math_and_alt_content_do_not_panic() {
+    let _ = runs_of_paragraph(&format!(
+        "<a14:m><m:oMathPara><m:oMath><m:f><m:num>{}",
+        mr("1")
+    ));
+    let _ = runs_of_paragraph(r#"<mc:AlternateContent><mc:Choice Requires="a14"><a14:m><m:oMath>"#);
 }
 
 /// §3.t:`p:cxnSp` 连接线不再被丢——几何名 / 矩形 / 描边(色 + 宽 + 虚线)全保留。

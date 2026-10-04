@@ -291,7 +291,7 @@ pub struct Paragraph {
     pub props: TextLevelStyle,
 }
 
-/// run 的种类:普通文本 / 段内硬换行 / 字段。
+/// run 的种类:普通文本 / 段内硬换行 / 字段 / 公式。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum RunKind {
     /// 普通文本 run(`a:r`)。
@@ -305,13 +305,16 @@ pub enum RunKind {
         /// `a:fld@type`(缺失为 `None`)。
         field_type: Option<String>,
     },
+    /// 公式 run(`a14:m` 内的 OMML `m:oMathPara` / `m:oMath`):`text` 是线性化后的纯文本
+    /// (`1/2`、`x^2`、`sqrt(x)`),无排版;PDF 导出按普通文本画并告警。
+    Math,
 }
 
 /// 一段带样式的文字(`a:r` / `a:br` / `a:fld`,由 [`RunKind`] 区分)。
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct TextRun {
     pub text: String,
-    /// run 种类(文本 / 换行 / 字段),缺省普通文本。
+    /// run 种类(文本 / 换行 / 字段 / 公式),缺省普通文本。
     pub kind: RunKind,
     /// 拉丁字体名(`a:rPr` > `a:latin@typeface`)。
     pub font: Option<String>,

@@ -24,7 +24,8 @@ Spine 家族成员之一:**纯 Rust 的 PowerPoint(.pptx / OOXML)结构化解析
     1 GiB、压缩比 10 000(仅对解压量 > 1 MiB 的条目判定)、条目名 1024 字节;绝对路径 / 盘符形式(`C:`)/ 含 `..`
     的条目名直接拒绝(`PptError::Zip`)。`parse_bytes` / `parse_path` 用默认值,
     `parse_*_with_limits` 可自定。组合 / `mc:AlternateContent` 嵌套超过 64 层的子树整体跳过
-    (防递归下降爆栈)。
+    (防递归下降爆栈)。`mc:AlternateContent` 取文档顺序第一个解析出内容的 `mc:Choice`,全空才取 `mc:Fallback`
+    (形状树与段落层同策略,绝不同取);`a14:m` 公式线性化为 `RunKind::Math` run(规则与 docspine 对齐)。
 - **缝的元模式(家族统一)。** 唯一外部能力(OCR)经 Protocol seam 接入:`OcrEngine`(来自
   `ocrspine`)是协议,`PaddleOcr` 是确定性默认实现。core 只依赖协议,**绝不**直接 import 任何
   推理 SDK。

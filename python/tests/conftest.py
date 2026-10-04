@@ -360,7 +360,7 @@ def merged_table_pptx_bytes() -> bytes:
 # --- B-3 解析止损批 fixture(PRD-PDF-EXPORT §3.h/i/l/p/s/t/u)---------------------
 #
 # 一张覆盖全部止损点的 slide:段内换行 ``a:br`` + 字段 ``a:fld``(此前默默丢文本)、
-# ``mc:AlternateContent``(此前整块跳过,现降入 Fallback)、连接线 ``p:cxnSp``(此前
+# ``mc:AlternateContent``(此前整块跳过,现先取可解析的 Choice、否则 Fallback)、连接线 ``p:cxnSp``(此前
 # 被丢)、非表格 ``p:graphicFrame``(图表——此前连矩形一起消失,现保占位)、
 # ``a:tblGrid`` 列宽、``a:ea``/``a:cs`` 字体 + 下划线/删除线。
 

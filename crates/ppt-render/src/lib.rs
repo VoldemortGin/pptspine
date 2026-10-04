@@ -69,6 +69,7 @@ pub fn render_pdf(
         warnings: Vec::new(),
         vertical_warned: false,
         small_caps_warned: false,
+        math_warned: false,
         accents: ppt_core::resolved::DEFAULT_ACCENTS,
     };
     let pages: Vec<PageOps> = pres
@@ -98,11 +99,31 @@ struct RenderCtx<'a> {
     vertical_warned: bool,
     /// 小型大写(`cap=small`)降级告警的一次性开关(整篇只发一条)。
     small_caps_warned: bool,
+    /// 公式 run 按普通文本降级告警的一次性开关(整篇只发一条)。
+    math_warned: bool,
     /// 当前 slide 的主题 accent1..6(图表系列配色)。
     accents: [[u8; 3]; 6],
 }
 
 impl RenderCtx<'_> {
+    /// 公式 run(`RunKind::Math`,文本是线性化纯文本)无排版,按普通文字画;整篇首次遇到时告警一次。
+    fn note_math(&mut self, paragraphs: &[ppt_core::resolved::ResolvedParagraph]) {
+        if self.math_warned {
+            return;
+        }
+        let has_math = paragraphs
+            .iter()
+            .flat_map(|p| &p.runs)
+            .any(|r| r.kind == ppt_core::model::RunKind::Math);
+        if has_math {
+            self.warnings.push(ExportWarning::Custom {
+                kind: "math-text".into(),
+                detail: "公式(a14:m)v1 按线性化纯文本绘制,不做数学排版".into(),
+            });
+            self.math_warned = true;
+        }
+    }
+
     /// `cap=small` 引擎无小型大写,`text::run_input` 近似为全大写;整篇首次遇到时告警一次。
     fn note_small_caps(&mut self, paragraphs: &[ppt_core::resolved::ResolvedParagraph]) {
         if self.small_caps_warned {
@@ -224,6 +245,7 @@ fn text_ops(
         ctx.vertical_warned = true;
     }
     ctx.note_small_caps(&tf.paragraphs);
+    ctx.note_math(&tf.paragraphs);
     let mapped = flat.map_emu_rect(rect);
     let rot = -tf.xfrm.rot_deg();
     // B-6:`normAutofit` 生效但**未存** fontScale → 用引擎 TS-10 测量按内容重算缩放;
@@ -370,6 +392,7 @@ fn table_ops(
                 cell_border_ops(&cell.borders, crect, ops);
                 let body = cell_body(cell);
                 ctx.note_small_caps(&cell.paragraphs);
+                ctx.note_math(&cell.paragraphs);
                 let spec = text::text_box_spec(crect, 0.0, &body, &cell.paragraphs);
                 ops.extend(ts.layout_text_box(&spec));
             }
@@ -1505,6 +1528,22 @@ mod tests {
             r.cap = Caps::All;
         })]));
         assert!(!has_custom_warning(&all, "small-caps"));
+    }
+
+    /// 公式 run(`RunKind::Math`)按普通文本画,降级告警整篇只一条;无公式不告警。
+    #[test]
+    fn math_run_warns_exactly_once() {
+        let math = || styled_text_box("x^2", |r| r.kind = RunKind::Math);
+        let out = render(&one_slide(vec![math(), math()]));
+        let n = out
+            .warnings
+            .iter()
+            .filter(|w| matches!(w, ExportWarning::Custom { kind, .. } if kind == "math-text"))
+            .count();
+        assert_eq!(n, 1, "math-text 降级告警应恰好一条");
+        assert!(out.pdf.starts_with(b"%PDF"));
+        let plain = render(&one_slide(vec![styled_text_box("x^2", |_| {})]));
+        assert!(!has_custom_warning(&plain, "math-text"));
     }
 
     /// Task 4:两个纵排文本框仍水平降级渲染,但降级告警**恰好一条**(一次性)。
