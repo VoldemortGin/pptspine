@@ -20,6 +20,12 @@
 //! - slide 高度未知(`sldSz` 缺失 = 0)时才回退到"形状高度中位数的一半"。
 //!
 //! 横向容差 `tol_x` 同理取 slide 宽度的 2%。没有矩形的形状排在最后(保持文档相对顺序)。
+//!
+//! **复杂度保护**:每次切分对当前组排序扫描一遍,切分不均衡时(一列纵向文本框、完全重叠的连接线
+//! 每次只切下一个元素)总量是 O(n² log n)。所以累计切分步数(进入切分的组大小之和)设预算
+//! `4·n·⌈log₂(n+1)⌉ + 20 000`:超出后剩余各组退回第 3 步的按 (top, left) 行排序(稳定、确定),
+//! 最坏情形降为 O(n log² n)。常数项让 200 个形状以内的任何版式都走完整 XY-cut——正常幻灯片的
+//! 结果与引入预算前逐个一致(见测试里固化的语料摘要)。
 
 use crate::geom::{Emu, Rect};
 use crate::model::Shape;
@@ -180,6 +186,12 @@ impl Affine {
 /// 视觉阅读顺序:返回 `rects` 的下标排列(见模块文档的算法与阈值依据)。
 /// `slide_size` 为画布 `(cx, cy)`(EMU);`None` 矩形排在最后、保持相对顺序。
 pub fn reading_order(rects: &[Option<Rect>], slide_size: (Emu, Emu)) -> Vec<usize> {
+    order_counted(rects, slide_size).0
+}
+
+/// [`reading_order`] 的实现,另返回切分步数(进入切分的组大小之和,= 排序 / 扫描的元素量)。
+fn order_counted(rects: &[Option<Rect>], slide_size: (Emu, Emu)) -> (Vec<usize>, usize) {
+    let mut steps = 0usize;
     let boxes: Vec<(usize, Box2)> = rects
         .iter()
         .enumerate()
@@ -187,6 +199,7 @@ pub fn reading_order(rects: &[Option<Rect>], slide_size: (Emu, Emu)) -> Vec<usiz
         .collect();
     let tol_y = tolerance(slide_size.1, boxes.iter().map(|(_, b)| b.y1 - b.y0));
     let tol_x = tolerance(slide_size.0, boxes.iter().map(|(_, b)| b.x1 - b.x0));
+    let budget = work_budget(boxes.len());
 
     let mut out = Vec::with_capacity(rects.len());
     // 显式工作栈(后处理的一半先压栈),绝不递归。
@@ -196,6 +209,12 @@ pub fn reading_order(rects: &[Option<Rect>], slide_size: (Emu, Emu)) -> Vec<usiz
             out.extend(group.iter().map(|(i, _)| *i));
             continue;
         }
+        if steps > budget {
+            // 切分步数超出预算:剩余组退回按 (top, left) 行排序(见模块文档)。
+            out.extend(rows_then_left(group, tol_y));
+            continue;
+        }
+        steps += group.len();
         let rows = best_cut(&group, tol_y, |b| (b.y0, b.y1));
         let cols = best_cut(&group, tol_x, |b| (b.x0, b.x1));
         let cut = match (rows, cols) {
@@ -217,7 +236,15 @@ pub fn reading_order(rects: &[Option<Rect>], slide_size: (Emu, Emu)) -> Vec<usiz
             .filter(|(_, r)| r.is_none())
             .map(|(i, _)| i),
     );
-    out
+    (out, steps)
+}
+
+/// 切分步数预算:`4·n·⌈log₂(n+1)⌉ + 20 000`(见模块文档)。
+fn work_budget(n: usize) -> usize {
+    let lg = (usize::BITS - n.leading_zeros()) as usize;
+    n.saturating_mul(lg)
+        .saturating_mul(4)
+        .saturating_add(20_000)
 }
 
 /// 一组待排序的形状:(原下标, 包围盒)。
@@ -318,6 +345,130 @@ mod tests {
 
     fn r(x: Emu, y: Emu, w: Emu, h: Emu) -> Option<Rect> {
         Some(Rect::new(x, y, w, h))
+    }
+
+    /// 确定性伪随机(xorshift64*),生成"正常幻灯片"版式语料。
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+        fn range(&mut self, n: u64) -> i64 {
+            (self.next() % n.max(1)) as i64
+        }
+    }
+
+    /// 一页"正常"版式(≤ 120 个形状):随机散布 / 网格 / 两栏 / 标题 + 列表 / 互相重叠 / 缺矩形。
+    fn normal_layout(rng: &mut Rng) -> Vec<Option<Rect>> {
+        let n = 1 + rng.range(120) as usize;
+        let style = rng.range(6);
+        (0..n)
+            .map(|i| {
+                let i = i as i64;
+                match style {
+                    0 => r(
+                        rng.range(8_500_000),
+                        rng.range(6_400_000),
+                        200_000 + rng.range(3_000_000),
+                        100_000 + rng.range(1_500_000),
+                    ),
+                    1 => r(
+                        (i % 6) * 1_500_000 + rng.range(50_000),
+                        (i / 6) * 500_000 + rng.range(50_000),
+                        1_400_000,
+                        450_000,
+                    ),
+                    2 => r(
+                        if i % 2 == 0 { 500_000 } else { 4_800_000 },
+                        1_200_000 + (i / 2) * 400_000 + rng.range(150_000),
+                        3_500_000,
+                        350_000,
+                    ),
+                    3 if i == 0 => r(500_000, 300_000, 8_000_000, 900_000),
+                    3 => r(
+                        700_000 + rng.range(3) * 300_000,
+                        1_300_000 + i * 120_000,
+                        7_000_000,
+                        110_000,
+                    ),
+                    4 => r(
+                        rng.range(2_000_000),
+                        rng.range(2_000_000),
+                        3_000_000 + rng.range(4_000_000),
+                        2_000_000 + rng.range(3_000_000),
+                    ),
+                    _ if rng.range(10) == 0 => None,
+                    _ => r(
+                        rng.range(9_000_000),
+                        rng.range(6_800_000),
+                        rng.range(900_000),
+                        rng.range(600_000),
+                    ),
+                }
+            })
+            .collect()
+    }
+
+    /// FNV-1a 摘要:把整份语料的排序结果压成一个数。
+    fn corpus_digest(order: impl Fn(&[Option<Rect>]) -> Vec<usize>) -> u64 {
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for _ in 0..2_000 {
+            let rects = normal_layout(&mut rng);
+            for i in order(&rects) {
+                for b in (i as u32).to_le_bytes() {
+                    h ^= u64::from(b);
+                    h = h.wrapping_mul(0x0100_0000_01b3);
+                }
+            }
+            h ^= 0xff;
+        }
+        h
+    }
+
+    /// 正常幻灯片的阅读顺序被固化:2 000 页确定性语料(≤ 120 个形状 / 页,含散布、网格、两栏、
+    /// 列表、重叠、缺矩形)的排序结果摘要必须与改造前一致(摘要取自改造前的实现)。
+    #[test]
+    fn normal_layout_corpus_order_is_frozen() {
+        assert_eq!(corpus_digest(|r| reading_order(r, SLIDE)), FROZEN_DIGEST);
+    }
+
+    const FROZEN_DIGEST: u64 = 13_309_350_722_119_740_429;
+
+    /// 切分步数的 n·log n 上界(含常数项;见 `work_budget`)。
+    fn n_log_n(n: usize) -> usize {
+        let lg = usize::BITS - n.leading_zeros();
+        8 * n * lg as usize + 40_000
+    }
+
+    /// 退化输入(一列纵向文本框、完全重叠的连接线、斜对角)下切分步数与 n log n 同阶,而不是 n²。
+    #[test]
+    fn degenerate_inputs_take_n_log_n_steps() {
+        for n in [2_000_usize, 8_000, 16_000] {
+            let column: Vec<_> = (0..n).map(|i| r(0, i as i64 * 300, 100, 100)).collect();
+            let stacked: Vec<_> = (0..n).map(|_| r(0, 0, 1, 1)).collect();
+            let diagonal: Vec<_> = (0..n)
+                .map(|i| r(i as i64 * 300, i as i64 * 300, 100, 100))
+                .collect();
+            for (name, rects) in [
+                ("column", column),
+                ("stacked", stacked),
+                ("diagonal", diagonal),
+            ] {
+                let (order, steps) = order_counted(&rects, SLIDE);
+                assert_eq!(order.len(), n);
+                assert!(steps <= n_log_n(n), "{name} n={n}: {steps} 步");
+                if name != "stacked" {
+                    // 退回 (y, x) 排序后,纵列 / 斜对角仍是自上而下。
+                    assert!(order.iter().copied().eq(0..n), "{name}");
+                } else {
+                    assert!(order.iter().copied().eq(0..n), "完全重叠保持文档顺序");
+                }
+            }
+        }
     }
 
     #[test]
