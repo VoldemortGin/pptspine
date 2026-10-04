@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 
 use ppt_core::model::{Chart, GraphicPlaceholder, Shape};
+use ppt_core::DiagnosticKind;
 
 use crate::links::resolve_part_path;
 use crate::xml::{self, Relationship};
@@ -40,7 +41,7 @@ pub(crate) fn resolve_charts(
                 };
                 let path = resolve_part_path(part, &rel.target);
                 *chart = cache
-                    .entry(path)
+                    .entry(path.clone())
                     .or_insert_with_key(|path| {
                         pkg.part_str(path).map(|x| {
                             #[cfg(test)]
@@ -49,6 +50,13 @@ pub(crate) fn resolve_charts(
                         })
                     })
                     .clone();
+                // 部件在但解析不出可用数据(XML 损坏或无系列)= 降级;部件缺失由 `MissingPart` 覆盖。
+                if chart
+                    .as_ref()
+                    .is_some_and(|c| c.series.is_empty() || pkg.is_malformed(&path))
+                {
+                    pkg.note(DiagnosticKind::ChartDegraded, &path, 1);
+                }
             }
             Shape::Group(g) => resolve_charts(&mut g.children, rels, part, pkg, cache),
             _ => {}

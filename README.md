@@ -32,6 +32,7 @@ offline, and deterministically via the sibling [`ocrspine`](../ocrspine) crate
 | Pictures: `r:embed` rel → media name; raw bytes via `Presentation.image_bytes()`; alt text `cNvPr@descr` / `@title` / `@name` (`alt_text` / `title` / `name` keys) | parsed |
 | Hyperlinks `a:hlinkClick` (run- and shape-level): external URL via rels, internal jumps (`ppaction://hlinksldjump` / `hlinkshowjump`) → target slide index (`hyperlink` key) | parsed; PDF: run-level external `http` / `https` / `mailto` links → URI link annotations |
 | Placeholders: `p:ph` type/idx on every shape dict (`placeholder` key: `{"type", "idx"}` or `None`) | parsed |
+| Parse diagnostics (`Presentation.diagnostics()`): content silently lost / degraded during parsing is reported as `{kind, part, count}` (never document text) — `xml-truncated` (part XML broken mid-way; the parsed prefix is kept), `nesting-too-deep`, `duplicate-slide-ref`, `missing-part` (relationship to an absent part), `smartart-degraded`, `chart-degraded`; empty for a clean file | parsed |
 | Hidden slides (`p:sld@show="0"` → `Slide.hidden`), sections (`p14:sectionLst` → `Presentation.sections()`), document properties (`docProps/core.xml` + `app.xml` → `Presentation.core_properties()`) | parsed |
 | Autoshapes: geometry name, fill (solid / gradient / picture / pattern / `grpFill` inherited), stroke, optional text | parsed (best-effort); PDF: picture fills clipped to the shape geometry (`tile` → stretched + `blip-fill-tiled`), pattern → flat mean color + `pattern-fill-degraded` |
 | Groups (`p:grpSp`): recursive | parsed |
@@ -118,6 +119,7 @@ print(pres.slides()[0].notes)  # speaker notes, or None
 print(pres.slides()[0].hidden) # p:sld@show="0"
 print(pres.sections())         # [("Intro", [0]), ("Body", [1, 2])] — [] without sections
 print(pres.core_properties()["title"])  # docProps core/app fields; missing → None
+print(pres.diagnostics())      # [] for a clean file; else [{"kind": "xml-truncated", "part": "ppt/slides/slide3.xml", "count": 5120}, ...]
 
 # Run OCR on raw image bytes (PNG/JPEG), offline:
 items = pptspine.ocr_image(open("scan.png", "rb").read())

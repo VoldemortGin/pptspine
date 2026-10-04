@@ -12,10 +12,11 @@ use std::collections::BTreeMap;
 
 use ppt_core::geom::Rect;
 use ppt_core::model::{GraphicPlaceholder, GroupShape, Shape};
+use ppt_core::DiagnosticKind;
 
 use crate::links::resolve_part_path;
 use crate::xml::diagram::{parse_data, DiagramData};
-use crate::xml::{self, Relationship};
+use crate::xml::Relationship;
 use crate::zip_pkg::Package;
 
 // 测试用:本线程内 drawing 部件被解析的次数(断言"同一部件只解析一次")。
@@ -65,13 +66,22 @@ fn fill_diagram(
     media_index: &BTreeMap<String, usize>,
     cache: &mut DiagramCache,
 ) -> Option<GroupShape> {
-    let rel = rels.get(gp.diagram_rel_id.as_deref()?)?;
+    // 没有可用 drawing 即降级(占位框 + data 文字):记一条 `SmartArtDegraded`(`part` = data 部件;
+    // 关系都找不到时退回源 slide 部件)。
+    let Some(rel) = gp.diagram_rel_id.as_deref().and_then(|id| rels.get(id)) else {
+        pkg.note(DiagnosticKind::SmartArtDegraded, part, 1);
+        return None;
+    };
     let data_path = resolve_part_path(part, &rel.target);
     let data = cache
         .data
         .entry(data_path.clone())
         .or_insert_with(|| pkg.part_str(&data_path).map(|x| parse_data(&x)))
-        .clone()?;
+        .clone();
+    let Some(data) = data else {
+        pkg.note(DiagnosticKind::SmartArtDegraded, &data_path, 1);
+        return None;
+    };
 
     if let Some(drawing_path) = drawing_path_for(&data, &data_path, rels, part) {
         let children = cache
@@ -89,6 +99,7 @@ fn fill_diagram(
             });
         }
     }
+    pkg.note(DiagnosticKind::SmartArtDegraded, &data_path, 1);
     gp.diagram_text = data.texts;
     None
 }
@@ -127,32 +138,15 @@ fn parse_drawing(
     media_index: &BTreeMap<String, usize>,
 ) -> Option<Vec<Shape>> {
     let xml_text = pkg.part_str(path)?;
-    if !is_well_formed(&xml_text) {
+    if pkg.is_malformed(path) {
         return None;
     }
     #[cfg(test)]
     DRAWING_PARSE_COUNT.with(|c| c.set(c.get() + 1));
     let rels_xml = pkg.slide_rels_str(path);
-    let shapes = xml::slide::parse_part(&xml_text, rels_xml.as_deref(), media_index).shapes;
+    let shapes =
+        crate::parse_shape_part(pkg, path, &xml_text, rels_xml.as_deref(), media_index).shapes;
     (!shapes.is_empty()).then_some(shapes)
-}
-
-/// XML 是否良构:无解析错误且标签配对闭合(只计深度,不递归,深嵌套安全)。
-/// 形状解析器对截断输入是尽力而为的(会吐出半截形状),这里先把畸形部件挡掉。
-fn is_well_formed(xml_text: &str) -> bool {
-    let mut reader = quick_xml::Reader::from_str(xml_text);
-    let mut buf = Vec::new();
-    let mut depth = 0usize;
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(quick_xml::events::Event::Start(_)) => depth += 1,
-            Ok(quick_xml::events::Event::End(_)) => depth = depth.saturating_sub(1),
-            Ok(quick_xml::events::Event::Eof) => return depth == 0,
-            Err(_) => return false,
-            _ => {}
-        }
-        buf.clear();
-    }
 }
 
 #[cfg(test)]

@@ -32,6 +32,9 @@ pub struct Relationship {
     pub id: String,
     pub rel_type: String,
     pub target: String,
+    /// 外部目标(`TargetMode="External"`,或 `Target` 带 URI scheme 如 `https:` / `mailto:`):
+    /// 不是包内部件,不参与"悬空关系"诊断。
+    pub external: bool,
 }
 
 /// 解析一份 `.rels` XML,得到 `rId -> Relationship` 映射。容错:解析出错则返回已得部分。
@@ -47,14 +50,19 @@ pub fn parse_rels(xml: &str) -> BTreeMap<String, Relationship> {
                     let mut id = String::new();
                     let mut rel_type = String::new();
                     let mut target = String::new();
+                    let mut external = false;
                     for attr in e.attributes().flatten() {
                         match attr.key.as_ref() {
                             b"Id" => id = attr_string(&attr),
                             b"Type" => rel_type = attr_string(&attr),
                             b"Target" => target = attr_string(&attr),
+                            b"TargetMode" => {
+                                external = attr_string(&attr).eq_ignore_ascii_case("external");
+                            }
                             _ => {}
                         }
                     }
+                    external |= has_uri_scheme(&target);
                     if !id.is_empty() {
                         map.insert(
                             id.clone(),
@@ -62,6 +70,7 @@ pub fn parse_rels(xml: &str) -> BTreeMap<String, Relationship> {
                                 id,
                                 rel_type,
                                 target,
+                                external,
                             },
                         );
                     }
@@ -74,6 +83,36 @@ pub fn parse_rels(xml: &str) -> BTreeMap<String, Relationship> {
         buf.clear();
     }
     map
+}
+
+/// `Target` 是否以 URI scheme 开头(`https:` / `mailto:` …;盘符 `C:` 单字母不算)。
+fn has_uri_scheme(target: &str) -> bool {
+    target.split_once(':').is_some_and(|(scheme, _)| {
+        scheme.len() > 1
+            && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    })
+}
+
+/// XML 是否良构且标签配对闭合(只计深度,不递归,深嵌套安全)。不良构时返回解析停止处的字节偏移:
+/// 读取错误(标签错配 / 属性中途截断 …),或 EOF 时仍有未闭合标签。所有 walker 遇到这两种情形
+/// 都是静默 `break`,所以这是"内容被截断"的唯一判据。
+pub fn check_well_formed(xml_text: &str) -> Result<(), usize> {
+    let mut reader = Reader::from_str(xml_text);
+    let mut buf = Vec::new();
+    let mut depth = 0usize;
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(_)) => depth += 1,
+            Ok(Event::End(_)) => depth = depth.saturating_sub(1),
+            Ok(Event::Eof) if depth == 0 => return Ok(()),
+            Ok(Event::Eof) | Err(_) => return Err(reader.buffer_position() as usize),
+            _ => {}
+        }
+        buf.clear();
+    }
 }
 
 /// 在一份 `.rels` 里找到第一个 `Type` 包含 `kind` 子串的关系,返回其相对**源部件**

@@ -4,6 +4,7 @@
 //! 这些朴素的 `struct` / `enum`。本轮不要求 serde,只派生 `Debug`/`Clone`/`PartialEq`。
 
 use crate::color::ColorSpec;
+use crate::diagnostics::Diagnostic;
 use crate::geom::{Emu, Rect};
 use crate::style::{Caps, PlaceholderRef, ShapeStyle, TextLevelStyle, TextStyleLevels};
 use crate::theme::ClrMap;
@@ -21,6 +22,9 @@ pub struct Presentation {
     pub properties: DocProperties,
     /// 首张幻灯片的显示页码(`p:presentation@firstSlideNum`,缺省 1)。
     pub first_slide_num: i32,
+    /// 解析诊断:内容被静默丢失 / 降级的结构化事实(截断、嵌套超限、重复引用、缺失部件、
+    /// SmartArt / 图表降级);完全正常的文件为空。只含种类 / 部件路径 / 计数,不含正文。
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 /// 一个节(`p14:section`):名字 + 所含幻灯片的零基序号(按节内顺序)。

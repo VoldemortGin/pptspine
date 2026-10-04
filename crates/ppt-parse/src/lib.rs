@@ -19,7 +19,7 @@ use ppt_core::model::{
 };
 use ppt_core::style::{TextStyleLevels, TxStyles};
 use ppt_core::theme::{ClrMap, Theme};
-use ppt_core::{PptError, Result};
+use ppt_core::{DiagnosticKind, PptError, Result};
 
 use zip_pkg::Package;
 
@@ -126,7 +126,7 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
             continue;
         };
         let rels_xml = pkg.slide_rels_str(part);
-        let data = xml::slide::parse_part(&slide_xml, rels_xml.as_deref(), &media_index);
+        let data = parse_shape_part(&pkg, part, &slide_xml, rels_xml.as_deref(), &media_index);
         slide_parts.push((
             part.as_str(),
             rels_xml.as_deref().map(xml::parse_rels).unwrap_or_default(),
@@ -214,10 +214,27 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
             sections,
             properties,
             first_slide_num: meta.first_slide_num.unwrap_or(1),
+            diagnostics: pkg.take_diagnostics(),
         },
         media,
         inherit,
     })
+}
+
+/// 解析一个形部件(slide / layout / master / SmartArt drawing),并把"嵌套超限被跳过的子树数"
+/// 记进解析诊断(`part` 为该部件路径)。
+pub(crate) fn parse_shape_part(
+    pkg: &Package,
+    part: &str,
+    xml_text: &str,
+    rels_xml: Option<&str>,
+    media_index: &BTreeMap<String, usize>,
+) -> xml::slide::PartData {
+    let data = xml::slide::parse_part(xml_text, rels_xml, media_index);
+    if data.nesting_skipped > 0 {
+        pkg.note(DiagnosticKind::NestingTooDeep, part, data.nesting_skipped);
+    }
+    data
 }
 
 /// 解析各 slide 引用到的 layout / master / theme 部件(去重;容错:缺失部件跳过)。
@@ -240,7 +257,13 @@ fn collect_inheritance(
             if let Some(xml_text) = pkg.layout_part_str(layout_name) {
                 // 经部件自身 rels 解析图片 `r:embed`(版式上的 logo / 图片背景)。
                 let rels = pkg.slide_rels_str(&pkg.layout_path(layout_name));
-                let data = xml::slide::parse_part(&xml_text, rels.as_deref(), media_index);
+                let data = parse_shape_part(
+                    pkg,
+                    &pkg.layout_path(layout_name),
+                    &xml_text,
+                    rels.as_deref(),
+                    media_index,
+                );
                 inherit.layouts.insert(
                     layout_name.to_string(),
                     LayoutPart {
@@ -263,7 +286,13 @@ fn collect_inheritance(
         if !inherit.masters.contains_key(&master_name) {
             if let Some(xml_text) = pkg.master_part_str(&master_name) {
                 let rels = pkg.slide_rels_str(&pkg.master_path(&master_name));
-                let data = xml::slide::parse_part(&xml_text, rels.as_deref(), media_index);
+                let data = parse_shape_part(
+                    pkg,
+                    &pkg.master_path(&master_name),
+                    &xml_text,
+                    rels.as_deref(),
+                    media_index,
+                );
                 inherit.masters.insert(
                     master_name.clone(),
                     MasterPart {
@@ -417,7 +446,10 @@ fn resolve_slide_order(
     for rid in rids {
         if let Some(rel) = pres_rels.get(rid) {
             let target = links::resolve_part_path(pkg.main_part(), &rel.target);
-            if !seen.contains(&target) && pkg.part_str(&target).is_some() {
+            if seen.contains(&target) {
+                // 重复引用只保留首次;被去掉的份数记诊断(`part` = 被重复引用的 slide 部件)。
+                pkg.note(DiagnosticKind::DuplicateSlideRef, &target, 1);
+            } else if pkg.part_str(&target).is_some() {
                 seen.insert(target.clone());
                 parts.push(target);
             }

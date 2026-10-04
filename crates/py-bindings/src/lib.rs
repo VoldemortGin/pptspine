@@ -637,6 +637,23 @@ impl PyPresentation {
             .collect()
     }
 
+    /// 解析诊断:内容被静默丢失 / 降级的事实,`[{"kind", "part", "count"}]`(`kind` 为 kebab-case
+    /// 标识,如 `xml-truncated`;`count` 语义随 kind)。只含种类 / 部件路径 / 计数,不含正文;
+    /// 完全正常的文件为空列表。
+    fn diagnostics<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        self.inner
+            .diagnostics
+            .iter()
+            .map(|diag| {
+                let d = PyDict::new(py);
+                d.set_item("kind", diag.kind.code())?;
+                d.set_item("part", &diag.part)?;
+                d.set_item("count", diag.count)?;
+                Ok(d)
+            })
+            .collect()
+    }
+
     /// 文档属性(`docProps/core.xml` + `app.xml`):固定键 dict,缺失值为 `None`。
     fn core_properties<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let p = &self.inner.properties;

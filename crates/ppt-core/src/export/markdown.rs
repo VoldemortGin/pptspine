@@ -395,6 +395,7 @@ mod tests {
             sections: Vec::new(),
             properties: Default::default(),
             first_slide_num: 1,
+            diagnostics: Vec::new(),
         }
     }
 

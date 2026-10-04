@@ -5,6 +5,7 @@
 //! `py-bindings` 暴露。保持 domain-neutral、稳定、可测。
 
 pub mod color;
+pub mod diagnostics;
 pub mod error;
 pub mod export;
 pub mod geom;
@@ -14,6 +15,7 @@ pub mod style;
 pub mod theme;
 
 pub use color::{apply_transforms, ColorSpec, ColorTransform, ResolvedColor};
+pub use diagnostics::{Diagnostic, DiagnosticKind};
 pub use error::{LimitKind, PptError, Result};
 pub use export::{
     presentation_markdown, presentation_markdown_with, presentation_text, presentation_text_with,

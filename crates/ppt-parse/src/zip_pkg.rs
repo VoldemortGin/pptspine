@@ -4,10 +4,11 @@
 //! 然后按名取用各 XML 部件与 media 字节。容器层失败收敛成 [`PptError::Zip`];
 //! 资源限额([`ZipLimits`])命中收敛成 [`PptError::LimitExceeded`]。
 
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Cursor, Read};
 
-use ppt_core::{LimitKind, PptError, Result};
+use ppt_core::{Diagnostic, DiagnosticKind, LimitKind, PptError, Result};
 use zip::ZipArchive;
 
 use crate::links::resolve_part_path;
@@ -106,6 +107,21 @@ pub struct Package {
     /// 主部件所在目录(含末尾 `/`,主部件在包根时为空串):`slides/`、`media/`、
     /// `slideLayouts/` 等兄弟目录都挂在它下面,与 `ppt/` 目录同构。
     root: String,
+    /// 解析诊断收集器(见 [`Package::note`])。解析是单线程且部件读取全经 `&Package`,
+    /// 用内部可变性收集,免得每个 walker / 后处理都要传 `&mut`。
+    diag: RefCell<DiagState>,
+}
+
+/// 诊断收集状态:已有诊断(按 `(kind, part)` 合并计数,保持首次出现顺序)+ 各"只做一次"检查的去重集。
+#[derive(Default)]
+struct DiagState {
+    list: Vec<Diagnostic>,
+    /// 已做过良构扫描的部件。
+    scanned: BTreeSet<String>,
+    /// 良构扫描判定为被截断 / 损坏的部件。
+    malformed: BTreeSet<String>,
+    /// 已做过悬空关系检查的源部件。
+    rels_checked: BTreeSet<String>,
 }
 
 /// 缺省主部件路径(`.rels` 缺失 / 畸形 / 无 officeDocument 关系时沿用)。
@@ -209,7 +225,73 @@ impl Package {
             parts,
             main_part,
             root,
+            diag: RefCell::default(),
         })
+    }
+
+    /// 记一条解析诊断;同一 `(kind, part)` 累加 `count`。只传种类 / 部件路径 / 计数,绝不传正文。
+    pub fn note(&self, kind: DiagnosticKind, part: &str, count: usize) {
+        let mut st = self.diag.borrow_mut();
+        match st
+            .list
+            .iter_mut()
+            .find(|d| d.kind == kind && d.part == part)
+        {
+            Some(d) => d.count += count,
+            None => st.list.push(Diagnostic {
+                kind,
+                part: part.to_string(),
+                count,
+            }),
+        }
+    }
+
+    /// 取走已收集的全部诊断(按首次出现顺序)。
+    pub fn take_diagnostics(&self) -> Vec<Diagnostic> {
+        std::mem::take(&mut self.diag.borrow_mut().list)
+    }
+
+    /// 该部件是否已被良构扫描判定为损坏 / 截断(须已经 [`Self::part_str`] 读取过)。
+    pub fn is_malformed(&self, part: &str) -> bool {
+        self.diag.borrow().malformed.contains(part)
+    }
+
+    /// 全部 XML 部件读取的唯一入口(`part_str`)在此做一次良构扫描:被截断 / 损坏的部件记
+    /// [`DiagnosticKind::XmlTruncated`]。各 walker 对读取错误只会静默 `break`(返回已解析的前缀),
+    /// 所以诊断集中在这里,而不是每个 walker 各记一遍。
+    fn scan_once(&self, part: &str, text: &str) {
+        if !self.diag.borrow_mut().scanned.insert(part.to_string()) {
+            return;
+        }
+        if let Err(offset) = crate::xml::check_well_formed(text) {
+            self.diag.borrow_mut().malformed.insert(part.to_string());
+            self.note(DiagnosticKind::XmlTruncated, part, offset);
+        }
+    }
+
+    /// `source_part` 的 `.rels` 里指向包内不存在部件的关系数(外部链接不算)记
+    /// [`DiagnosticKind::MissingPart`]。每个源部件只检查一次。
+    fn check_rels_once(&self, source_part: &str, rels_text: &str) {
+        if !self
+            .diag
+            .borrow_mut()
+            .rels_checked
+            .insert(source_part.to_string())
+        {
+            return;
+        }
+        let missing = crate::xml::parse_rels(rels_text)
+            .values()
+            .filter(|r| !r.external)
+            .filter(|r| {
+                !self
+                    .parts
+                    .contains_key(&crate::links::resolve_part_path(source_part, &r.target))
+            })
+            .count();
+        if missing > 0 {
+            self.note(DiagnosticKind::MissingPart, source_part, missing);
+        }
     }
 
     /// 主部件所在目录前缀(含末尾 `/`;缺省布局下为 `ppt/`)。
@@ -240,9 +322,12 @@ impl Package {
 
     /// 取一个部件并解码为 UTF-8 字符串(XML 部件用)。
     pub fn part_str(&self, name: &str) -> Option<String> {
-        self.parts
+        let text = self
+            .parts
             .get(name)
-            .map(|v| String::from_utf8_lossy(v).into_owned())
+            .map(|v| String::from_utf8_lossy(v).into_owned())?;
+        self.scan_once(name, &text);
+        Some(text)
     }
 
     /// 演示文稿主部件(缺省 `ppt/presentation.xml`)的文本(必有,缺失即非法 pptx)。
@@ -272,13 +357,17 @@ impl Package {
     /// 关系文件位于 `ppt/slides/_rels/slideN.xml.rels`。
     pub fn slide_rels_str(&self, slide_part: &str) -> Option<String> {
         let rels = rels_path_for(slide_part);
-        self.part_str(&rels)
+        let text = self.part_str(&rels)?;
+        self.check_rels_once(slide_part, &text);
+        Some(text)
     }
 
     /// 主部件的 `.rels` 文本(把 `p:sldId@r:id` 映射到具体 slide 部件;缺省
     /// `ppt/_rels/presentation.xml.rels`)。
     pub fn presentation_rels_str(&self) -> Option<String> {
-        self.part_str(&rels_path_for(&self.main_part))
+        let text = self.part_str(&rels_path_for(&self.main_part))?;
+        self.check_rels_once(&self.main_part, &text);
+        Some(text)
     }
 
     /// 取一张 media 图片的原始字节(`target` 形如 `ppt/media/image1.png`)。

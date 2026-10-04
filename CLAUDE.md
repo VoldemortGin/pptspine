@@ -47,6 +47,7 @@ Spine 家族成员之一:**纯 Rust 的 PowerPoint(.pptx / OOXML)结构化解析
 crates/
   ppt-core/    领域模型 + 几何(EMU) + 类型化 PptError。无 IO / zip / XML。#![forbid(unsafe_code)]
     src/error.rs   PptError(thiserror):Zip/Xml/Unsupported/InvalidArgument/Io/Ocr + kind() + Result<T>
+    src/diagnostics.rs Diagnostic / DiagnosticKind(#[non_exhaustive]):解析诊断(种类 + 部件路径 + 计数,绝不含正文),挂在 Presentation.diagnostics
     src/geom.rs    Emu(i64,914400/inch) + to_points + Rect/Point
     src/model.rs   Presentation/Slide/Shape/TextFrame/Paragraph/TextRun/Table/Row/Cell/Picture/AutoShape/Color
                    + Chart/ChartKind/ChartSeries(挂在 GraphicPlaceholder.chart)
@@ -74,7 +75,7 @@ crates/
     src/shapes/line_ends.rs 线端装饰 headEnd/tailEnd(triangle/stealth/diamond/oval/arrow)
     src/transform.rs 组合仿射(chOff/chExt 重映射,B-5)
   py-bindings/ PyO3 _core 扩展。唯一用 unsafe(经 PyO3)的 crate。#![deny(unsafe_op_in_unsafe_fn)]
-    src/lib.rs     open -> Presentation handle;Slide.shapes() / Slide.comments() -> list[dict];ocr_image;异常层级
+    src/lib.rs     open -> Presentation handle;Slide.shapes() / Slide.comments() / Presentation.diagnostics() -> list[dict];ocr_image;异常层级
 ```
 
 ## 跑(始终从包根)

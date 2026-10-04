@@ -70,6 +70,8 @@ pub struct PartData {
     pub hidden: bool,
     /// 根元素 `p:sld@showMasterSp` / `p:sldLayout@showMasterSp`;`None` = 缺省(显示)。
     pub show_master_sp: Option<bool>,
+    /// 因嵌套超过上限被整棵跳过的子树数(诊断用)。
+    pub nesting_skipped: usize,
 }
 
 /// 解析一个形部件。`rels_xml` 是该部件的 `.rels` 文本(用于把图片 `r:embed` 映射到
@@ -80,6 +82,7 @@ pub fn parse_part(
     media_index: &BTreeMap<String, usize>,
 ) -> PartData {
     let rels = rels_xml.map(parse_rels).unwrap_or_default();
+    NEST_SKIPPED.with(|c| c.set(0));
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
     let mut buf = Vec::new();
@@ -125,6 +128,7 @@ pub fn parse_part(
         }
         buf.clear();
     }
+    out.nesting_skipped = NEST_SKIPPED.with(std::cell::Cell::take);
     out
 }
 
@@ -291,6 +295,17 @@ fn parse_bg_pr<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Option
 /// resolve / render / export 对组合的递归也因此有界。
 const MAX_NEST_DEPTH: u32 = 64;
 
+thread_local! {
+    /// 本次 [`parse_part`] 内因嵌套超过 [`MAX_NEST_DEPTH`] 被整棵跳过的子树数
+    /// (形状树与段落层共用;解析是同步、不嵌套的,线程局部计数免去给整条递归链传上下文)。
+    static NEST_SKIPPED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// 记一棵因嵌套过深被跳过的子树。
+fn note_nest_skipped() {
+    NEST_SKIPPED.with(|c| c.set(c.get() + 1));
+}
+
 /// 解析期的上下文(`depth` 为当前形状容器嵌套深度)。
 struct Ctx<'a> {
     rels: &'a BTreeMap<String, Relationship>,
@@ -368,6 +383,7 @@ fn dispatch_shape<R: std::io::BufRead>(
             let depth = ctx.depth.get();
             if depth >= MAX_NEST_DEPTH {
                 // 嵌套过深:整棵子树跳过(skip_element 是迭代的,不吃栈)。
+                note_nest_skipped();
                 skip_element(reader, name);
                 return true;
             }
@@ -1363,6 +1379,7 @@ fn run_elem_start<R: std::io::BufRead>(
         b"m" => runs.extend(parse_math(reader)),
         b"AlternateContent" => {
             if alt_depth >= MAX_NEST_DEPTH {
+                note_nest_skipped();
                 skip_element(reader, name);
             } else {
                 runs.extend(parse_alt_runs(reader, alt_depth + 1));
