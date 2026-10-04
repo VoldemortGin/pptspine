@@ -398,23 +398,41 @@ def test_line_ends_draw_filled_heads_at_both_ends_and_shorten_body(
     assert tuple(plain_drawings[0]["rect"]) == pytest.approx((72.0, 72.0, 360.0, 72.0), abs=0.01)
 
 
-def test_custom_geometry_degrades_to_bbox_with_one_warning(
+def test_custom_geometry_is_drawn_as_its_real_path_without_warning(
     custom_geometry_pptx_bytes: bytes,
 ) -> None:
-    """custGeom:直接填充与仅 style fillRef 着色的 freeform 都画包围盒,告警逐种类一次。"""
+    """custGeom 求值成真实路径:直接填充与仅 style fillRef 着色的 freeform 都画三角形(非方块),无近似告警。"""
     pres = pptspine.open_bytes(custom_geometry_pptx_bytes)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         pdf = pres.to_pdf()
     msgs = [str(w.message) for w in caught]
-    assert len([m for m in msgs if "custom-geometry-approximated" in m]) == 1, msgs
-    fills = sorted(
-        (tuple(d["fill"]), tuple(d["rect"])) for d in _open_pdf(pdf)[0].get_drawings()
+    assert not [m for m in msgs if "custom-geometry-approximated" in m], msgs
+    drawings = sorted(
+        _open_pdf(pdf)[0].get_drawings(), key=lambda d: tuple(d["fill"])
     )
-    assert fills == [
-        ((0.0, 0.0, 1.0), pytest.approx((72.0, 72.0, 172.0, 172.0), abs=0.01)),
-        ((0.0, 1.0, 0.0), pytest.approx((300.0, 72.0, 400.0, 172.0), abs=0.01)),
-    ]
+    assert [tuple(d["fill"]) for d in drawings] == [(0.0, 0.0, 1.0), (0.0, 1.0, 0.0)]
+    assert tuple(drawings[0]["rect"]) == pytest.approx((72.0, 72.0, 172.0, 172.0), abs=0.01)
+    assert tuple(drawings[1]["rect"]) == pytest.approx((300.0, 72.0, 400.0, 172.0), abs=0.01)
+    for d in drawings:
+        # 三角形 (0,0)-(10,10)-(0,10):不是四点方块;闭合边不进 items 时为 2 条线。
+        lines = [i for i in d["items"] if i[0] == "l"]
+        assert len(lines) in (2, 3), d["items"]
+        assert not any(i[0] == "re" for i in d["items"]), d["items"]
+
+
+def test_custom_geometry_unresolvable_guide_degrades_to_bbox_with_one_warning(
+    unresolvable_custom_geometry_pptx_bytes: bytes,
+) -> None:
+    """路径引用未定义的参考线名 → 退回包围盒 + 原告警(一次),不抛错。"""
+    pptx = unresolvable_custom_geometry_pptx_bytes
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        pdf = pptspine.open_bytes(pptx).to_pdf()
+    msgs = [str(w.message) for w in caught]
+    assert len([m for m in msgs if "custom-geometry-approximated" in m]) == 1, msgs
+    (d,) = _open_pdf(pdf)[0].get_drawings()
+    assert tuple(d["rect"]) == pytest.approx((72.0, 72.0, 172.0, 172.0), abs=0.01)
 
 
 def test_b4_src_rect_crop_changes_raster_and_image_survives(

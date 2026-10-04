@@ -21,6 +21,7 @@
 use std::collections::BTreeMap;
 
 use ppt_core::color::ColorSpec;
+use ppt_core::custgeom::CustGeom;
 use ppt_core::geom::{Emu, Rect};
 use ppt_core::model::{
     AutoShape, Autofit, Background, BlipFill, BodyProps, Cell, CellBorders, Connector, Fill,
@@ -35,6 +36,7 @@ use ppt_core::theme::ClrMap;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 
+use super::custgeom::{parse_cust_geom, Parsed};
 use super::text_style::{
     hyperlink_from, level_style_attrs, parse_color_in, parse_level_style, parse_list_style,
     parse_run_props, parse_solid_fill, run_style_attrs,
@@ -72,6 +74,8 @@ pub struct PartData {
     pub show_master_sp: Option<bool>,
     /// 因嵌套超过上限被整棵跳过的子树数(诊断用)。
     pub nesting_skipped: usize,
+    /// 因超参考线 / 路径 / 命令预算而降级的 `a:custGeom` 数(诊断用)。
+    pub custgeom_degraded: usize,
 }
 
 /// 解析一个形部件。`rels_xml` 是该部件的 `.rels` 文本(用于把图片 `r:embed` 映射到
@@ -83,6 +87,7 @@ pub fn parse_part(
 ) -> PartData {
     let rels = rels_xml.map(parse_rels).unwrap_or_default();
     NEST_SKIPPED.with(|c| c.set(0));
+    CUSTGEOM_DEGRADED.with(|c| c.set(0));
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
     let mut buf = Vec::new();
@@ -129,6 +134,7 @@ pub fn parse_part(
         buf.clear();
     }
     out.nesting_skipped = NEST_SKIPPED.with(std::cell::Cell::take);
+    out.custgeom_degraded = CUSTGEOM_DEGRADED.with(std::cell::Cell::take);
     out
 }
 
@@ -299,6 +305,11 @@ thread_local! {
     /// 本次 [`parse_part`] 内因嵌套超过 [`MAX_NEST_DEPTH`] 被整棵跳过的子树数
     /// (形状树与段落层共用;解析是同步、不嵌套的,线程局部计数免去给整条递归链传上下文)。
     static NEST_SKIPPED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+thread_local! {
+    /// 本次 [`parse_part`] 内因超预算而降级的 `a:custGeom` 数(同 [`NEST_SKIPPED`] 的理由)。
+    static CUSTGEOM_DEGRADED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// 记一棵因嵌套过深被跳过的子树。
@@ -554,6 +565,7 @@ fn parse_sp<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Option<Sh
                         pr.fill = got.fill.or(pr.fill);
                         pr.stroke = got.stroke.or(pr.stroke);
                         pr.custom_geometry |= got.custom_geometry;
+                        pr.cust_geom = got.cust_geom.or(pr.cust_geom);
                     }
                     b"style" => style = Some(parse_shape_style(reader)),
                     b"txBody" => {
@@ -615,6 +627,7 @@ fn parse_sp<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Option<Sh
             placeholder,
             style,
             custom_geometry: pr.custom_geometry,
+            cust_geom: pr.cust_geom,
             hyperlink,
         }))
     } else {
@@ -776,6 +789,7 @@ fn parse_cxn_sp<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Shape
                         pr.fill = got.fill.or(pr.fill);
                         pr.stroke = got.stroke.or(pr.stroke);
                         pr.custom_geometry |= got.custom_geometry;
+                        pr.cust_geom = got.cust_geom.or(pr.cust_geom);
                     }
                     b"style" => style = Some(parse_shape_style(reader)),
                     _ => skip_element(reader, &name),
@@ -797,6 +811,7 @@ fn parse_cxn_sp<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Shape
         stroke: pr.stroke,
         style,
         custom_geometry: pr.custom_geometry,
+        cust_geom: pr.cust_geom,
     })
 }
 
@@ -809,8 +824,10 @@ struct SpPr {
     adjusts: Vec<(String, i64)>,
     fill: Option<Fill>,
     stroke: Option<Stroke>,
-    /// 出现了 `a:custGeom`(自定义几何;v1 不求值路径公式)。
+    /// 出现了 `a:custGeom`(自定义几何)。
     custom_geometry: bool,
+    /// `a:custGeom` 的参考线 + 路径(超预算 / 无路径为 `None`)。
+    cust_geom: Option<Box<CustGeom>>,
 }
 
 /// 解析 `a:spPr`:`a:xfrm`(位置尺寸 + 旋转/翻转)、`a:prstGeom`(几何名 + avLst
@@ -835,7 +852,11 @@ fn parse_sppr<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> SpPr {
                     }
                     b"custGeom" => {
                         pr.custom_geometry = true;
-                        skip_element(reader, &name);
+                        match parse_cust_geom(reader) {
+                            Parsed::Geom(g) => pr.cust_geom = Some(Box::new(g)),
+                            Parsed::OverBudget => CUSTGEOM_DEGRADED.with(|c| c.set(c.get() + 1)),
+                            Parsed::Empty => {}
+                        }
                     }
                     n if is_fill_name(n) => {
                         if let Some(f) = parse_fill_elem(n, reader, ctx) {

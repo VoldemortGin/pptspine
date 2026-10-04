@@ -48,6 +48,7 @@ crates/
   ppt-core/    领域模型 + 几何(EMU) + 类型化 PptError。无 IO / zip / XML。#![forbid(unsafe_code)]
     src/error.rs   PptError(thiserror):Zip/Xml/Unsupported/InvalidArgument/Io/Ocr + kind() + Result<T>
     src/diagnostics.rs Diagnostic / DiagnosticKind(#[non_exhaustive]):解析诊断(种类 + 部件路径 + 计数,绝不含正文),挂在 Presentation.diagnostics
+    src/custgeom.rs a:custGeom 纯数据模型(CustGeom/Guide/CustPath/PathCmd)+ 预算常量(参考线 1024 / path 256 / 命令 20 000)
     src/geom.rs    Emu(i64,914400/inch) + to_points + Rect/Point
     src/model.rs   Presentation/Slide/Shape/TextFrame/Paragraph/TextRun/Table/Row/Cell/Picture/AutoShape/Color
                    + Chart/ChartKind/ChartSeries(挂在 GraphicPlaceholder.chart)
@@ -64,6 +65,7 @@ crates/
                    diagram.rs(SmartArt data 部件:内容点文字 + dataModelExt 的 drawing 关系 id)
                    doc_props.rs(docProps/core.xml + app.xml -> DocProperties)
                    chart.rs(c:chartSpace 缓存 -> Chart:种类/标题/类别/系列,稀疏 pt 补空,不读外部工作簿)
+                   custgeom.rs(a:custGeom -> CustGeom:avLst/gdLst 参考线 + pathLst 路径命令,带预算,超限整体丢弃并记 custom-geometry-degraded 诊断)
                    table_style.rs(ppt/tableStyles.xml -> styleId -> TableStyle:九部件填充/边框/文字色)
   ppt-ocr/     图片 OCR 桥:把 ocrspine 套到嵌入图片上。本轮薄但可用。#![forbid(unsafe_code)]
     src/lib.rs     ocr_image_bytes / PptOcr{engine} + reconstruct_table_from_image(stub)
@@ -72,6 +74,7 @@ crates/
     src/text.rs      ResolvedTextFrame 段落/run -> TS-5 绝对定位文本框(锚定/内边距/换行/项目符号/行距)
     src/shapes.rs    自选图形 / 连接线 / 图片 / 图表占位 -> 引擎 op
     src/chart.rs     图表矢量渲染:纯函数几何(柱/条/折线/饼 + 刻度/图例/标签)-> 引擎 op;不支持降级占位框
+    src/custgeom.rs  a:custGeom 求值:参考线公式求值器(纯函数)+ 路径构建(缩放 / arcTo→三次贝塞尔)→ PathSeg;失败返回 None 由 shapes.rs 退回包围盒
     src/shapes/line_ends.rs 线端装饰 headEnd/tailEnd(triangle/stealth/diamond/oval/arrow)
     src/transform.rs 组合仿射(chOff/chExt 重映射,B-5)
   py-bindings/ PyO3 _core 扩展。唯一用 unsafe(经 PyO3)的 crate。#![deny(unsafe_op_in_unsafe_fn)]

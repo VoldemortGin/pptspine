@@ -4,6 +4,7 @@
 //! 由 `ppt_parse::resolve` 产出,`ppt-render` 消费;原始解析模型保持不动。
 
 use crate::color::ResolvedColor;
+use crate::custgeom::CustGeom;
 use crate::geom::{Emu, Rect};
 use crate::model::LineEnd;
 use crate::model::{BlipFill, GraphicPlaceholder, Picture, RunKind, Xfrm};
@@ -205,8 +206,9 @@ pub struct ResolvedAutoShape {
     pub blip_fill: Option<BlipFill>,
     pub stroke: Option<ResolvedStroke>,
     pub text: Option<ResolvedTextFrame>,
-    /// 几何来自 `a:custGeom`(渲染按包围盒矩形降级 + 告警)。
+    /// 几何来自 `a:custGeom`(`cust_geom` 为空或求值失败时渲染按包围盒矩形降级 + 告警)。
     pub custom_geometry: bool,
+    pub cust_geom: Option<Box<CustGeom>>,
 }
 
 /// 已解析的连接线。
@@ -220,8 +222,9 @@ pub struct ResolvedConnector {
     pub stroke: Option<ResolvedStroke>,
     /// 显式无线(`a:ln > a:noFill`):渲染不套"无描边 → 缺省黑线"的兜底。
     pub no_line: bool,
-    /// 几何来自 `a:custGeom`(渲染按缺省直线降级 + 告警)。
+    /// 几何来自 `a:custGeom`(`cust_geom` 为空或求值失败时渲染按缺省直线降级 + 告警)。
     pub custom_geometry: bool,
+    pub cust_geom: Option<Box<CustGeom>>,
 }
 
 /// 已解析的描边(颜色终端化;宽度 / 虚线 / 线端装饰原样)。

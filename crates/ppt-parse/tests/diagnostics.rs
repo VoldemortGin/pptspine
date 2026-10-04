@@ -345,6 +345,7 @@ fn codes_are_stable_kebab_case() {
         MissingPart,
         SmartArtDegraded,
         ChartDegraded,
+        CustomGeometryDegraded,
     ]
     .iter()
     .map(|k| k.code())
@@ -357,7 +358,34 @@ fn codes_are_stable_kebab_case() {
             "duplicate-slide-ref",
             "missing-part",
             "smartart-degraded",
-            "chart-degraded"
+            "chart-degraded",
+            "custom-geometry-degraded"
         ]
     );
+}
+
+#[test]
+fn over_budget_custgeom_is_reported_with_part_and_count_only() {
+    let guides: String = (0..=ppt_core::custgeom::MAX_GUIDES)
+        .map(|i| format!(r#"<a:gd name="g{i}" fmla="val 1"/>"#))
+        .collect();
+    let sp = |secret: &str| {
+        format!(
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="2" name="{secret}"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+<p:spPr><a:custGeom><a:gdLst>{guides}</a:gdLst><a:pathLst/></a:custGeom>
+<a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></p:spPr></p:sp>"#
+        )
+    };
+    let p = parse(&deck(
+        &slide_xml(&format!("{}{}", sp(SECRET), sp("x"))),
+        &[],
+    ));
+    let d = kinds(&p, DiagnosticKind::CustomGeometryDegraded);
+    assert_eq!(d.len(), 1, "{:?}", p.presentation.diagnostics);
+    assert_eq!((d[0].part.as_str(), d[0].count), (SLIDE, 2));
+    assert!(!format!("{:?}", p.presentation.diagnostics).contains(SECRET));
+    // 预算内的 custGeom 不产生诊断。
+    let ok = r#"<p:sp><p:spPr><a:custGeom><a:pathLst><a:path><a:moveTo><a:pt x="0" y="0"/></a:moveTo></a:path></a:pathLst></a:custGeom></p:spPr></p:sp>"#;
+    let p = parse(&deck(&slide_xml(ok), &[]));
+    assert!(kinds(&p, DiagnosticKind::CustomGeometryDegraded).is_empty());
 }

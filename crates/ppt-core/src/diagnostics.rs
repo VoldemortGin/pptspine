@@ -23,6 +23,9 @@ pub enum DiagnosticKind {
     /// 图表部件存在但解析不出可用数据(XML 不良构或无系列)而降级。`part` = 图表部件,
     /// `count` = 受影响的 frame 数。
     ChartDegraded,
+    /// `a:custGeom` 超过参考线 / 路径 / 命令数预算而降级:渲染按包围盒近似。`part` = 所在部件,
+    /// `count` = 被降级的 `custGeom` 数。
+    CustomGeometryDegraded,
 }
 
 impl DiagnosticKind {
@@ -36,6 +39,7 @@ impl DiagnosticKind {
             DiagnosticKind::MissingPart => "missing-part",
             DiagnosticKind::SmartArtDegraded => "smartart-degraded",
             DiagnosticKind::ChartDegraded => "chart-degraded",
+            DiagnosticKind::CustomGeometryDegraded => "custom-geometry-degraded",
         }
     }
 }

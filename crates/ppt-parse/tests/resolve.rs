@@ -1907,3 +1907,30 @@ fn run_external_hyperlink_reaches_resolved_run() {
     assert_eq!(runs[1].link, None, "页内跳转不是外链");
     assert_eq!(runs[2].link, None);
 }
+
+/// `a:custGeom` 的参考线 + 路径经 resolve 原样带到终态 IR(渲染侧据此求值)。
+#[test]
+fn custom_geometry_paths_reach_the_resolved_shape() {
+    let slide = resolve_slide(
+        &slide_with(
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="5" name="F"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+        <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="100" cy="100"/></a:xfrm>
+        <a:custGeom><a:pathLst><a:path w="10" h="10"><a:moveTo><a:pt x="0" y="0"/></a:moveTo>
+        <a:lnTo><a:pt x="10" y="10"/></a:lnTo></a:path></a:pathLst></a:custGeom>
+        <a:solidFill><a:srgbClr val="00FF00"/></a:solidFill></p:spPr></p:sp>
+        <p:cxnSp><p:nvCxnSpPr><p:cNvPr id="6" name="C"/><p:cNvCxnSpPr/><p:nvPr/></p:nvCxnSpPr>
+        <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="100" cy="100"/></a:xfrm>
+        <a:custGeom><a:pathLst><a:path><a:moveTo><a:pt x="0" y="0"/></a:moveTo></a:path></a:pathLst></a:custGeom></p:spPr></p:cxnSp>"#,
+            "",
+        ),
+        "",
+    );
+    let ResolvedShape::Auto(a) = &slide.shapes[0] else {
+        panic!("expected autoshape");
+    };
+    assert_eq!(a.cust_geom.as_deref().map(|g| g.paths.len()), Some(1));
+    let ResolvedShape::Connector(c) = &slide.shapes[1] else {
+        panic!("expected connector");
+    };
+    assert_eq!(c.cust_geom.as_deref().map(|g| g.paths.len()), Some(1));
+}

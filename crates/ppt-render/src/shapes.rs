@@ -13,19 +13,22 @@
 //! 零损;负值(外扩)同式自然成立。
 //!
 //! 线端装饰(`a:headEnd` / `a:tailEnd`)见 [`line_ends`]:只加在开放轮廓(line /
-//! 连接线 / arc)两端,随形状级变换一起生效。`a:custGeom` v1 不求值路径公式:自选
-//! 图形按包围盒矩形、连接线按缺省直线降级,画了东西就记 `custom-geometry-approximated`。
+//! 连接线 / arc)两端,随形状级变换一起生效。`a:custGeom` 经 [`crate::custgeom`] 求值成
+//! 真实路径(每条 `a:path` 各按自己的 fill / stroke 画);超预算 / 求值失败才按包围盒矩形、
+//! 连接线按缺省直线降级,画了东西就记 `custom-geometry-approximated`。
 
 mod line_ends;
 
 use ppt_core::color::ResolvedColor;
-use ppt_core::geom::emu_to_points;
+use ppt_core::custgeom::CustGeom;
+use ppt_core::geom::{emu_to_points, Rect as EmuRect};
 use ppt_core::model::{BlipFill, GraphicPlaceholder, LineEnd, Picture, RelRect, Xfrm};
 use ppt_core::resolved::{ResolvedAutoShape, ResolvedConnector, ResolvedFill, ResolvedStroke};
 
 use pdf_typeset::preset::preset_outline;
 use pdf_typeset::{ExportWarning, Fill, Op, PathSeg, Rect, Rgb, Stroke, Typesetter};
 
+use crate::custgeom::{build_paths, BuiltPath};
 use crate::text::rgb;
 use crate::transform::{shape_transform, Flatten};
 use crate::RenderCtx;
@@ -143,6 +146,12 @@ fn custom_geometry_warning(ctx: &mut RenderCtx<'_>, drawn_as: &str) {
     });
 }
 
+/// 求值 `a:custGeom`(`w` / `h` 取形状 EMU 尺寸);无几何 / 求值失败 → `None`(调用方降级)。
+fn built_custom(g: Option<&CustGeom>, emu: EmuRect, frame: Rect) -> Option<Vec<BuiltPath>> {
+    #[allow(clippy::cast_precision_loss)]
+    build_paths(g?, emu.w as f64, emu.h as f64, frame)
+}
+
 /// 把一个 op 按形状级 rot/flip 包进 `Op::Group`(恒等直接透传)。
 fn with_shape_transform(xfrm: Xfrm, rect: Rect, op: Op, ops: &mut Vec<Op>) {
     match shape_transform(xfrm, rect) {
@@ -171,10 +180,15 @@ fn outline_op(
     stroke: Option<Stroke>,
     ends: LineEnds<'_>,
     custom: bool,
+    cust: Option<&[BuiltPath]>,
     scale: f64,
     ops: &mut Vec<Op>,
 ) {
     if fill.is_none() && stroke.is_none() {
+        return;
+    }
+    if let Some(paths) = cust {
+        custom_paths_op(ctx, paths, rect, xfrm, fill, stroke, ends, scale, ops);
         return;
     }
     if custom {
@@ -238,6 +252,56 @@ fn outline_op(
     }
 }
 
+/// 求值后的 `a:custGeom` 路径 → 每条 `a:path` 一个 `Op::Path`(各按自己的 fill / stroke);
+/// 开放路径带线端装饰,整体随形状级变换。
+#[allow(clippy::too_many_arguments)]
+fn custom_paths_op(
+    ctx: &mut RenderCtx<'_>,
+    paths: &[BuiltPath],
+    rect: Rect,
+    xfrm: Xfrm,
+    fill: Option<Fill>,
+    stroke: Option<Stroke>,
+    ends: LineEnds<'_>,
+    scale: f64,
+    ops: &mut Vec<Op>,
+) {
+    let mut group = Vec::new();
+    for p in paths {
+        let fill = fill.clone().filter(|_| p.fill);
+        let stroke = stroke.clone().filter(|_| p.stroke);
+        if p.segs.is_empty() || (fill.is_none() && stroke.is_none()) {
+            continue;
+        }
+        let mut segs = p.segs.clone();
+        let mut deco = Vec::new();
+        if let Some(line) = stroke.as_ref().filter(|_| ends.any()) {
+            let min_base = line_ends::MIN_BASE_PT * scale;
+            if let Some((d, skipped)) =
+                line_ends::decorate(&mut segs, ends.head, ends.tail, line, min_base)
+            {
+                deco = d;
+                for line_ends::EndSkip::UnknownKind(kind) in skipped {
+                    ctx.warnings.push(ExportWarning::Custom {
+                        kind: LINE_END_KIND.to_string(),
+                        detail: format!("线端装饰 type='{kind}' 未支持;该端不画"),
+                    });
+                }
+            }
+        }
+        group.push(Op::Path { segs, fill, stroke });
+        group.extend(deco);
+    }
+    match shape_transform(xfrm, rect) {
+        Some(m) if !group.is_empty() => ops.push(Op::Group {
+            transform: Some(m),
+            clip: None,
+            ops: group,
+        }),
+        _ => ops.extend(group),
+    }
+}
+
 /// 自选图形的形状底(文字由调用方在其上叠加)。
 pub(crate) fn auto_shape_ops(
     ts: &mut Typesetter,
@@ -249,8 +313,10 @@ pub(crate) fn auto_shape_ops(
     let Some(rect) = auto.rect else {
         return;
     };
+    let frame = flat.map_emu_rect(rect);
+    let cust = built_custom(auto.cust_geom.as_deref(), rect, frame);
     if let Some(b) = &auto.blip_fill {
-        blip_fill_ops(ts, ctx, auto, b, flat.map_emu_rect(rect), ops);
+        blip_fill_ops(ts, ctx, auto, b, frame, cust.as_deref(), ops);
     }
     let fill = auto.fill.map(|f| fill_of(ctx, f));
     let stroke = auto.stroke.as_ref().map(|s| stroke_of(s, flat.s));
@@ -258,13 +324,14 @@ pub(crate) fn auto_shape_ops(
         ctx,
         auto.geometry.as_deref(),
         "rect",
-        flat.map_emu_rect(rect),
+        frame,
         auto.xfrm,
         &auto.adjusts,
         fill,
         stroke,
         LineEnds::of(auto.stroke.as_ref()),
         auto.custom_geometry,
+        cust.as_deref(),
         flat.s,
         ops,
     );
@@ -279,6 +346,7 @@ fn blip_fill_ops(
     auto: &ResolvedAutoShape,
     b: &BlipFill,
     r: Rect,
+    cust: Option<&[BuiltPath]>,
     ops: &mut Vec<Op>,
 ) {
     let key = b.media_name.clone().unwrap_or_else(|| b.rel_id.clone());
@@ -291,29 +359,43 @@ fn blip_fill_ops(
             detail: "图片填充 a:tile 平铺 v1 按拉伸画".to_string(),
         });
     }
-    let name = auto.geometry.as_deref().unwrap_or("rect");
-    #[allow(clippy::cast_precision_loss)]
-    let adj: Vec<(&str, f64)> = auto
-        .adjusts
-        .iter()
-        .map(|(n, v)| (n.as_str(), *v as f64))
-        .collect();
-    let outline = preset_outline(name, r, &adj);
-    // 无描边时 `outline_op` 不会跑(fill 为空),几何降级的告警在此补发,避免静默。
-    if auto.stroke.is_none() {
-        if outline.degraded {
-            ctx.warnings.push(ExportWarning::PresetDegraded {
-                preset: name.to_string(),
-            });
+    // 自定义几何求值成功:剪裁路径 = 参与填充的各 `a:path` 轮廓(无填充路径则不画图)。
+    let clip = if let Some(paths) = cust {
+        let segs: Vec<PathSeg> = paths
+            .iter()
+            .filter(|p| p.fill)
+            .flat_map(|p| p.segs.iter().cloned())
+            .collect();
+        if segs.is_empty() {
+            return;
         }
-        if auto.custom_geometry {
-            custom_geometry_warning(ctx, "包围盒矩形");
+        segs
+    } else {
+        let name = auto.geometry.as_deref().unwrap_or("rect");
+        #[allow(clippy::cast_precision_loss)]
+        let adj: Vec<(&str, f64)> = auto
+            .adjusts
+            .iter()
+            .map(|(n, v)| (n.as_str(), *v as f64))
+            .collect();
+        let outline = preset_outline(name, r, &adj);
+        // 无描边时 `outline_op` 不会跑(fill 为空),几何降级的告警在此补发,避免静默。
+        if auto.stroke.is_none() {
+            if outline.degraded {
+                ctx.warnings.push(ExportWarning::PresetDegraded {
+                    preset: name.to_string(),
+                });
+            }
+            if auto.custom_geometry {
+                custom_geometry_warning(ctx, "包围盒矩形");
+            }
         }
-    }
+        outline.segs
+    };
     let image = placed_image_op(id, r, b.fill_rect, b.src_rect);
     let clipped = Op::Group {
         transform: None,
-        clip: Some(outline.segs),
+        clip: Some(clip),
         ops: vec![image],
     };
     with_shape_transform(auto.xfrm, r, clipped, ops);
@@ -330,6 +412,8 @@ pub(crate) fn connector_ops(
     let Some(rect) = conn.rect else {
         return;
     };
+    let frame = flat.map_emu_rect(rect);
+    let cust = built_custom(conn.cust_geom.as_deref(), rect, frame);
     let fill = conn.fill.map(|f| fill_of(ctx, f));
     let stroke = if conn.no_line {
         None
@@ -343,13 +427,14 @@ pub(crate) fn connector_ops(
         ctx,
         conn.geometry.as_deref(),
         "line",
-        flat.map_emu_rect(rect),
+        frame,
         conn.xfrm,
         &conn.adjusts,
         fill,
         stroke,
         LineEnds::of(conn.stroke.as_ref()),
         conn.custom_geometry,
+        cust.as_deref(),
         flat.s,
         ops,
     );

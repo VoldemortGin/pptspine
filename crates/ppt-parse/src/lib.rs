@@ -234,6 +234,13 @@ pub(crate) fn parse_shape_part(
     if data.nesting_skipped > 0 {
         pkg.note(DiagnosticKind::NestingTooDeep, part, data.nesting_skipped);
     }
+    if data.custgeom_degraded > 0 {
+        pkg.note(
+            DiagnosticKind::CustomGeometryDegraded,
+            part,
+            data.custgeom_degraded,
+        );
+    }
     data
 }
 

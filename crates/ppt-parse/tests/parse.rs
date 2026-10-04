@@ -1130,6 +1130,136 @@ fn custom_geometry_is_flagged_and_style_painted_custgeom_is_auto() {
     assert!(!d.custom_geometry);
 }
 
+/// `a:custGeom` 全结构:`avLst` / `gdLst` 参考线、多个 `a:path`(w / h / fill / stroke /
+/// extrusionOk)与全部路径命令(自闭合 `pt` 与展开写法皆可)。
+#[test]
+fn custgeom_structure_is_parsed() {
+    use ppt_core::custgeom::{PathCmd, PathFill};
+    let shapes = shapes_of(
+        r#"<p:sp><p:spPr><a:custGeom>
+          <a:avLst><a:gd name="adj" fmla="val 25000"/></a:avLst>
+          <a:gdLst><a:gd name="x1" fmla="*/ w adj 100000"/><a:gd name="y1" fmla="+- h 0 5"/></a:gdLst>
+          <a:ahLst/><a:cxnLst/><a:rect l="0" t="0" r="r" b="b"/>
+          <a:pathLst>
+            <a:path w="100" h="200" fill="none" stroke="0" extrusionOk="1">
+              <a:moveTo><a:pt x="0" y="0"/></a:moveTo>
+              <a:lnTo><a:pt x="x1" y="y1"/></a:lnTo>
+              <a:cubicBezTo><a:pt x="1" y="2"/><a:pt x="3" y="4"/><a:pt x="5" y="6"/></a:cubicBezTo>
+              <a:quadBezTo><a:pt x="7" y="8"/><a:pt x="9" y="10"/></a:quadBezTo>
+              <a:arcTo wR="wd2" hR="hd2" stAng="cd4" swAng="-5400000"/>
+              <a:close/>
+            </a:path>
+            <a:path fill="darken"><a:moveTo><a:pt x="0" y="0"></a:pt></a:moveTo><a:close></a:close></a:path>
+          </a:pathLst></a:custGeom>
+          <a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></p:spPr></p:sp>"#,
+    );
+    let Shape::Auto(a) = &shapes[0] else {
+        panic!("autoshape");
+    };
+    assert!(a.custom_geometry);
+    assert!(a.fill.is_some(), "fill after custGeom still parsed");
+    let g = a.cust_geom.as_deref().expect("custGeom parsed");
+    assert_eq!(g.av_lst.len(), 1);
+    assert_eq!(
+        (g.av_lst[0].name.as_str(), g.av_lst[0].fmla.as_str()),
+        ("adj", "val 25000")
+    );
+    assert_eq!(g.gd_lst.len(), 2);
+    assert_eq!(g.gd_lst[1].fmla, "+- h 0 5");
+    assert_eq!(g.paths.len(), 2);
+    let p0 = &g.paths[0];
+    assert_eq!((p0.w, p0.h), (Some(100), Some(200)));
+    assert_eq!(p0.fill, PathFill::None);
+    assert!(!p0.stroke && p0.extrusion_ok);
+    assert_eq!(p0.cmds.len(), 6);
+    assert!(matches!(&p0.cmds[2], PathCmd::CubicBezTo(a, _, c) if a.x == "1" && c.y == "6"));
+    assert!(matches!(&p0.cmds[3], PathCmd::QuadBezTo(_, b) if b.x == "9"));
+    assert!(matches!(
+        &p0.cmds[4],
+        PathCmd::ArcTo { w_r, st_ang, sw_ang, .. } if w_r == "wd2" && st_ang == "cd4" && sw_ang == "-5400000"
+    ));
+    assert_eq!(p0.cmds[5], PathCmd::Close);
+    let p1 = &g.paths[1];
+    assert_eq!((p1.w, p1.h), (None, None));
+    assert_eq!(p1.fill, PathFill::Darken);
+    assert!(p1.stroke, "stroke defaults to true");
+    assert_eq!(p1.cmds.len(), 2, "expanded pt / close forms parse too");
+}
+
+/// 同一连接线上的 `a:custGeom` 路径同样保留;无路径 / 空元素 → `cust_geom` 为空(仍带标记)。
+#[test]
+fn custgeom_on_connector_and_empty_forms() {
+    let shapes = shapes_of(
+        r#"<p:cxnSp><p:spPr><a:custGeom><a:pathLst><a:path w="1" h="1">
+             <a:moveTo><a:pt x="0" y="0"/></a:moveTo><a:lnTo><a:pt x="1" y="1"/></a:lnTo>
+           </a:path></a:pathLst></a:custGeom></p:spPr></p:cxnSp>
+           <p:cxnSp><p:spPr><a:custGeom><a:pathLst/></a:custGeom></p:spPr></p:cxnSp>"#,
+    );
+    let Shape::Connector(c) = &shapes[0] else {
+        panic!("connector");
+    };
+    assert_eq!(c.cust_geom.as_deref().map(|g| g.paths.len()), Some(1));
+    let Shape::Connector(e) = &shapes[1] else {
+        panic!("connector");
+    };
+    assert!(e.custom_geometry && e.cust_geom.is_none());
+}
+
+/// 预算:参考线 / path / 命令任一超限 → 整个几何丢弃(`cust_geom` 为空、标记仍在),
+/// 后面的兄弟形状不受影响。
+#[test]
+fn custgeom_over_budget_is_dropped_but_siblings_survive() {
+    use ppt_core::custgeom::{MAX_GUIDES, MAX_PATHS, MAX_PATH_COMMANDS};
+    let guides: String = (0..=MAX_GUIDES)
+        .map(|i| format!(r#"<a:gd name="g{i}" fmla="val {i}"/>"#))
+        .collect();
+    let paths: String = (0..=MAX_PATHS)
+        .map(|_| r#"<a:path><a:moveTo><a:pt x="0" y="0"/></a:moveTo></a:path>"#.to_string())
+        .collect();
+    let cmds: String = (0..=MAX_PATH_COMMANDS)
+        .map(|_| r#"<a:lnTo><a:pt x="0" y="0"/></a:lnTo>"#.to_string())
+        .collect();
+    let mk = |inner: &str| {
+        format!(
+            r#"<p:sp><p:spPr><a:custGeom>{inner}</a:custGeom>
+               <a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></p:spPr></p:sp>"#
+        )
+    };
+    let tree = format!(
+        "{}{}{}<p:sp><p:spPr><a:prstGeom prst=\"rect\"/></p:spPr></p:sp>",
+        mk(&format!(
+            r#"<a:gdLst>{guides}</a:gdLst><a:pathLst><a:path><a:moveTo><a:pt x="0" y="0"/></a:moveTo></a:path></a:pathLst>"#
+        )),
+        mk(&format!("<a:pathLst>{paths}</a:pathLst>")),
+        mk(&format!("<a:pathLst><a:path>{cmds}</a:path></a:pathLst>")),
+    );
+    let shapes = shapes_of(&tree);
+    assert_eq!(shapes.len(), 4);
+    for s in &shapes[..3] {
+        let Shape::Auto(a) = s else {
+            panic!("autoshape");
+        };
+        assert!(a.custom_geometry && a.cust_geom.is_none(), "over budget");
+        assert!(a.fill.is_some());
+    }
+    let Shape::Auto(last) = &shapes[3] else {
+        panic!("autoshape");
+    };
+    assert_eq!(last.geometry.as_deref(), Some("rect"));
+}
+
+/// 畸形 / 截断的 custGeom 不 panic,且已解析前缀的兄弟不丢。
+#[test]
+fn custgeom_malformed_never_panics() {
+    for inner in [
+        r#"<a:pathLst><a:path><a:moveTo>"#,
+        r#"<a:pathLst><a:path w="x" h=""><a:arcTo/><a:cubicBezTo><a:pt x="1" y="1"/></a:cubicBezTo><a:lnTo/></a:path></a:pathLst>"#,
+        r#"<a:gdLst><a:gd/><a:gd name="q"/><a:gd fmla="val 1"/></a:gdLst>"#,
+    ] {
+        let _ = shapes_of(&format!(r#"<p:sp><p:spPr><a:custGeom>{inner}"#));
+    }
+}
+
 /// §3.r:`a:tblPr` 开关属性(自闭合与带 `tableStyleId` 子元素两种形式)+ `tcPr > a:noFill`。
 #[test]
 fn tbl_pr_flags_and_tcpr_no_fill_parsed() {

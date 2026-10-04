@@ -465,6 +465,7 @@ fn resolve_auto(a: &AutoShape, ctx: &Ctx, inherited: Option<&Fill>) -> ResolvedA
         stroke: resolve_stroke(ctx, a.stroke.as_ref(), a.style.as_ref()),
         text,
         custom_geometry: a.custom_geometry,
+        cust_geom: a.cust_geom.clone(),
     }
 }
 
@@ -482,6 +483,7 @@ fn resolve_connector(c: &Connector, ctx: &Ctx, inherited: Option<&Fill>) -> Reso
         stroke: resolve_stroke(ctx, c.stroke.as_ref(), c.style.as_ref()),
         no_line: c.stroke.as_ref().is_some_and(|s| s.no_fill),
         custom_geometry: c.custom_geometry,
+        cust_geom: c.cust_geom.clone(),
     }
 }
 

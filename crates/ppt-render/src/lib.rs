@@ -15,6 +15,7 @@
 //! 终态化)。
 
 mod chart;
+mod custgeom;
 mod shapes;
 mod text;
 mod transform;
@@ -631,6 +632,7 @@ mod tests {
             }),
             no_line: false,
             custom_geometry: false,
+            cust_geom: None,
         })
     }
 
@@ -645,6 +647,7 @@ mod tests {
             stroke: None,
             text: None,
             custom_geometry: false,
+            cust_geom: None,
         })
     }
 
@@ -1233,6 +1236,152 @@ mod tests {
         assert!(out.warnings.is_empty(), "{:?}", out.warnings);
     }
 
+    /// 构造一个带 `custGeom` 的红色填充自选图形(100pt x 100pt)。
+    fn cust_shape(cust: Option<ppt_core::custgeom::CustGeom>, stroke: bool) -> ResolvedShape {
+        let ResolvedShape::Auto(mut a) =
+            auto_shape(Rect::new(0, 0, 1_270_000, 1_270_000), "rect", vec![])
+        else {
+            unreachable!()
+        };
+        a.geometry = None;
+        a.custom_geometry = true;
+        a.cust_geom = cust.map(Box::new);
+        if stroke {
+            a.stroke = Some(ResolvedStroke {
+                color: Some(ResolvedColor::opaque([0, 0, 255])),
+                width_emu: Some(12_700),
+                dash: None,
+                head_end: None,
+                tail_end: None,
+            });
+        }
+        ResolvedShape::Auto(a)
+    }
+
+    fn cust_path(cmds: Vec<ppt_core::custgeom::PathCmd>) -> ppt_core::custgeom::CustPath {
+        ppt_core::custgeom::CustPath {
+            w: Some(100),
+            h: Some(100),
+            fill: ppt_core::custgeom::PathFill::Norm,
+            stroke: true,
+            extrusion_ok: false,
+            cmds,
+        }
+    }
+
+    fn cpt(x: &str, y: &str) -> ppt_core::custgeom::CustPt {
+        ppt_core::custgeom::CustPt {
+            x: x.into(),
+            y: y.into(),
+        }
+    }
+
+    /// 内容流里 `l`(lineto)与 `c`(curveto)运算符的个数。
+    fn count_ops(pdf: &[u8], op: &str) -> usize {
+        String::from_utf8_lossy(pdf)
+            .lines()
+            .filter(|l| l.trim_end().ends_with(&format!(" {op}")))
+            .count()
+    }
+
+    /// 求值成功的 custGeom:画真实三角形(2 条 `l`,而非包围盒的 3 条),且不发近似告警。
+    #[test]
+    fn custom_geometry_triangle_is_drawn_without_warning() {
+        use ppt_core::custgeom::{CustGeom, PathCmd};
+        let tri = CustGeom {
+            paths: vec![cust_path(vec![
+                PathCmd::MoveTo(cpt("0", "100")),
+                PathCmd::LnTo(cpt("100", "100")),
+                PathCmd::LnTo(cpt("50", "0")),
+                PathCmd::Close,
+            ])],
+            ..CustGeom::default()
+        };
+        let out = render(&one_slide(vec![cust_shape(Some(tri), false)]));
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+        let pdf = String::from_utf8_lossy(&out.pdf);
+        assert!(pdf.contains("1 0 0 rg"));
+        assert_eq!(count_ops(&out.pdf, "l"), 2, "triangle, not a 3-line rect");
+    }
+
+    /// 带 arcTo 的路径输出曲线;两次渲染字节一致。
+    #[test]
+    fn custom_geometry_arc_draws_curves_deterministically() {
+        use ppt_core::custgeom::{CustGeom, PathCmd};
+        let g = CustGeom {
+            paths: vec![cust_path(vec![
+                PathCmd::MoveTo(cpt("100", "50")),
+                PathCmd::ArcTo {
+                    w_r: "50".into(),
+                    h_r: "50".into(),
+                    st_ang: "0".into(),
+                    sw_ang: "21600000".into(),
+                },
+                PathCmd::Close,
+            ])],
+            ..CustGeom::default()
+        };
+        let shapes = || vec![cust_shape(Some(g.clone()), true)];
+        let a = render(&one_slide(shapes()));
+        let b = render(&one_slide(shapes()));
+        assert!(a.warnings.is_empty(), "{:?}", a.warnings);
+        assert_eq!(count_ops(&a.pdf, "c"), 4);
+        assert_eq!(a.pdf, b.pdf, "byte-identical across renders");
+    }
+
+    /// 多个 path 各按自己的 fill / stroke 画:`fill="none"` 的 path 只描边(无 `f`),
+    /// 另一条只填充(`stroke="0"`)。
+    #[test]
+    fn custom_geometry_paths_follow_their_own_fill_and_stroke() {
+        use ppt_core::custgeom::{CustGeom, PathCmd, PathFill};
+        let mut open = cust_path(vec![
+            PathCmd::MoveTo(cpt("0", "0")),
+            PathCmd::LnTo(cpt("100", "100")),
+        ]);
+        open.fill = PathFill::None;
+        let mut solid = cust_path(vec![
+            PathCmd::MoveTo(cpt("0", "0")),
+            PathCmd::LnTo(cpt("100", "0")),
+            PathCmd::LnTo(cpt("100", "100")),
+            PathCmd::Close,
+        ]);
+        solid.stroke = false;
+        let g = CustGeom {
+            paths: vec![open, solid],
+            ..CustGeom::default()
+        };
+        let out = render(&one_slide(vec![cust_shape(Some(g), true)]));
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+        let pdf = String::from_utf8_lossy(&out.pdf);
+        let painters: Vec<&str> = pdf
+            .lines()
+            .map(str::trim)
+            .filter(|l| matches!(*l, "S" | "s" | "f" | "f*" | "B" | "B*" | "b" | "b*"))
+            .collect();
+        assert_eq!(painters.len(), 2, "{painters:?}");
+        assert!(
+            painters[0].eq_ignore_ascii_case("s"),
+            "stroke only: {painters:?}"
+        );
+        assert!(painters[1].starts_with('f'), "fill only: {painters:?}");
+    }
+
+    /// 求值失败(未定义名字)→ 退回包围盒 + 原近似告警,不 panic。
+    #[test]
+    fn custom_geometry_eval_failure_falls_back_with_warning() {
+        use ppt_core::custgeom::{CustGeom, PathCmd};
+        let bad = CustGeom {
+            paths: vec![cust_path(vec![PathCmd::MoveTo(cpt("nosuch", "0"))])],
+            ..CustGeom::default()
+        };
+        let out = render(&one_slide(vec![cust_shape(Some(bad), false)]));
+        assert_eq!(
+            custom_kinds(&out),
+            vec!["custom-geometry-approximated".to_string()]
+        );
+        assert!(String::from_utf8_lossy(&out.pdf).contains("1 0 0 rg"));
+    }
+
     #[test]
     fn missing_media_reports_image_dropped() {
         let out = render(&one_slide(vec![ResolvedShape::Picture(
@@ -1357,6 +1506,7 @@ mod tests {
             stroke: None,
             text: None,
             custom_geometry: false,
+            cust_geom: None,
         })]));
         assert!(out
             .warnings
@@ -1427,6 +1577,7 @@ mod tests {
             stroke: None,
             text: None,
             custom_geometry: false,
+            cust_geom: None,
         })
     }
 
@@ -1540,6 +1691,7 @@ mod tests {
             stroke: None,
             text: None,
             custom_geometry: false,
+            cust_geom: None,
         })]));
         assert!(String::from_utf8_lossy(&out.pdf).contains("0 0 1 rg"));
         assert!(

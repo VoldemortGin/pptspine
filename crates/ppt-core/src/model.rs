@@ -4,6 +4,7 @@
 //! 这些朴素的 `struct` / `enum`。本轮不要求 serde,只派生 `Debug`/`Clone`/`PartialEq`。
 
 use crate::color::ColorSpec;
+use crate::custgeom::CustGeom;
 use crate::diagnostics::Diagnostic;
 use crate::geom::{Emu, Rect};
 use crate::style::{Caps, PlaceholderRef, ShapeStyle, TextLevelStyle, TextStyleLevels};
@@ -563,8 +564,10 @@ pub struct AutoShape {
     pub placeholder: Option<PlaceholderRef>,
     /// 形状样式引用(`p:style`)。
     pub style: Option<ShapeStyle>,
-    /// 几何来自 `a:custGeom`(自定义路径;v1 不求值公式,渲染按包围盒降级 + 告警)。
+    /// 几何来自 `a:custGeom`(渲染侧求值路径;`cust_geom` 为空 = 超预算,按包围盒降级 + 告警)。
     pub custom_geometry: bool,
+    /// `a:custGeom` 的参考线 + 路径(超预算 / 空元素为 `None`)。
+    pub cust_geom: Option<Box<CustGeom>>,
     /// 形状级超链接(`p:cNvPr > a:hlinkClick`)。
     pub hyperlink: Option<Hyperlink>,
 }
@@ -585,8 +588,10 @@ pub struct Connector {
     pub stroke: Option<Stroke>,
     /// 形状样式引用(`p:style`,连接线常经 `lnRef` 取主题线色)。
     pub style: Option<ShapeStyle>,
-    /// 几何来自 `a:custGeom`(v1 不求值,渲染按缺省直线降级 + 告警)。
+    /// 几何来自 `a:custGeom`(`cust_geom` 为空 = 超预算,渲染按缺省直线降级 + 告警)。
     pub custom_geometry: bool,
+    /// `a:custGeom` 的参考线 + 路径(超预算 / 空元素为 `None`)。
+    pub cust_geom: Option<Box<CustGeom>>,
 }
 
 /// 非表格 `p:graphicFrame`(图表 / SmartArt / OLE 等)的占位信息。

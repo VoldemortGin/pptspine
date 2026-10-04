@@ -1140,6 +1140,20 @@ def custom_geometry_pptx_bytes() -> bytes:
     )
 
 
+@pytest.fixture(scope="session")
+def unresolvable_custom_geometry_pptx_bytes() -> bytes:
+    """custGeom 路径引用未定义的参考线名(求值失败 -> 退回包围盒)。"""
+    bad = (
+        '<a:custGeom><a:pathLst><a:path w="10" h="10"><a:moveTo><a:pt x="0" y="0"/></a:moveTo>'
+        '<a:lnTo><a:pt x="nosuch" y="10"/></a:lnTo></a:path></a:pathLst></a:custGeom>'
+    )
+    return build_sp_tree_pptx(
+        f"""<p:sp><p:nvSpPr><p:cNvPr id="5" name="F"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+        <p:spPr><a:xfrm><a:off x="914400" y="914400"/><a:ext cx="1270000" cy="1270000"/></a:xfrm>
+        {bad}<a:solidFill><a:srgbClr val="0000FF"/></a:solidFill></p:spPr></p:sp>"""
+    )
+
+
 def _picture_slide(blip_extra: str) -> str:
     return f"""<p:pic>
         <p:nvPicPr><p:cNvPr id="2" name="Picture 1"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>

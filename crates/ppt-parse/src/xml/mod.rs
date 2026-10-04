@@ -11,6 +11,7 @@
 
 pub mod chart;
 pub mod comments;
+mod custgeom;
 pub mod diagram;
 pub mod doc_props;
 pub mod notes;
