@@ -392,6 +392,7 @@ fn resolve_run(
         char_spacing_pt: m.char_spacing_pt.unwrap_or(0.0),
         baseline: m.baseline.unwrap_or(0.0),
         cap: m.cap.unwrap_or_default(),
+        link: run.hyperlink.as_ref().and_then(|h| h.url.clone()),
     }
 }
 

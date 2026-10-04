@@ -30,7 +30,7 @@ offline, and deterministically via the sibling [`ocrspine`](../ocrspine) crate
 | Table merges: `gridSpan` / `rowSpan` / `hMerge` / `vMerge` | parsed |
 | Cell solid-fill color | parsed |
 | Pictures: `r:embed` rel → media name; raw bytes via `Presentation.image_bytes()`; alt text `cNvPr@descr` / `@title` / `@name` (`alt_text` / `title` / `name` keys) | parsed |
-| Hyperlinks `a:hlinkClick` (run- and shape-level): external URL via rels, internal jumps (`ppaction://hlinksldjump` / `hlinkshowjump`) → target slide index (`hyperlink` key) | parsed |
+| Hyperlinks `a:hlinkClick` (run- and shape-level): external URL via rels, internal jumps (`ppaction://hlinksldjump` / `hlinkshowjump`) → target slide index (`hyperlink` key) | parsed; PDF: run-level external `http` / `https` / `mailto` links → URI link annotations |
 | Placeholders: `p:ph` type/idx on every shape dict (`placeholder` key: `{"type", "idx"}` or `None`) | parsed |
 | Hidden slides (`p:sld@show="0"` → `Slide.hidden`), sections (`p14:sectionLst` → `Presentation.sections()`), document properties (`docProps/core.xml` + `app.xml` → `Presentation.core_properties()`) | parsed |
 | Autoshapes: geometry name, fill, stroke, optional text | parsed (best-effort) |

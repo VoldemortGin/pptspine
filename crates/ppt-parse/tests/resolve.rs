@@ -1873,3 +1873,37 @@ fn chart_series_scheme_colors_resolve_through_theme() {
     assert_eq!(rgb(&s.point_colors[0].1), [0x12, 0x34, 0x56]);
     assert_rgb_within(rgb(&s.point_colors[1].1), [0xED, 0x7D, 0x31], "dPt accent2");
 }
+
+// ---- run 级超链接进入终态 IR ---------------------------------------------------
+
+/// 外链(rels `Target`)落到 `ResolvedRun.link`(URL 原文,scheme 过滤在渲染侧);页内跳转 /
+/// 无链接为 `None`。
+#[test]
+fn run_external_hyperlink_reaches_resolved_run() {
+    let slide = slide_with(
+        r#"<p:sp><p:spPr/><p:txBody><a:bodyPr/><a:p>
+          <a:r><a:rPr><a:hlinkClick r:id="rId7"/></a:rPr><a:t>web</a:t></a:r>
+          <a:r><a:rPr><a:hlinkClick r:id="rId8" action="ppaction://hlinksldjump"/></a:rPr><a:t>jump</a:t></a:r>
+          <a:r><a:t>plain</a:t></a:r>
+        </a:p></p:txBody></p:sp>"#,
+        "",
+    );
+    let rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+  <Relationship Id="rId7" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com/a" TargetMode="External"/>
+  <Relationship Id="rId8" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slide1.xml"/>
+</Relationships>"#;
+    let xml = build_deck_extra(
+        &slide,
+        "",
+        &layout1(),
+        &master1(),
+        &[("ppt/slides/_rels/slide1.xml.rels", rels)],
+    );
+    let resolved = resolve(&parse_bytes(&xml).expect("parse"));
+    let runs = &as_text_box(&resolved.slides[0].shapes[0]).paragraphs[0].runs;
+    assert_eq!(runs[0].link.as_deref(), Some("https://example.com/a"));
+    assert_eq!(runs[1].link, None, "页内跳转不是外链");
+    assert_eq!(runs[2].link, None);
+}

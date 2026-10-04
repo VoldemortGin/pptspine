@@ -540,6 +540,7 @@ mod tests {
             char_spacing_pt: 0.0,
             baseline: 0.0,
             cap: ppt_core::style::Caps::None,
+            link: None,
         }
     }
 
@@ -1016,6 +1017,76 @@ mod tests {
             .filter(|w| w == b"/FontFile2")
             .count();
         assert_eq!(count, 1, "exactly one FontFile2 per used face");
+    }
+
+    /// 带链接的文本框:`link` 为 `Some` 的整段 run(`plain` 为不带链接的前后缀)。
+    fn linked_box(rect: Rect, link: Option<&str>, text: &str) -> ResolvedShape {
+        let mut linked = run(text);
+        linked.link = link.map(str::to_string);
+        let ResolvedShape::TextBox(mut tf) = text_box(rect, 0, "") else {
+            unreachable!()
+        };
+        tf.paragraphs[0].runs = vec![run("see "), linked, run(" end")];
+        ResolvedShape::TextBox(tf)
+    }
+
+    fn link_annots(pdf: &[u8]) -> usize {
+        String::from_utf8_lossy(pdf)
+            .matches("/Subtype /Link")
+            .count()
+    }
+
+    /// 外链 run → 页面 `/Link` 注释(URI 动作);只放行 http / https / mailto;自动换行的
+    /// 链接每行一个矩形;没有链接 / 被拒 scheme 则无注释。
+    #[test]
+    fn run_hyperlinks_become_uri_link_annotations() {
+        let wide = Rect::new(914_400, 914_400, 9_144_000, 1_828_800);
+        let narrow = Rect::new(914_400, 914_400, 2_286_000, 3_657_600);
+        let long = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu";
+
+        let out = render(&one_slide(vec![linked_box(
+            wide,
+            Some("https://example.com/a?b=c"),
+            "click me",
+        )]));
+        let hay = String::from_utf8_lossy(&out.pdf);
+        assert_eq!(link_annots(&out.pdf), 1);
+        assert!(hay.contains("/URI (https://example.com/a?b=c)"), "URI 动作");
+
+        let mail = render(&one_slide(vec![linked_box(
+            wide,
+            Some("mailto:a@b.co"),
+            "mail",
+        )]));
+        assert_eq!(link_annots(&mail.pdf), 1);
+
+        for bad in [
+            Some("javascript:alert(1)"),
+            Some("file:///etc/passwd"),
+            Some("ppaction://hlinksldjump"),
+            None,
+        ] {
+            let out = render(&one_slide(vec![linked_box(wide, bad, "click me")]));
+            assert_eq!(link_annots(&out.pdf), 0, "{bad:?}");
+            assert!(
+                !String::from_utf8_lossy(&out.pdf).contains("/URI"),
+                "{bad:?}"
+            );
+        }
+
+        let wrapped = render(&one_slide(vec![linked_box(
+            narrow,
+            Some("https://example.com"),
+            long,
+        )]));
+        assert!(link_annots(&wrapped.pdf) >= 2, "跨行链接每行一个矩形");
+        // 字节确定。
+        let again = render(&one_slide(vec![linked_box(
+            narrow,
+            Some("https://example.com"),
+            long,
+        )]));
+        assert_eq!(wrapped.pdf, again.pdf);
     }
 
     #[test]

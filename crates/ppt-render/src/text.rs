@@ -230,11 +230,51 @@ fn run_input(run: &ResolvedRun) -> Run {
     style.underline = run.underline;
     style.strike = run.strike;
     style.color = rgb(run.color);
+    style.link = run.link.as_deref().and_then(safe_link_uri);
     let text = match run.cap {
         Caps::None => run.text.clone(),
         Caps::Small | Caps::All => run.text.to_uppercase(),
     };
     Run::new(text, style)
+}
+
+/// 外链目标 → 可写进 PDF `/URI` 动作的串:只放行 `http` / `https` / `mailto`(scheme 不分大小写),
+/// 其余(`javascript:` / `file:` / `data:` / 相对或无 scheme 等)一律 `None`;含空白 / 控制字符、
+/// 过长、`http(s)` 缺主机、`mailto` 缺地址的也拒绝;非 ASCII 字符按 UTF-8 百分号编码(PDF URI 须 7 位)。
+pub(crate) fn safe_link_uri(url: &str) -> Option<String> {
+    /// URI 最大长度(超出视为畸形)。
+    const MAX_URI_LEN: usize = 2048;
+    let url = url.trim_matches(' ');
+    if url.len() > MAX_URI_LEN {
+        return None;
+    }
+    let (scheme, rest) = url.split_once(':')?;
+    let rest_ok = match scheme.to_ascii_lowercase().as_str() {
+        "http" | "https" => rest.strip_prefix("//").is_some_and(|r| {
+            r.chars()
+                .next()
+                .is_some_and(|c| !matches!(c, '/' | '?' | '#'))
+        }),
+        "mailto" => !rest.is_empty(),
+        _ => false,
+    };
+    if !rest_ok {
+        return None;
+    }
+    let mut out = String::with_capacity(url.len());
+    for c in url.chars() {
+        if c.is_ascii_graphic() {
+            out.push(c);
+        } else if c.is_whitespace() || c.is_control() {
+            return None;
+        } else {
+            let mut buf = [0; 4];
+            for b in c.encode_utf8(&mut buf).bytes() {
+                out.push_str(&format!("%{b:02X}"));
+            }
+        }
+    }
+    Some(out)
 }
 
 /// `baseline`(相对字号的比例,正上负下)→ 引擎基线偏移:**文档给的偏移量** × 名义
@@ -502,6 +542,7 @@ mod tests {
             char_spacing_pt: 0.0,
             baseline: 0.0,
             cap: Caps::None,
+            link: None,
         };
         f(&mut run);
         run
@@ -605,7 +646,71 @@ mod tests {
             char_spacing_pt: 0.0,
             baseline: 0.0,
             cap: ppt_core::style::Caps::None,
+            link: None,
         };
         assert_eq!(family_for(&run), "SimSun");
+    }
+
+    /// 只放行 http / https / mailto;其余 scheme、畸形输入一律不生成链接。
+    #[test]
+    fn link_uri_allows_only_web_and_mail_schemes() {
+        for ok in [
+            "http://example.com",
+            "https://example.com/a?b=c#d",
+            "HTTPS://Example.com/x",
+            "  https://example.com/trim  ",
+            "mailto:someone@example.com",
+            "MailTo:a@b.c?subject=hi",
+        ] {
+            assert_eq!(safe_link_uri(ok).as_deref(), Some(ok.trim()), "{ok}");
+        }
+        for bad in [
+            "javascript:alert(1)",
+            " JavaScript:alert(1)",
+            "java\tscript:alert(1)",
+            "file:///etc/passwd",
+            "data:text/html;base64,AAAA",
+            "vbscript:x",
+            "ftp://example.com",
+            "tel:123",
+            "ppaction://hlinksldjump",
+            "//example.com",
+            "example.com",
+            "relative/path.html",
+            "http:",
+            "http://",
+            "https:example.com",
+            "mailto:",
+            "",
+            "https://exa mple.com",
+            "https://example.com/\u{0}",
+            "https://example.com/\n",
+        ] {
+            assert_eq!(safe_link_uri(bad), None, "{bad:?}");
+        }
+        assert_eq!(
+            safe_link_uri(&format!("https://e.com/{}", "a".repeat(5000))),
+            None,
+            "过长"
+        );
+        assert_eq!(
+            safe_link_uri("https://例.com/路径").as_deref(),
+            Some("https://%E4%BE%8B.com/%E8%B7%AF%E5%BE%84"),
+            "非 ASCII 百分号编码"
+        );
+    }
+
+    /// run 的外链经 `safe_link_uri` 进入引擎 `RunStyle.link`;被拒的目标不带链接。
+    #[test]
+    fn run_link_reaches_engine_style_only_when_safe() {
+        let ok = run_input(&styled_run("go", |r| {
+            r.link = Some("https://example.com".into())
+        }));
+        assert_eq!(ok.style.link.as_deref(), Some("https://example.com"));
+        let bad = run_input(&styled_run("go", |r| {
+            r.link = Some("javascript:alert(1)".into())
+        }));
+        assert_eq!(bad.style.link, None);
+        assert_eq!(run_input(&styled_run("go", |_| {})).style.link, None);
     }
 }

@@ -338,4 +338,6 @@ pub struct ResolvedRun {
     pub baseline: f32,
     /// 大写变换(链上全缺为 [`Caps::None`])。
     pub cap: Caps,
+    /// run 级外链目标(`a:hlinkClick` 经 rels 回填的 URL 原文,未按 scheme 过滤;页内跳转为 `None`)。
+    pub link: Option<String>,
 }

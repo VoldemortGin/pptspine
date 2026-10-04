@@ -811,3 +811,26 @@ def test_master_picture_background_resolves_through_master_rels(
     不读 rels,图片背景静默丢失)→ 满页图片。"""
     images = _paint_summary(_export(master_picture_bg_pptx_bytes)[0])[1]
     assert [tuple(i["bbox"]) for i in images] == [pytest.approx((0.0, 0.0, 720.0, 540.0))]
+
+
+# --- 超链接:run 级外链 → PDF URI 链接注释 --------------------------------------------
+
+
+def test_run_hyperlink_exports_uri_link_annotation(semantic_pptx_bytes: bytes) -> None:
+    """semantic deck 第 1 页:run 级外链 → 一个落在 run 排版包围盒内的 URI 注释;页内跳转 run
+    与形状级(图片)链接本版不出注释;其余页(隐藏页不导出)无注释。"""
+    pdf, pres = _export(semantic_pptx_bytes)
+    doc = _open_pdf(pdf)
+    links = doc[0].get_links()
+    uris = [lk.get("uri") for lk in links]
+    assert uris == ["https://example.com/home"], uris
+    # 矩形与该 run 文字("our site")的词框:水平对齐(1 pt 容差),垂直至少重叠一半(引擎取
+    # 行内 ink 范围,与 get_text_words 的行盒上下沿略有差异)。
+    x0, y0, x1, y1 = links[0]["from"]
+    words = [w for w in doc[0].get_text_words() if w[4] in {"our", "site"}]
+    assert words, "找不到链接文字"
+    assert abs(x0 - min(w[0] for w in words)) <= 1.0
+    assert abs(x1 - max(w[2] for w in words)) <= 1.0
+    wy0, wy1 = min(w[1] for w in words), max(w[3] for w in words)
+    assert min(y1, wy1) - max(y0, wy0) >= 0.5 * (wy1 - wy0)
+    assert all(not doc[i].get_links() for i in range(1, len(doc)))
