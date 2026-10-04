@@ -372,6 +372,7 @@ fn placeholder_dict<'py>(py: Python<'py>, p: &GraphicPlaceholder) -> PyResult<Bo
         Some(c) => d.set_item("chart", chart_dict(py, c)?)?,
         None => d.set_item("chart", py.None())?,
     }
+    d.set_item("text", &p.diagram_text)?;
     d.set_item("placeholder", py.None())?;
     Ok(d)
 }

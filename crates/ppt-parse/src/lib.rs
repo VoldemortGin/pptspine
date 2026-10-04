@@ -5,6 +5,7 @@
 //! 外加一份 `media` 字节表(`裸文件名 -> 原始图片字节`)。解析全程容错,失败收敛成 [`PptError`]。
 
 mod charts;
+mod diagrams;
 mod links;
 pub mod resolve;
 mod xml;
@@ -161,6 +162,7 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
         .collect();
     let count = slides.len();
     let mut chart_cache = charts::ChartCache::new();
+    let mut diagram_cache = diagrams::DiagramCache::default();
     for (i, (slide, (part, rels))) in slides.iter_mut().zip(&slide_parts).enumerate() {
         let ctx = links::LinkCtx {
             rels,
@@ -171,6 +173,14 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
         };
         links::resolve_links(&mut slide.shapes, &ctx);
         charts::resolve_charts(&mut slide.shapes, rels, part, &pkg, &mut chart_cache);
+        diagrams::resolve_diagrams(
+            &mut slide.shapes,
+            rels,
+            part,
+            &pkg,
+            &media_index,
+            &mut diagram_cache,
+        );
     }
 
     if slides.is_empty() && !ordered_parts.is_empty() {

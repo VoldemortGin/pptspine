@@ -1724,6 +1724,8 @@ mod tests {
             kind: Some(uri.to_string()),
             chart_rel_id: Some("rId2".into()),
             chart,
+            diagram_rel_id: None,
+            diagram_text: Vec::new(),
         })
     }
 
@@ -1823,6 +1825,27 @@ mod tests {
         let out = render(&one_slide(vec![smart_art]));
         assert!(has_placeholder_box(&out.pdf));
         assert_eq!(chart_degraded(&out), 0, "SmartArt 不发图表告警");
+    }
+
+    /// SmartArt 占位(无 drawing 部件:文字只进模型 / 导出)画占位框并记 `smartart-degraded`
+    /// (按种类只发一次由上层去重;渲染侧每个占位一条)。
+    #[test]
+    fn smartart_placeholder_keeps_box_and_warns() {
+        let uri = "http://schemas.openxmlformats.org/drawingml/2006/diagram";
+        for text in [vec![], vec!["Alpha".to_string()]] {
+            let ResolvedShape::Placeholder(mut gp) = chart_shape(None, uri) else {
+                unreachable!()
+            };
+            gp.diagram_text = text;
+            let out = render(&one_slide(vec![ResolvedShape::Placeholder(gp)]));
+            assert!(has_placeholder_box(&out.pdf));
+            let n = out
+                .warnings
+                .iter()
+                .filter(|w| matches!(w, ExportWarning::Custom { kind, .. } if kind == "smartart-degraded"))
+                .count();
+            assert_eq!(n, 1, "{:?}", out.warnings);
+        }
     }
 
     /// 复合饼(`ofPieChart`)不再按普通饼画:占位框 + `chart-degraded`。

@@ -126,6 +126,8 @@ fn shape_blocks(f: &FlatShape, skip_first_para: bool, out: &mut Vec<String>) {
             if let Some(c) = &p.chart {
                 out.push(chart_markdown(c));
             }
+            // SmartArt 退回 data 部件的文字:每个节点一个段落块。
+            out.extend(p.diagram_text.iter().cloned());
         }
         Shape::Connector(_) | Shape::Group(_) => {}
     }

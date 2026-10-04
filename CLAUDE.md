@@ -21,7 +21,7 @@ Spine 家族成员之一:**纯 Rust 的 PowerPoint(.pptx / OOXML)结构化解析
   - **解压限额(`ppt_parse::ZipLimits`)。** 读 zip 包不信任头字段声明大小(不按它预分配,
     `take(limit + 1)` 截断读取),超限返回 `PptError::LimitExceeded { kind: LimitKind, limit, actual }`
     (Python 侧为 `PptZipError`,信息含限额种类)。默认:条目数 10 000、单条目 256 MiB、总解压量
-    1 GiB、压缩比 10 000(仅对解压量 > 1 MiB 的条目判定)、条目名 1024 字节、幻灯片数 5 000(`p:sldIdLst` 去重后;重复引用同一 slide 只保留首次,同一图表部件只解析一次);绝对路径 / 盘符形式(`C:`)/ 含 `..`
+    1 GiB、压缩比 10 000(仅对解压量 > 1 MiB 的条目判定)、条目名 1024 字节、幻灯片数 5 000(`p:sldIdLst` 去重后;重复引用同一 slide 只保留首次,同一图表 / SmartArt drawing 部件只解析一次);绝对路径 / 盘符形式(`C:`)/ 含 `..`
     的条目名直接拒绝(`PptError::Zip`)。`parse_bytes` / `parse_path` 用默认值,
     `parse_*_with_limits` 可自定。组合 / `mc:AlternateContent` 嵌套超过 64 层的子树整体跳过
     (防递归下降爆栈)。`mc:AlternateContent` 取文档顺序第一个解析出内容的 `mc:Choice`,全空才取 `mc:Fallback`
@@ -57,7 +57,9 @@ crates/
     src/zip_pkg.rs zip 读 API:presentation.xml / slides / _rels / media / layouts / masters
     src/links.rs   超链接后处理:rels 回填外链 url,页内跳转折成目标幻灯片序号
     src/charts.rs  图表后处理:占位的 c:chart@r:id 经 slide rels 读 ppt/charts/chartN.xml 回填 chart
+    src/diagrams.rs SmartArt 后处理:dgm:relIds@r:dm → data 部件 → drawing 部件(优先,包成 frame 变换的组合)/ 退回 data 文字
     src/xml/       quick-xml walker:presentation.rs(尺寸+顺序) slide.rs(spTree -> Shape)
+                   diagram.rs(SmartArt data 部件:内容点文字 + dataModelExt 的 drawing 关系 id)
                    doc_props.rs(docProps/core.xml + app.xml -> DocProperties)
                    chart.rs(c:chartSpace 缓存 -> Chart:种类/标题/类别/系列,稀疏 pt 补空,不读外部工作簿)
                    table_style.rs(ppt/tableStyles.xml -> styleId -> TableStyle:九部件填充/边框/文字色)

@@ -46,8 +46,8 @@ use super::{
 
 /// `p:txBody` 的解析结果:段落 + 自带 `a:lstStyle` + `a:bodyPr`。
 #[derive(Debug, Clone, Default)]
-struct TxBodyData {
-    paragraphs: Vec<Paragraph>,
+pub(super) struct TxBodyData {
+    pub(super) paragraphs: Vec<Paragraph>,
     list_style: Option<TextStyleLevels>,
     body: BodyProps,
 }
@@ -1121,7 +1121,7 @@ fn stroke_if_any(stroke: Stroke) -> Option<Stroke> {
 
 /// 解析 `p:txBody` -> 段落序列 + 自带列表样式 + `a:bodyPr`(B-6)。
 /// 已消费 `<p:txBody>` 起始标签。
-fn parse_txbody<R: std::io::BufRead>(reader: &mut Reader<R>) -> TxBodyData {
+pub(super) fn parse_txbody<R: std::io::BufRead>(reader: &mut Reader<R>) -> TxBodyData {
     let mut body = TxBodyData::default();
     let mut buf = Vec::new();
     loop {
@@ -1665,6 +1665,7 @@ fn parse_graphic_frame<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Sh
     let mut table: Option<Table> = None;
     let mut uri: Option<String> = None;
     let mut chart_rel_id: Option<String> = None;
+    let mut diagram_rel_id: Option<String> = None;
     // graphic / graphicData 是要"穿透"的容器:降入时计深,End 时消深,直到
     // `</p:graphicFrame>` 本身(depth 归零)才结束。此前不计深、见 End 就 break,
     // 会把 `</a:graphic>`/`</p:graphicFrame>` 留给上层容器误吞,静默丢掉 frame
@@ -1691,12 +1692,17 @@ fn parse_graphic_frame<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Sh
                         chart_rel_id = attr_of(&e, b"id").or(chart_rel_id);
                         skip_element(reader, &name);
                     }
+                    b"relIds" => {
+                        diagram_rel_id = attr_of(&e, b"dm").or(diagram_rel_id);
+                        skip_element(reader, &name);
+                    }
                     _ => skip_element(reader, &name),
                 }
             }
             Ok(Event::Empty(e)) => match local_name(e.name().as_ref()) {
                 b"graphicData" => uri = attr_of(&e, b"uri").or(uri),
                 b"chart" => chart_rel_id = attr_of(&e, b"id").or(chart_rel_id),
+                b"relIds" => diagram_rel_id = attr_of(&e, b"dm").or(diagram_rel_id),
                 _ => {}
             },
             Ok(Event::End(_)) => {
@@ -1724,6 +1730,8 @@ fn parse_graphic_frame<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Sh
             kind: uri,
             chart_rel_id,
             chart: None,
+            diagram_rel_id,
+            diagram_text: Vec::new(),
         })),
     }
 }

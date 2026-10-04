@@ -549,6 +549,11 @@ pub struct GraphicPlaceholder {
     pub chart_rel_id: Option<String>,
     /// 图表缓存数据(经 slide rels 读 `ppt/charts/chartN.xml`);非图表 / 部件缺失为 `None`。
     pub chart: Option<Chart>,
+    /// SmartArt 数据部件关系 id(`a:graphicData > dgm:relIds@r:dm`);非 SmartArt 为 `None`。
+    pub diagram_rel_id: Option<String>,
+    /// SmartArt 退回 data 部件时抽出的文字(`dgm:pt > dgm:t` 的非空段落,文档顺序);
+    /// 有 drawing 部件时 frame 整个替换为组合形状,此字段为空。
+    pub diagram_text: Vec<String>,
 }
 
 /// 图表种类(`c:plotArea` 下的图类型元素;3D 变体并入同名 2D 种类,`ofPieChart` 并入 `Pie`)。

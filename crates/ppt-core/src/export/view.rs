@@ -111,7 +111,10 @@ fn shape_text(shape: &Shape) -> Option<String> {
         Shape::TextBox(tf) => frame_text(tf),
         Shape::Auto(a) => a.text.as_deref().map(frame_text).unwrap_or_default(),
         Shape::Table(t) => table_text(t),
-        Shape::Placeholder(p) => p.chart.as_ref().map(chart_text).unwrap_or_default(),
+        Shape::Placeholder(p) => match &p.chart {
+            Some(c) => chart_text(c),
+            None => p.diagram_text.join("\n"),
+        },
         Shape::Picture(_) | Shape::Connector(_) | Shape::Group(_) => String::new(),
     };
     (!s.is_empty()).then_some(s)
