@@ -840,6 +840,7 @@ fn limit_arg(name: &str, v: Option<&Bound<'_, PyAny>>) -> PyResult<Option<u64>> 
 }
 
 /// 把可选关键字参数叠加到缺省 [`ZipLimits`] 上(缺省值与不传完全相同)。
+#[allow(clippy::too_many_arguments)]
 fn zip_limits(
     max_entries: Option<&Bound<'_, PyAny>>,
     max_entry_bytes: Option<&Bound<'_, PyAny>>,
@@ -847,6 +848,9 @@ fn zip_limits(
     max_compression_ratio: Option<&Bound<'_, PyAny>>,
     max_name_len: Option<&Bound<'_, PyAny>>,
     max_slides: Option<&Bound<'_, PyAny>>,
+    max_diagram_shapes: Option<&Bound<'_, PyAny>>,
+    max_diagram_text_bytes: Option<&Bound<'_, PyAny>>,
+    max_chart_points: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<ZipLimits> {
     let mut l = ZipLimits::default();
     let too_big = |name: &str| PyValueError::new_err(format!("{name} is too large"));
@@ -868,6 +872,16 @@ fn zip_limits(
     if let Some(n) = limit_arg("max_slides", max_slides)? {
         l.max_slides = usize::try_from(n).map_err(|_| too_big("max_slides"))?;
     }
+    if let Some(n) = limit_arg("max_diagram_shapes", max_diagram_shapes)? {
+        l.max_diagram_shapes = usize::try_from(n).map_err(|_| too_big("max_diagram_shapes"))?;
+    }
+    if let Some(n) = limit_arg("max_diagram_text_bytes", max_diagram_text_bytes)? {
+        l.max_diagram_text_bytes =
+            usize::try_from(n).map_err(|_| too_big("max_diagram_text_bytes"))?;
+    }
+    if let Some(n) = limit_arg("max_chart_points", max_chart_points)? {
+        l.max_chart_points = usize::try_from(n).map_err(|_| too_big("max_chart_points"))?;
+    }
     Ok(l)
 }
 
@@ -876,7 +890,8 @@ fn zip_limits(
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (path, *, max_entries=None, max_entry_bytes=None, max_total_bytes=None,
-                    max_compression_ratio=None, max_name_len=None, max_slides=None))]
+                    max_compression_ratio=None, max_name_len=None, max_slides=None, max_diagram_shapes=None,
+                    max_diagram_text_bytes=None, max_chart_points=None))]
 fn open(
     py: Python<'_>,
     path: PathBuf,
@@ -886,6 +901,9 @@ fn open(
     max_compression_ratio: Option<Bound<'_, PyAny>>,
     max_name_len: Option<Bound<'_, PyAny>>,
     max_slides: Option<Bound<'_, PyAny>>,
+    max_diagram_shapes: Option<Bound<'_, PyAny>>,
+    max_diagram_text_bytes: Option<Bound<'_, PyAny>>,
+    max_chart_points: Option<Bound<'_, PyAny>>,
 ) -> PyResult<PyPresentation> {
     let limits = zip_limits(
         max_entries.as_ref(),
@@ -894,6 +912,9 @@ fn open(
         max_compression_ratio.as_ref(),
         max_name_len.as_ref(),
         max_slides.as_ref(),
+        max_diagram_shapes.as_ref(),
+        max_diagram_text_bytes.as_ref(),
+        max_chart_points.as_ref(),
     )?;
     let parsed = py
         .detach(|| parse_path_with_limits(&path, &limits))
@@ -905,7 +926,8 @@ fn open(
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (data, *, max_entries=None, max_entry_bytes=None, max_total_bytes=None,
-                    max_compression_ratio=None, max_name_len=None, max_slides=None))]
+                    max_compression_ratio=None, max_name_len=None, max_slides=None, max_diagram_shapes=None,
+                    max_diagram_text_bytes=None, max_chart_points=None))]
 fn open_bytes(
     py: Python<'_>,
     data: &[u8],
@@ -915,6 +937,9 @@ fn open_bytes(
     max_compression_ratio: Option<Bound<'_, PyAny>>,
     max_name_len: Option<Bound<'_, PyAny>>,
     max_slides: Option<Bound<'_, PyAny>>,
+    max_diagram_shapes: Option<Bound<'_, PyAny>>,
+    max_diagram_text_bytes: Option<Bound<'_, PyAny>>,
+    max_chart_points: Option<Bound<'_, PyAny>>,
 ) -> PyResult<PyPresentation> {
     let limits = zip_limits(
         max_entries.as_ref(),
@@ -923,6 +948,9 @@ fn open_bytes(
         max_compression_ratio.as_ref(),
         max_name_len.as_ref(),
         max_slides.as_ref(),
+        max_diagram_shapes.as_ref(),
+        max_diagram_text_bytes.as_ref(),
+        max_chart_points.as_ref(),
     )?;
     let owned = data.to_vec();
     let parsed = py

@@ -7,7 +7,8 @@ use std::io::{Cursor, Write};
 use ppt_core::export::{presentation_markdown_with, presentation_text_with, ExportOptions};
 use ppt_core::geom::Rect;
 use ppt_core::model::Shape;
-use ppt_parse::{parse_bytes, resolve};
+use ppt_core::DiagnosticKind;
+use ppt_parse::{parse_bytes, parse_bytes_with_limits, resolve, ZipLimits};
 use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
 
@@ -316,4 +317,140 @@ fn deeply_nested_drawing_and_data_do_not_overflow_the_stack() {
         &[("ppt/diagrams/data1.xml", deep_data)],
     );
     assert!(parse_bytes(&bytes).is_ok());
+}
+
+// --- 展开预算:小文件 + 多 frame 指向同一 drawing / data,总展开量必须有界 ---
+
+/// 数一棵形状树(含组合内)里的形状总数(组合自身与降级留下的占位框不计)。
+fn count_leaves(shapes: &[Shape]) -> usize {
+    shapes
+        .iter()
+        .map(|s| match s {
+            Shape::Group(g) => count_leaves(&g.children),
+            Shape::Placeholder(_) => 0,
+            _ => 1,
+        })
+        .sum()
+}
+
+/// `n_shapes` 个形状的 drawing × `n_frames` 个 frame,全部指向同一 data / drawing。
+fn amplified(n_shapes: usize, n_frames: usize, data: String) -> Vec<u8> {
+    let inner: String = (0..n_shapes)
+        .map(|i| dsp_sp(0, 0, 100, 100, &format!("t{i}")))
+        .collect();
+    deck(
+        &frame("rId2").repeat(n_frames),
+        &RELS_BOTH,
+        &[
+            ("ppt/diagrams/data1.xml", data),
+            ("ppt/diagrams/drawing1.xml", drawing_xml(&inner)),
+        ],
+    )
+}
+
+fn diag_count(parsed: &ppt_parse::ParsedPptx, kind: DiagnosticKind) -> usize {
+    parsed
+        .presentation
+        .diagnostics
+        .iter()
+        .filter(|d| d.kind == kind)
+        .map(|d| d.count)
+        .sum()
+}
+
+#[test]
+fn defaults_for_expansion_budgets() {
+    let d = ZipLimits::default();
+    assert_eq!(d.max_diagram_shapes, 100_000);
+    assert_eq!(d.max_diagram_text_bytes, 8 * 1024 * 1024);
+    assert_eq!(d.max_chart_points, 1_000_000);
+}
+
+#[test]
+fn diagram_shape_budget_caps_total_expansion_across_frames() {
+    // 200 形状 × 50 frame = 10 000;预算 1 000 => 只有 5 个 frame 能展开,其余 45 个降级。
+    let limits = ZipLimits {
+        max_diagram_shapes: 1_000,
+        ..ZipLimits::default()
+    };
+    let parsed =
+        parse_bytes_with_limits(&amplified(200, 50, data_xml(Some("rId6"))), &limits).unwrap();
+    let shapes = &parsed.presentation.slides[0].shapes;
+    assert_eq!(shapes.len(), 50, "frame 不丢,降级的保留占位框");
+    assert_eq!(count_leaves(shapes), 5 * 200, "总展开量不超过预算");
+    let groups = shapes
+        .iter()
+        .filter(|s| matches!(s, Shape::Group(_)))
+        .count();
+    assert_eq!(groups, 5);
+    assert_eq!(diag_count(&parsed, DiagnosticKind::SmartArtDegraded), 45);
+}
+
+#[test]
+fn diagram_budget_is_exact_boundary() {
+    // 预算恰好够 3 个 frame:3 个展开,第 4 个降级。
+    let limits = ZipLimits {
+        max_diagram_shapes: 600,
+        ..ZipLimits::default()
+    };
+    let parsed =
+        parse_bytes_with_limits(&amplified(200, 4, data_xml(Some("rId6"))), &limits).unwrap();
+    let shapes = &parsed.presentation.slides[0].shapes;
+    assert_eq!(count_leaves(shapes), 600);
+    assert_eq!(diag_count(&parsed, DiagnosticKind::SmartArtDegraded), 1);
+}
+
+#[test]
+fn diagram_text_budget_caps_fallback_text_across_frames() {
+    // 无 drawing,退回 data 文字:每个 frame 的文字 "Alpha Beta Gamma Delta" = 20 字节;
+    // 预算 50 字节 => 只有前 2 个 frame 拿到文字。
+    let limits = ZipLimits {
+        max_diagram_text_bytes: 50,
+        ..ZipLimits::default()
+    };
+    let bytes = deck(
+        &frame("rId2").repeat(10),
+        &[("rId2", REL_DATA, "../diagrams/data1.xml")],
+        &[("ppt/diagrams/data1.xml", data_xml(None))],
+    );
+    let parsed = parse_bytes_with_limits(&bytes, &limits).unwrap();
+    let with_text = parsed.presentation.slides[0]
+        .shapes
+        .iter()
+        .filter(|s| matches!(s, Shape::Placeholder(gp) if !gp.diagram_text.is_empty()))
+        .count();
+    assert_eq!(with_text, 2);
+}
+
+#[test]
+fn diagram_text_budget_also_charges_drawing_text() {
+    // 每形状文字 2 字节("t0"…"t9" 共 10 个 = 20 字节),预算 50 => 2 个 frame 展开。
+    let limits = ZipLimits {
+        max_diagram_text_bytes: 50,
+        ..ZipLimits::default()
+    };
+    let parsed =
+        parse_bytes_with_limits(&amplified(10, 5, data_xml(Some("rId6"))), &limits).unwrap();
+    let groups = parsed.presentation.slides[0]
+        .shapes
+        .iter()
+        .filter(|s| matches!(s, Shape::Group(_)))
+        .count();
+    assert_eq!(groups, 2);
+}
+
+#[test]
+fn oversized_single_drawing_is_degraded_even_with_huge_budget() {
+    // 单个 drawing 部件的形状数有硬上限(10 000),与全局预算无关。
+    let limits = ZipLimits {
+        max_diagram_shapes: usize::MAX,
+        ..ZipLimits::default()
+    };
+    let parsed =
+        parse_bytes_with_limits(&amplified(10_001, 1, data_xml(Some("rId6"))), &limits).unwrap();
+    assert!(matches!(
+        parsed.presentation.slides[0].shapes[0],
+        Shape::Placeholder(_)
+    ));
+    assert_eq!(diag_count(&parsed, DiagnosticKind::SmartArtDegraded), 1);
 }

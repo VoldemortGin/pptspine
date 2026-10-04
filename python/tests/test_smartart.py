@@ -92,3 +92,18 @@ def test_both_parts_missing_and_malformed_do_not_crash() -> None:
         {"ppt/diagrams/data1.xml": "<<<not xml", "ppt/diagrams/drawing1.xml": "<dsp:drawing"},
     )
     assert pptspine.open_bytes(bad).slide(0).shapes()[0]["kind"] == "placeholder"
+
+
+def test_expansion_budget_keyword_degrades_frames_beyond_budget() -> None:
+    # 10 个 frame 指向同一 drawing(1 个形状):预算 3 => 3 个展开,7 个降级并记诊断,不抛错。
+    data = build_pptx(
+        [SlideSpec(FRAME_XML * 10, rels=RELS)],
+        parts={"ppt/diagrams/data1.xml": DATA, "ppt/diagrams/drawing1.xml": DRAWING},
+    )
+    assert sum(s["kind"] == "group" for s in pptspine.open_bytes(data).slide(0).shapes()) == 10
+    p = pptspine.open_bytes(data, max_diagram_shapes=3)
+    kinds = [s["kind"] for s in p.slide(0).shapes()]
+    assert kinds.count("group") == 3
+    diag = [d for d in p.diagnostics() if d["kind"] == "smartart-degraded"]
+    assert sum(d["count"] for d in diag) == 7
+

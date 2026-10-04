@@ -230,6 +230,9 @@ _LIMIT_KWARGS = (
     "max_compression_ratio",
     "max_name_len",
     "max_slides",
+    "max_diagram_shapes",
+    "max_diagram_text_bytes",
+    "max_chart_points",
 )
 
 

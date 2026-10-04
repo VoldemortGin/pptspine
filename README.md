@@ -64,7 +64,14 @@ recursing. Rust callers can pass custom limits via `parse_bytes_with_limits` /
 `max_entry_bytes`, `max_total_bytes`, `max_compression_ratio`, `max_name_len`,
 `max_slides` (positive integers; omitted / `None` keeps the default above; zero,
 negative, non-integer or `bool` values raise `ValueError`; a hit still raises
-`PptZipError`). E.g. `pptspine.open_bytes(untrusted, max_slides=200, max_total_bytes=64 * 2**20)`.
+`PptZipError`). Three further *expansion budgets* are counted across the whole
+deck (every frame that re-uses the same SmartArt / chart part is charged again, so
+a tiny file cannot fan one part out into gigabytes): `max_diagram_shapes`
+(shapes expanded from SmartArt drawings, default 100,000), `max_diagram_text_bytes`
+(SmartArt text bytes, default 8 MiB) and `max_chart_points` (chart data points,
+default 1,000,000). A frame that would exceed a budget is degraded to a
+placeholder box and recorded as a `smartart-degraded` / `chart-degraded`
+diagnostic instead of raising. E.g. `pptspine.open_bytes(untrusted, max_slides=200, max_total_bytes=64 * 2**20)`.
 
 ## Install
 

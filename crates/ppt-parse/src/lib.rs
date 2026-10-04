@@ -166,8 +166,8 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
         .map(|(i, (part, _))| ((*part).to_string(), i))
         .collect();
     let count = slides.len();
-    let mut chart_cache = charts::ChartCache::new();
-    let mut diagram_cache = diagrams::DiagramCache::default();
+    let mut chart_cache = charts::ChartCache::new(limits);
+    let mut diagram_cache = diagrams::DiagramCache::new(limits);
     for (i, (slide, (part, rels))) in slides.iter_mut().zip(&slide_parts).enumerate() {
         let ctx = links::LinkCtx {
             rels,

@@ -38,6 +38,25 @@ pub struct ZipLimits {
     /// 同时它严格小于默认 `max_entries`(10 000),使页数上限在条目数上限之前生效。
     /// 重复引用同一部件只算一次(见 `resolve_slide_order`)。
     pub max_slides: usize,
+    /// 整个演示文稿里由 SmartArt drawing 展开出的形状总数上限(跨所有 frame 累计,
+    /// 含组合内的后代;同一 drawing 被 N 个 frame 引用就记 N 次)。
+    ///
+    /// 默认 100 000:现实中一份 SmartArt 几个到几十个形状,千页 × 数十个也只有数万,
+    /// 10 万留足数倍余量;按每个形状(含文字)约 0.2–1 KB 估算,把展开内存封在百 MB 量级。
+    /// 超出后该 frame 降级为占位框并记 `smartart-degraded` 诊断。
+    pub max_diagram_shapes: usize,
+    /// 整个演示文稿里 SmartArt 展开出的文字总字节数上限(drawing 内形状文字 + 退回 data 时的
+    /// `diagram_text`,跨所有 frame 累计)。
+    ///
+    /// 默认 8 MiB:现实文档的 SmartArt 文字合计至多几百 KB;8 MiB 远高于它,又把文字副本封在
+    /// 个位数 MB 量级。超出后降级,行为同 `max_diagram_shapes`。
+    pub max_diagram_text_bytes: usize,
+    /// 整个演示文稿里图表数据点总数上限(类别数 + 各系列点数,每个引用图表的 frame 记一次)。
+    ///
+    /// 默认 1 000 000:现实图表几十到几千个点,百张图表也远低于 10 万;每点按 Rust 侧
+    /// 约 40 B(值 + 类别字符串)估算,封在约 40 MB。超出后该 frame 的图表降级为占位框并记
+    /// `chart-degraded` 诊断。
+    pub max_chart_points: usize,
 }
 
 /// 压缩比检查的起判门槛:解压量不超过 1 MiB 的条目不做压缩比判定(避免误伤小文件)。
@@ -52,6 +71,9 @@ impl Default for ZipLimits {
             max_compression_ratio: 10_000,
             max_name_len: 1024,
             max_slides: 5_000,
+            max_diagram_shapes: 100_000,
+            max_diagram_text_bytes: 8 * 1024 * 1024,
+            max_chart_points: 1_000_000,
         }
     }
 }

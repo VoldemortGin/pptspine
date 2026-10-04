@@ -11,13 +11,13 @@
 use std::collections::BTreeMap;
 
 use ppt_core::geom::Rect;
-use ppt_core::model::{GraphicPlaceholder, GroupShape, Shape};
+use ppt_core::model::{GraphicPlaceholder, GroupShape, Shape, TextFrame};
 use ppt_core::DiagnosticKind;
 
 use crate::links::resolve_part_path;
 use crate::xml::diagram::{parse_data, DiagramData};
 use crate::xml::Relationship;
-use crate::zip_pkg::Package;
+use crate::zip_pkg::{Package, ZipLimits};
 
 // 测试用:本线程内 drawing 部件被解析的次数(断言"同一部件只解析一次")。
 #[cfg(test)]
@@ -25,12 +25,81 @@ thread_local! {
     pub(crate) static DRAWING_PARSE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// 单个 drawing 部件的形状数硬上限(含组合内后代):现实 SmartArt 至多几十个形状,
+/// 超过视为畸形 / 恶意,按"解析不出形状"降级(与全局预算无关)。
+const MAX_DRAWING_SHAPES: usize = 10_000;
+
+/// 一个已解析的 drawing:形状 + 一次展开的代价(形状总数、文字字节数,解析时只算一次)。
+struct Drawing {
+    shapes: Vec<Shape>,
+    shape_count: usize,
+    text_bytes: usize,
+}
+
 /// 已解析 SmartArt 缓存:键为部件路径。同一部件被多个 frame(或多张 slide)引用时只解析一次,
 /// 每个 frame 克隆一份结果。drawing 解析不出形状 / 部件缺失为 `None`。
-#[derive(Default)]
+///
+/// 克隆会放大内存(一个小文件的 N 个 frame 就是 N 份整棵形状树),所以每次展开的形状数 / 文字
+/// 字节数都从全局预算([`ZipLimits::max_diagram_shapes`] / [`ZipLimits::max_diagram_text_bytes`])
+/// 里扣,扣不动的 frame 降级为占位框。缓存只省解析,不省克隆。
 pub(crate) struct DiagramCache {
     data: BTreeMap<String, Option<DiagramData>>,
-    drawings: BTreeMap<String, Option<Vec<Shape>>>,
+    drawings: BTreeMap<String, Option<Drawing>>,
+    shapes_left: usize,
+    text_left: usize,
+}
+
+impl DiagramCache {
+    pub(crate) fn new(limits: &ZipLimits) -> Self {
+        DiagramCache {
+            data: BTreeMap::new(),
+            drawings: BTreeMap::new(),
+            shapes_left: limits.max_diagram_shapes,
+            text_left: limits.max_diagram_text_bytes,
+        }
+    }
+}
+
+/// 形状树(含组合内)的 `(形状总数, 文字字节数)`;组合自身不计形状数。
+fn tree_cost(shapes: &[Shape]) -> (usize, usize) {
+    let frame_text = |f: &TextFrame| -> usize {
+        f.paragraphs
+            .iter()
+            .flat_map(|p| &p.runs)
+            .map(|r| r.text.len())
+            .sum()
+    };
+    let (mut n, mut bytes) = (0usize, 0usize);
+    for sh in shapes {
+        match sh {
+            Shape::Group(g) => {
+                let (gn, gb) = tree_cost(&g.children);
+                n += gn;
+                bytes += gb;
+            }
+            Shape::TextBox(t) => {
+                n += 1;
+                bytes += frame_text(t);
+            }
+            Shape::Auto(a) => {
+                n += 1;
+                bytes += a.text.as_deref().map_or(0, frame_text);
+            }
+            Shape::Table(t) => {
+                n += 1;
+                bytes += t
+                    .rows
+                    .iter()
+                    .flat_map(|r| &r.cells)
+                    .flat_map(|c| &c.paragraphs)
+                    .flat_map(|p| &p.runs)
+                    .map(|r| r.text.len())
+                    .sum::<usize>();
+            }
+            _ => n += 1,
+        }
+    }
+    (n, bytes)
 }
 
 /// 回填一棵形状树里所有 SmartArt 占位(含组合内)。
@@ -77,30 +146,39 @@ fn fill_diagram(
         .data
         .entry(data_path.clone())
         .or_insert_with(|| pkg.part_str(&data_path).map(|x| parse_data(&x)))
-        .clone();
+        .as_ref();
     let Some(data) = data else {
         pkg.note(DiagnosticKind::SmartArtDegraded, &data_path, 1);
         return None;
     };
 
-    if let Some(drawing_path) = drawing_path_for(&data, &data_path, rels, part) {
-        let children = cache
+    if let Some(drawing_path) = drawing_path_for(data, &data_path, rels, part) {
+        let drawing = cache
             .drawings
             .entry(drawing_path.clone())
             .or_insert_with(|| parse_drawing(pkg, &drawing_path, media_index))
-            .clone();
-        if let Some(children) = children {
+            .as_ref();
+        // 克隆前先过全局预算:超出的 frame 不展开,退回占位框(+ data 文字,同样受预算约束)。
+        if let Some(d) = drawing
+            .filter(|d| d.shape_count <= cache.shapes_left && d.text_bytes <= cache.text_left)
+        {
+            cache.shapes_left -= d.shape_count;
+            cache.text_left -= d.text_bytes;
             let child_rect = gp.rect.map(|r| Rect::new(0, 0, r.w, r.h));
             return Some(GroupShape {
                 rect: gp.rect,
                 child_rect,
-                children,
+                children: d.shapes.clone(),
                 ..GroupShape::default()
             });
         }
     }
     pkg.note(DiagnosticKind::SmartArtDegraded, &data_path, 1);
-    gp.diagram_text = data.texts;
+    let text_bytes: usize = data.texts.iter().map(String::len).sum();
+    if text_bytes <= cache.text_left {
+        cache.text_left -= text_bytes;
+        gp.diagram_text = data.texts.clone();
+    }
     None
 }
 
@@ -131,12 +209,13 @@ fn drawing_path_for(
 }
 
 /// 读 drawing 部件:复用 slide 形状解析(`dsp:` 与 `p:` 同构,解析按本地名匹配)。
-/// 部件缺失 / XML 不良构(截断、标签错配)/ 一个形状都解析不出,均视为畸形,返回 `None`。
+/// 部件缺失 / XML 不良构(截断、标签错配)/ 一个形状都解析不出 / 形状数超过
+/// [`MAX_DRAWING_SHAPES`],均视为畸形,返回 `None`。
 fn parse_drawing(
     pkg: &Package,
     path: &str,
     media_index: &BTreeMap<String, usize>,
-) -> Option<Vec<Shape>> {
+) -> Option<Drawing> {
     let xml_text = pkg.part_str(path)?;
     if pkg.is_malformed(path) {
         return None;
@@ -146,7 +225,12 @@ fn parse_drawing(
     let rels_xml = pkg.slide_rels_str(path);
     let shapes =
         crate::parse_shape_part(pkg, path, &xml_text, rels_xml.as_deref(), media_index).shapes;
-    (!shapes.is_empty()).then_some(shapes)
+    let (shape_count, text_bytes) = tree_cost(&shapes);
+    (shape_count > 0 && shape_count <= MAX_DRAWING_SHAPES).then_some(Drawing {
+        shapes,
+        shape_count,
+        text_bytes,
+    })
 }
 
 #[cfg(test)]

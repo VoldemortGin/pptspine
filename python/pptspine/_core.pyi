@@ -114,10 +114,16 @@ def open(
     max_compression_ratio: int | None = None,
     max_name_len: int | None = None,
     max_slides: int | None = None,
+    max_diagram_shapes: int | None = None,
+    max_diagram_text_bytes: int | None = None,
+    max_chart_points: int | None = None,
 ) -> Presentation:
     """解析 ``.pptx``。可选关键字参数调整 zip 解压限额(正整数,``None`` = 缺省:条目数 10000、
     单条目 256 MiB、总解压 1 GiB、压缩比 10000、条目名 1024 字节、幻灯片数 5000);非法值
-    抛 ``ValueError``,超限抛 ``PptZipError``。"""
+    抛 ``ValueError``,超限抛 ``PptZipError``。另有三项"展开预算"(整个文档跨 frame 累计):
+    ``max_diagram_shapes``(SmartArt 展开形状总数,缺省 100000)、``max_diagram_text_bytes``
+    (SmartArt 文字总字节,缺省 8 MiB)、``max_chart_points``(图表数据点总数,缺省 1000000);
+    超出时对应 frame 降级为占位框并记 ``smartart-degraded`` / ``chart-degraded`` 诊断,不抛错。"""
 
 def open_bytes(
     data: bytes,
@@ -128,6 +134,9 @@ def open_bytes(
     max_compression_ratio: int | None = None,
     max_name_len: int | None = None,
     max_slides: int | None = None,
+    max_diagram_shapes: int | None = None,
+    max_diagram_text_bytes: int | None = None,
+    max_chart_points: int | None = None,
 ) -> Presentation:
     """同 :func:`open`,输入为内存字节。"""
 def ocr_image(data: bytes) -> list[dict[str, Any]]: ...

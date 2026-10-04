@@ -8,7 +8,7 @@ use ppt_core::DiagnosticKind;
 
 use crate::links::resolve_part_path;
 use crate::xml::{self, Relationship};
-use crate::zip_pkg::Package;
+use crate::zip_pkg::{Package, ZipLimits};
 
 // 测试用:本线程内 `xml::chart::parse` 被调用的次数(断言"同一部件只解析一次")。
 #[cfg(test)]
@@ -17,8 +17,31 @@ thread_local! {
 }
 
 /// 已解析图表缓存:键为解析后的图表部件路径,值为解析结果(部件缺失为 `None`)。
-/// 同一部件被多个 graphicFrame(或多张 slide)引用时只解析一次,每个 frame 克隆一份结果。
-pub(crate) type ChartCache = BTreeMap<String, Option<Chart>>;
+/// 同一部件被多个 graphicFrame(或多张 slide)引用时只解析一次,每个 frame 克隆一份结果;
+/// 克隆会放大内存,所以每份克隆的数据点数都从全局预算 [`ZipLimits::max_chart_points`] 里扣,
+/// 扣不动的 frame 降级(`chart = None` + `ChartDegraded`)。缓存只省解析,不省克隆。
+pub(crate) struct ChartCache {
+    parsed: BTreeMap<String, Option<Chart>>,
+    /// 剩余的数据点预算。
+    points_left: usize,
+}
+
+impl ChartCache {
+    pub(crate) fn new(limits: &ZipLimits) -> Self {
+        ChartCache {
+            parsed: BTreeMap::new(),
+            points_left: limits.max_chart_points,
+        }
+    }
+}
+
+/// 一张图表的数据点数:类别数 + 各系列点数。
+fn chart_points(c: &Chart) -> usize {
+    c.series
+        .iter()
+        .map(|s| s.values.len())
+        .fold(c.categories.len(), usize::saturating_add)
+}
 
 /// 回填一棵形状树里所有图表占位(含组合内)。部件缺失时 `chart` 保持 `None`。
 pub(crate) fn resolve_charts(
@@ -40,7 +63,8 @@ pub(crate) fn resolve_charts(
                     continue;
                 };
                 let path = resolve_part_path(part, &rel.target);
-                *chart = cache
+                let cached = cache
+                    .parsed
                     .entry(path.clone())
                     .or_insert_with_key(|path| {
                         pkg.part_str(path).map(|x| {
@@ -49,7 +73,19 @@ pub(crate) fn resolve_charts(
                             xml::chart::parse(&x)
                         })
                     })
-                    .clone();
+                    .as_ref();
+                // 克隆前先过全局点数预算:超出的 frame 不再得到数据副本。
+                *chart = match cached {
+                    Some(c) if chart_points(c) > cache.points_left => {
+                        pkg.note(DiagnosticKind::ChartDegraded, &path, 1);
+                        continue;
+                    }
+                    Some(c) => {
+                        cache.points_left -= chart_points(c);
+                        Some(c.clone())
+                    }
+                    None => None,
+                };
                 // 部件在但解析不出可用数据(XML 损坏或无系列)= 降级;部件缺失由 `MissingPart` 覆盖。
                 if chart
                     .as_ref()
@@ -89,6 +125,14 @@ mod tests {
 
     /// 单 slide、`rids.len()` 个图表 frame;`rid -> chartN.xml` 由 `targets` 给出。
     fn deck(rids: &[&str], targets: &[(&str, &str)]) -> Vec<u8> {
+        let chart = r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:ser><c:tx><c:v>S</c:v></c:tx>
+            <c:cat><c:strLit><c:ptCount val="1"/><c:pt idx="0"><c:v>a</c:v></c:pt></c:strLit></c:cat>
+            <c:val><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
+        deck_with_chart(rids, targets, chart)
+    }
+
+    /// 同 [`deck`],图表部件内容由 `chart` 给出(chart1 / chart2 同内容)。
+    fn deck_with_chart(rids: &[&str], targets: &[(&str, &str)], chart: &str) -> Vec<u8> {
         let frames: String = rids.iter().map(|r| frame(r)).collect();
         let slide = format!(
             r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -109,9 +153,6 @@ mod tests {
             <p:sldIdLst><p:sldId id="256" r:id="rId1"/></p:sldIdLst><p:sldSz cx="9144000" cy="6858000"/></p:presentation>"#;
         let pres_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
             <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>"#;
-        let chart = r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:ser><c:tx><c:v>S</c:v></c:tx>
-            <c:cat><c:strLit><c:ptCount val="1"/><c:pt idx="0"><c:v>a</c:v></c:pt></c:strLit></c:cat>
-            <c:val><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
         let mut buf = Cursor::new(Vec::new());
         {
             let mut zip = ZipWriter::new(&mut buf);
@@ -168,5 +209,42 @@ mod tests {
         ));
         assert!(have.iter().all(|&b| b));
         assert_eq!(PARSE_COUNT.with(|c| c.get()), 2);
+    }
+
+    /// 图表数据点预算跨 frame 累计:同一个 100 点的图表被 20 个 frame 引用,预算 250 点 =>
+    /// 只有前 2 个 frame 拿到图表,其余降级(`chart = None` + `chart-degraded` 诊断)。
+    #[test]
+    fn chart_point_budget_caps_total_points_across_frames() {
+        let chart = r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:ser>
+            <c:val><c:numLit><c:ptCount val="100"/></c:numLit></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
+        let rids = vec!["rId1"; 20];
+        let bytes = deck_with_chart(&rids, &[("rId1", "../charts/chart1.xml")], chart);
+        let limits = crate::ZipLimits {
+            max_chart_points: 250,
+            ..crate::ZipLimits::default()
+        };
+        let parsed = crate::parse_bytes_with_limits(&bytes, &limits).expect("parse");
+        let charts: Vec<&ppt_core::model::Chart> = parsed.presentation.slides[0]
+            .shapes
+            .iter()
+            .filter_map(|s| match s {
+                Shape::Placeholder(GraphicPlaceholder { chart, .. }) => chart.as_ref(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(charts.len(), 2);
+        let used: usize = charts
+            .iter()
+            .map(|c| c.categories.len() + c.series.iter().map(|s| s.values.len()).sum::<usize>())
+            .sum();
+        assert!(used <= 250, "总展开点数 {used} 不超预算");
+        let degraded: usize = parsed
+            .presentation
+            .diagnostics
+            .iter()
+            .filter(|d| d.kind == ppt_core::DiagnosticKind::ChartDegraded)
+            .map(|d| d.count)
+            .sum();
+        assert_eq!(degraded, 18);
     }
 }
