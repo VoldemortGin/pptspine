@@ -378,6 +378,8 @@ fn codes_are_stable_kebab_case() {
         CustomGeometryDegraded,
         DuplicateCommentRef,
         CommentsTruncated,
+        ShapesTruncated,
+        ContentTruncated,
     ]
     .iter()
     .map(|k| k.code())
@@ -393,7 +395,9 @@ fn codes_are_stable_kebab_case() {
             "chart-degraded",
             "custom-geometry-degraded",
             "duplicate-comment-ref",
-            "comments-truncated"
+            "comments-truncated",
+            "shapes-truncated",
+            "content-truncated"
         ]
     );
 }

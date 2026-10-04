@@ -143,7 +143,7 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
             .as_deref()
             .and_then(|r| xml::first_rel_target_with(r, part, "notesSlide"))
             .and_then(|t| pkg.part_str(&t))
-            .and_then(|nx| xml::notes::parse(&nx));
+            .and_then(|nx| xml::slide::with_default_item_budget(|| xml::notes::parse(&nx)));
 
         slides.push(Slide {
             index,
@@ -237,7 +237,14 @@ pub(crate) fn parse_shape_part(
     rels_xml: Option<&str>,
     media_index: &BTreeMap<String, usize>,
 ) -> xml::slide::PartData {
-    let data = xml::slide::parse_part(xml_text, rels_xml, media_index);
+    let data = xml::slide::parse_part(xml_text, rels_xml, media_index, pkg.part_budget());
+    pkg.spend_budget(data.shapes_used, data.items_used);
+    if data.shapes_dropped > 0 {
+        pkg.note(DiagnosticKind::ShapesTruncated, part, data.shapes_dropped);
+    }
+    if data.items_dropped > 0 {
+        pkg.note(DiagnosticKind::ContentTruncated, part, data.items_dropped);
+    }
     if data.nesting_skipped > 0 {
         pkg.note(DiagnosticKind::NestingTooDeep, part, data.nesting_skipped);
     }
@@ -328,7 +335,9 @@ fn collect_inheritance(
         };
         if let std::collections::btree_map::Entry::Vacant(slot) = inherit.themes.entry(theme_name) {
             if let Some(xml_text) = pkg.theme_part_str(slot.key()) {
-                slot.insert(xml::theme::parse(&xml_text));
+                slot.insert(xml::slide::with_default_item_budget(|| {
+                    xml::theme::parse(&xml_text)
+                }));
             }
         }
     }
@@ -461,7 +470,7 @@ fn collect_table_styles(
         .map(|r| links::resolve_part_path(pkg.main_part(), &r.target))
         .unwrap_or_else(|| format!("{}tableStyles.xml", pkg.root()));
     pkg.part_str(&part)
-        .map(|x| xml::table_style::parse(&x))
+        .map(|x| xml::slide::with_default_item_budget(|| xml::table_style::parse(&x)))
         .unwrap_or_default()
 }
 

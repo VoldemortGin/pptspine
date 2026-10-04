@@ -107,3 +107,22 @@ def test_expansion_budget_keyword_degrades_frames_beyond_budget() -> None:
     diag = [d for d in p.diagnostics() if d["kind"] == "smartart-degraded"]
     assert sum(d["count"] for d in diag) == 7
 
+
+
+def test_parse_time_budget_keywords_truncate_and_record_diagnostics() -> None:
+    # 一页 50 个 `<p:cxnSp>`:缺省预算内全部保留;`max_part_shapes=10` 提前停止并记 shapes-truncated。
+    tree = "<p:cxnSp></p:cxnSp>" * 50
+    data = build_pptx([SlideSpec(tree)])
+    assert len(pptspine.open_bytes(data).slide(0).shapes()) == 50
+    p = pptspine.open_bytes(data, max_part_shapes=10)
+    assert len(p.slide(0).shapes()) == 10
+    diag = [d for d in p.diagnostics() if d["kind"] == "shapes-truncated"]
+    assert [d["count"] for d in diag] == [40]
+    # 总预算同理;节点预算:25 个空段落,上限 5 => content-truncated。
+    assert len(pptspine.open_bytes(data, max_total_shapes=7).slide(0).shapes()) == 7
+    box = (
+        '<p:sp><p:nvSpPr><p:cNvPr id="2" name="T"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr/>'
+        "<p:txBody><a:bodyPr/>" + "<a:p/>" * 25 + "</p:txBody></p:sp>"
+    )
+    q = pptspine.open_bytes(build_pptx([SlideSpec(box)]), max_part_items=5)
+    assert any(d["kind"] == "content-truncated" and d["count"] == 20 for d in q.diagnostics())

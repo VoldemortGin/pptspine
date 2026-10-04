@@ -87,6 +87,35 @@ const TREES: &[(&str, &str)] = &[
     ),
 ];
 
+/// "短 XML → 大模型"的放大种子(形状 / 段落 / run / 表格单元格洪水,规模取小以便变异):
+/// 让模糊测试从一开始就覆盖解析时的形状 / 节点预算分支。
+fn flood_trees() -> Vec<(&'static str, String)> {
+    let text_box = |inner: &str| {
+        format!(
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="2" name="T"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/>{inner}</p:txBody></p:sp>"#
+        )
+    };
+    vec![
+        ("flood_shapes", "<p:cxnSp></p:cxnSp>".repeat(256)),
+        ("flood_paragraphs", text_box(&"<a:p/>".repeat(256))),
+        (
+            "flood_runs",
+            text_box(&format!(
+                "<a:p>{}</a:p>",
+                "<a:br/><a:r><a:t>x</a:t></a:r>".repeat(256)
+            )),
+        ),
+        (
+            "flood_table_cells",
+            format!(
+                r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="4" name="T"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x="0" y="0"/><a:ext cx="100" cy="100"/></p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table"><a:tbl><a:tblGrid>{}</a:tblGrid>{}</a:tbl></a:graphicData></a:graphic></p:graphicFrame>"#,
+                r#"<a:gridCol w="1"/>"#.repeat(64),
+                format!("<a:tr h=\"1\">{}</a:tr>", "<a:tc/>".repeat(64)).repeat(16)
+            ),
+        ),
+    ]
+}
+
 fn slide_xml(name: &str, tree: &str) -> String {
     // 最后一类种子同时带 `show="0"`(隐藏页)。
     let show = if name == "link_chart_placeholder" {
@@ -107,8 +136,12 @@ fn write(dir: &Path, name: &str, bytes: &[u8]) {
 fn main() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus");
     let mut count = 0;
-    for (name, tree) in TREES {
-        let xml = slide_xml(name, tree);
+    let trees = TREES
+        .iter()
+        .map(|(n, t)| (*n, (*t).to_string()))
+        .chain(flood_trees());
+    for (name, tree) in trees {
+        let xml = slide_xml(name, &tree);
         let pptx = pack_slide_xml(xml.as_bytes());
         write(
             &root.join("parse_slide_xml"),

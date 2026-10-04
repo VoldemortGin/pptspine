@@ -852,6 +852,10 @@ fn zip_limits(
     max_diagram_text_bytes: Option<&Bound<'_, PyAny>>,
     max_chart_points: Option<&Bound<'_, PyAny>>,
     max_comments: Option<&Bound<'_, PyAny>>,
+    max_part_shapes: Option<&Bound<'_, PyAny>>,
+    max_total_shapes: Option<&Bound<'_, PyAny>>,
+    max_part_items: Option<&Bound<'_, PyAny>>,
+    max_total_items: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<ZipLimits> {
     let mut l = ZipLimits::default();
     let too_big = |name: &str| PyValueError::new_err(format!("{name} is too large"));
@@ -886,6 +890,18 @@ fn zip_limits(
     if let Some(n) = limit_arg("max_comments", max_comments)? {
         l.max_comments = usize::try_from(n).map_err(|_| too_big("max_comments"))?;
     }
+    if let Some(n) = limit_arg("max_part_shapes", max_part_shapes)? {
+        l.max_part_shapes = usize::try_from(n).map_err(|_| too_big("max_part_shapes"))?;
+    }
+    if let Some(n) = limit_arg("max_total_shapes", max_total_shapes)? {
+        l.max_total_shapes = usize::try_from(n).map_err(|_| too_big("max_total_shapes"))?;
+    }
+    if let Some(n) = limit_arg("max_part_items", max_part_items)? {
+        l.max_part_items = usize::try_from(n).map_err(|_| too_big("max_part_items"))?;
+    }
+    if let Some(n) = limit_arg("max_total_items", max_total_items)? {
+        l.max_total_items = usize::try_from(n).map_err(|_| too_big("max_total_items"))?;
+    }
     Ok(l)
 }
 
@@ -895,7 +911,8 @@ fn zip_limits(
 #[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (path, *, max_entries=None, max_entry_bytes=None, max_total_bytes=None,
                     max_compression_ratio=None, max_name_len=None, max_slides=None, max_diagram_shapes=None,
-                    max_diagram_text_bytes=None, max_chart_points=None, max_comments=None))]
+                    max_diagram_text_bytes=None, max_chart_points=None, max_comments=None, max_part_shapes=None,
+                    max_total_shapes=None, max_part_items=None, max_total_items=None))]
 fn open(
     py: Python<'_>,
     path: PathBuf,
@@ -909,6 +926,10 @@ fn open(
     max_diagram_text_bytes: Option<Bound<'_, PyAny>>,
     max_chart_points: Option<Bound<'_, PyAny>>,
     max_comments: Option<Bound<'_, PyAny>>,
+    max_part_shapes: Option<Bound<'_, PyAny>>,
+    max_total_shapes: Option<Bound<'_, PyAny>>,
+    max_part_items: Option<Bound<'_, PyAny>>,
+    max_total_items: Option<Bound<'_, PyAny>>,
 ) -> PyResult<PyPresentation> {
     let limits = zip_limits(
         max_entries.as_ref(),
@@ -921,6 +942,10 @@ fn open(
         max_diagram_text_bytes.as_ref(),
         max_chart_points.as_ref(),
         max_comments.as_ref(),
+        max_part_shapes.as_ref(),
+        max_total_shapes.as_ref(),
+        max_part_items.as_ref(),
+        max_total_items.as_ref(),
     )?;
     let parsed = py
         .detach(|| parse_path_with_limits(&path, &limits))
@@ -933,7 +958,8 @@ fn open(
 #[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (data, *, max_entries=None, max_entry_bytes=None, max_total_bytes=None,
                     max_compression_ratio=None, max_name_len=None, max_slides=None, max_diagram_shapes=None,
-                    max_diagram_text_bytes=None, max_chart_points=None, max_comments=None))]
+                    max_diagram_text_bytes=None, max_chart_points=None, max_comments=None, max_part_shapes=None,
+                    max_total_shapes=None, max_part_items=None, max_total_items=None))]
 fn open_bytes(
     py: Python<'_>,
     data: &[u8],
@@ -947,6 +973,10 @@ fn open_bytes(
     max_diagram_text_bytes: Option<Bound<'_, PyAny>>,
     max_chart_points: Option<Bound<'_, PyAny>>,
     max_comments: Option<Bound<'_, PyAny>>,
+    max_part_shapes: Option<Bound<'_, PyAny>>,
+    max_total_shapes: Option<Bound<'_, PyAny>>,
+    max_part_items: Option<Bound<'_, PyAny>>,
+    max_total_items: Option<Bound<'_, PyAny>>,
 ) -> PyResult<PyPresentation> {
     let limits = zip_limits(
         max_entries.as_ref(),
@@ -959,6 +989,10 @@ fn open_bytes(
         max_diagram_text_bytes.as_ref(),
         max_chart_points.as_ref(),
         max_comments.as_ref(),
+        max_part_shapes.as_ref(),
+        max_total_shapes.as_ref(),
+        max_part_items.as_ref(),
+        max_total_items.as_ref(),
     )?;
     let owned = data.to_vec();
     let parsed = py

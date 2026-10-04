@@ -4,7 +4,7 @@
 //! 然后按名取用各 XML 部件与 media 字节。容器层失败收敛成 [`PptError::Zip`];
 //! 资源限额([`ZipLimits`])命中收敛成 [`PptError::LimitExceeded`]。
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Cursor, Read};
 
@@ -64,6 +64,37 @@ pub struct ZipLimits {
     /// (作者 / 时间 / 正文字符串)约 0.2–0.5 KB,封在数十 MB。超出后截断并记
     /// `comments-truncated` 诊断;批注部件解析本身也在此上限处提前停止。
     pub max_comments: usize,
+    /// **解析时**单个形部件(slide / layout / master / SmartArt drawing)最多解析的形状元素数
+    /// (`p:sp` / `p:pic` / `p:cxnSp` / `p:graphicFrame` / `p:grpSp` 各记 1,含组合内后代)。
+    ///
+    /// 默认 20 000:现实中单页数百个形状已算复杂,矢量地图 / 示意图也很少过万;2 万留足 2 倍
+    /// 以上余量。一个空 `<p:sp/>` 只有 7 字节,而模型里的 `Shape` 本体就 712 字节(另加堆上字符串),
+    /// 不设限时 256 MiB 的 XML 能放大到几十 GB。达到上限后提前停止该部件的形状解析(已解析的保留,
+    /// 其余只扫描跳过),记 `shapes-truncated` 诊断。
+    ///
+    /// 与 `max_diagram_shapes` 的分工:本字段与 `max_total_shapes` 管**解析**(每个部件只解析
+    /// 一次,同一 SmartArt drawing 被多个 frame 引用也只记一次);`max_diagram_shapes` 管**展开**
+    /// (每个 frame 克隆一份 drawing 形状树,每份各记一次)。两者互相独立、同时生效。
+    pub max_part_shapes: usize,
+    /// **解析时**整个演示文稿累计解析的形状元素数(跨所有 slide / layout / master / SmartArt drawing,
+    /// 每个部件只记一次)。
+    ///
+    /// 默认 200 000:5 000 页(默认页数上限)× 每页 40 个形状恰为此数,已高于现实;按每个形状
+    /// (含堆上字符串)约 1 KB 估算,把形状模型的最坏内存封在约 200 MB。超出后后续部件(或当前
+    /// 部件剩余部分)的形状被丢弃,记 `shapes-truncated` 诊断。
+    pub max_total_shapes: usize,
+    /// **解析时**单个形部件最多建模的文本 / 表格节点数:段落、run、表格行、单元格、网格列、
+    /// 渐变停靠点、颜色变换、形状调节值各记 1。
+    ///
+    /// 默认 200 000:现实中单页文字再多也只有数千个节点(一张 100 × 20 的大表约 6 000)。
+    /// `<a:p/>` / `<a:tc/>` 等只有几个字节而模型对象 300–800 字节,按平均约 400 B 估算,单部件封在
+    /// 约 80 MB。超出的节点被丢弃,记 `content-truncated` 诊断。
+    pub max_part_items: usize,
+    /// **解析时**整个演示文稿累计建模的文本 / 表格节点数(口径同 `max_part_items`,每个部件只记一次)。
+    ///
+    /// 默认 1 000 000:5 000 页 × 每页 200 个节点恰为此数;按平均约 400 B 估算,封在约 400 MB。
+    /// 超出后的节点被丢弃,记 `content-truncated` 诊断。
+    pub max_total_items: usize,
 }
 
 /// 压缩比检查的起判门槛:解压量不超过 1 MiB 的条目不做压缩比判定(避免误伤小文件)。
@@ -82,6 +113,10 @@ impl Default for ZipLimits {
             max_diagram_text_bytes: 8 * 1024 * 1024,
             max_chart_points: 1_000_000,
             max_comments: 100_000,
+            max_part_shapes: 20_000,
+            max_total_shapes: 200_000,
+            max_part_items: 200_000,
+            max_total_items: 1_000_000,
         }
     }
 }
@@ -140,6 +175,17 @@ pub struct Package {
     /// 解析诊断收集器(见 [`Package::note`])。解析是单线程且部件读取全经 `&Package`,
     /// 用内部可变性收集,免得每个 walker / 后处理都要传 `&mut`。
     diag: RefCell<DiagState>,
+    /// 解析时的形状 / 节点预算(单部件上限 + 演示文稿级剩余额度,见 [`Package::part_budget`])。
+    budget: Cell<ParseBudget>,
+}
+
+/// 解析时预算的当前状态。
+#[derive(Clone, Copy)]
+struct ParseBudget {
+    part_shapes: usize,
+    shapes_left: usize,
+    part_items: usize,
+    items_left: usize,
 }
 
 /// 不同 `(kind, part)` 诊断条目数上限:超出后新的条目并入"每种 kind 一条、`part` 为空串"的
@@ -265,6 +311,12 @@ impl Package {
             main_part,
             root,
             diag: RefCell::default(),
+            budget: Cell::new(ParseBudget {
+                part_shapes: limits.max_part_shapes,
+                shapes_left: limits.max_total_shapes,
+                part_items: limits.max_part_items,
+                items_left: limits.max_total_items,
+            }),
         })
     }
 
@@ -297,6 +349,23 @@ impl Package {
                 st.index.insert(key, i);
             }
         }
+    }
+
+    /// 下一个形部件的解析预算:单部件上限与演示文稿级剩余额度取小。
+    pub(crate) fn part_budget(&self) -> crate::xml::slide::PartBudget {
+        let b = self.budget.get();
+        crate::xml::slide::PartBudget {
+            shapes: b.part_shapes.min(b.shapes_left),
+            items: b.part_items.min(b.items_left),
+        }
+    }
+
+    /// 一个形部件解析完后,把它实际用掉的形状 / 节点数从演示文稿级额度里扣掉。
+    pub(crate) fn spend_budget(&self, shapes: usize, items: usize) {
+        let mut b = self.budget.get();
+        b.shapes_left = b.shapes_left.saturating_sub(shapes);
+        b.items_left = b.items_left.saturating_sub(items);
+        self.budget.set(b);
     }
 
     /// 取走已收集的全部诊断(按首次出现顺序)。

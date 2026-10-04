@@ -34,6 +34,15 @@ pub enum DiagnosticKind {
     /// 批注部件,`count` = 发生截断的次数(每张受影响的幻灯片记一次;解析在上限处提前停止,
     /// 被丢弃的确切条数不可知)。
     CommentsTruncated,
+    /// 单个部件的形状数超过 `ZipLimits::max_part_shapes`,或整个演示文稿累计超过
+    /// `ZipLimits::max_total_shapes`:该部件的形状解析提前停止(已解析的保留),其余形状被丢弃。
+    /// `part` = 被截断的部件,`count` = 被丢弃的形状元素数(组合内被整体跳过的后代不另计)。
+    ShapesTruncated,
+    /// 单个部件的文本 / 表格节点(段落、run、表格行 / 单元格 / 网格列、渐变停靠点、颜色变换、
+    /// 形状调节值)超过 `ZipLimits::max_part_items`,或整个演示文稿累计超过
+    /// `ZipLimits::max_total_items`:超出的节点被丢弃。`part` = 被截断的部件,`count` = 被丢弃
+    /// 的节点数。
+    ContentTruncated,
 }
 
 impl DiagnosticKind {
@@ -50,6 +59,8 @@ impl DiagnosticKind {
             DiagnosticKind::CustomGeometryDegraded => "custom-geometry-degraded",
             DiagnosticKind::DuplicateCommentRef => "duplicate-comment-ref",
             DiagnosticKind::CommentsTruncated => "comments-truncated",
+            DiagnosticKind::ShapesTruncated => "shapes-truncated",
+            DiagnosticKind::ContentTruncated => "content-truncated",
         }
     }
 }

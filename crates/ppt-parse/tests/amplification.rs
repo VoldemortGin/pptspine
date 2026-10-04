@@ -7,7 +7,7 @@ use std::io::{Cursor, Write};
 
 use ppt_core::model::{GraphicPlaceholder, Shape};
 use ppt_core::DiagnosticKind;
-use ppt_parse::{parse_bytes, ParsedPptx, ZipLimits};
+use ppt_parse::{parse_bytes, parse_bytes_with_limits, ParsedPptx, ZipLimits};
 use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
 
@@ -244,4 +244,342 @@ fn diagnostics_stay_bounded_and_never_echo_attacker_targets() {
     assert_eq!(diag_total(&p, DiagnosticKind::SmartArtDegraded), n);
     assert!(diags.iter().all(|d| d.part == "ppt/slides/slide1.xml"));
     assert!(!format!("{diags:?}").contains("EVIL"));
+}
+
+// ---------------------------------------------------------------- 解析时的形状 / 节点预算
+
+const SLIDE1: &str = "ppt/slides/slide1.xml";
+
+/// `part` 上某种诊断的总计数。
+fn diag_at(p: &ParsedPptx, kind: DiagnosticKind, part: &str) -> usize {
+    p.presentation
+        .diagnostics
+        .iter()
+        .filter(|d| d.kind == kind && d.part == part)
+        .map(|d| d.count)
+        .sum()
+}
+
+/// 一个"短 XML、大模型"的形状:`<p:cxnSp>` 恒产出一个 `Connector`(`<p:sp>` 无内容会被丢掉)。
+const TINY_SHAPE: &str = "<p:cxnSp></p:cxnSp>";
+
+fn text_box(inner: &str) -> String {
+    format!(
+        r#"<p:sp><p:nvSpPr><p:cNvPr id="2" name="T"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/>{inner}</p:txBody></p:sp>"#
+    )
+}
+
+fn paragraphs_of(p: &ParsedPptx) -> usize {
+    p.presentation.slides[0]
+        .shapes
+        .iter()
+        .map(|s| match s {
+            Shape::TextBox(t) => t.paragraphs.len(),
+            _ => 0,
+        })
+        .sum()
+}
+
+/// 单部件形状数:2.5 万个 `<p:cxnSp></p:cxnSp>`(约 0.5 MB)被默认单部件预算(2 万)截住,
+/// 已解析的保留,丢弃数记进 `shapes-truncated`。
+#[test]
+fn shape_flood_in_one_slide_is_bounded_by_the_default_part_budget() {
+    let limits = ZipLimits::default();
+    let bytes = build(&[(TINY_SHAPE.repeat(25_000), vec![])], &[]);
+    assert!(bytes.len() < 100_000, "输入必须是小文件:{}", bytes.len());
+    let p = parse_bytes(&bytes).unwrap();
+    let n = p.presentation.slides[0].shapes.len();
+    assert_eq!(n, limits.max_part_shapes);
+    assert_eq!(diag_at(&p, DiagnosticKind::ShapesTruncated, SLIDE1), 5_000);
+}
+
+/// 演示文稿级总预算:每页都在单部件预算之内,累计超过总预算后,后面的页被截空。
+#[test]
+fn shape_flood_across_slides_is_bounded_by_the_total_budget() {
+    let limits = ZipLimits {
+        max_part_shapes: 100,
+        max_total_shapes: 250,
+        ..ZipLimits::default()
+    };
+    let slides: Vec<_> = (0..5).map(|_| (TINY_SHAPE.repeat(100), vec![])).collect();
+    let p = parse_bytes_with_limits(&build(&slides, &[]), &limits).unwrap();
+    let per_slide: Vec<usize> = p
+        .presentation
+        .slides
+        .iter()
+        .map(|s| s.shapes.len())
+        .collect();
+    assert_eq!(per_slide, [100, 100, 50, 0, 0]);
+    assert_eq!(per_slide.iter().sum::<usize>(), limits.max_total_shapes);
+    let at = |i: usize| {
+        diag_at(
+            &p,
+            DiagnosticKind::ShapesTruncated,
+            &format!("ppt/slides/slide{i}.xml"),
+        )
+    };
+    assert_eq!((at(1), at(2), at(3), at(4), at(5)), (0, 0, 50, 100, 100));
+}
+
+/// 组合里的后代同样计数:嵌套的形状洪水不能绕过预算。
+#[test]
+fn shapes_inside_groups_count_against_the_budget() {
+    let group = format!(
+        r#"<p:grpSp><p:nvGrpSpPr><p:cNvPr id="9" name="G"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>{}</p:grpSp>"#,
+        TINY_SHAPE.repeat(500)
+    );
+    let limits = ZipLimits {
+        max_part_shapes: 101, // 组合自己 1 个 + 100 个后代
+        ..ZipLimits::default()
+    };
+    let p = parse_bytes_with_limits(&build(&[(group, vec![])], &[]), &limits).unwrap();
+    assert_eq!(leaves(&p.presentation.slides[0].shapes), 100);
+    assert_eq!(diag_at(&p, DiagnosticKind::ShapesTruncated, SLIDE1), 400);
+}
+
+/// 版式 / 母版也受演示文稿级总预算约束(与 slide 累计)。
+#[test]
+fn layout_and_master_shapes_share_the_total_budget() {
+    let layout = format!(
+        r#"<p:sldLayout {NS}><p:cSld><p:spTree>{}</p:spTree></p:cSld></p:sldLayout>"#,
+        TINY_SHAPE.repeat(100)
+    );
+    let master = format!(
+        r#"<p:sldMaster {NS}><p:cSld><p:spTree>{}</p:spTree></p:cSld></p:sldMaster>"#,
+        TINY_SHAPE.repeat(100)
+    );
+    let limits = ZipLimits {
+        max_part_shapes: 100,
+        max_total_shapes: 250,
+        ..ZipLimits::default()
+    };
+    let bytes = build(
+        &[(
+            TINY_SHAPE.repeat(100),
+            vec![rel(
+                "rId1",
+                &format!("{REL}/slideLayout"),
+                "../slideLayouts/slideLayout1.xml",
+            )],
+        )],
+        &[
+            ("ppt/slideLayouts/slideLayout1.xml", layout),
+            (
+                "ppt/slideLayouts/_rels/slideLayout1.xml.rels",
+                rels(&[rel(
+                    "rId1",
+                    &format!("{REL}/slideMaster"),
+                    "../slideMasters/slideMaster1.xml",
+                )]),
+            ),
+            ("ppt/slideMasters/slideMaster1.xml", master),
+        ],
+    );
+    let p = parse_bytes_with_limits(&bytes, &limits).unwrap();
+    assert_eq!(p.presentation.slides[0].shapes.len(), 100);
+    let layout_n: usize = p.inherit.layouts.values().map(|l| l.shapes.len()).sum();
+    let master_n: usize = p.inherit.masters.values().map(|m| m.shapes.len()).sum();
+    assert_eq!((layout_n, master_n), (100, 50));
+    assert_eq!(
+        diag_at(
+            &p,
+            DiagnosticKind::ShapesTruncated,
+            "ppt/slideMasters/slideMaster1.xml"
+        ),
+        50
+    );
+}
+
+/// SmartArt drawing 部件本身的形状洪水:解析时截断(保留前 N 个),与展开预算互相独立。
+#[test]
+fn smartart_drawing_flood_is_truncated_at_parse_time() {
+    let limits = ZipLimits {
+        max_part_shapes: 100,
+        ..ZipLimits::default()
+    };
+    let frames = frame(
+        DGM,
+        &format!(r#"<dgm:relIds xmlns:dgm="{DGM}" r:dm="rId2"/>"#),
+    );
+    let drawing = format!(
+        r#"<dsp:drawing xmlns:dsp="urn:dsp"><dsp:spTree>{}</dsp:spTree></dsp:drawing>"#,
+        "<dsp:cxnSp></dsp:cxnSp>".repeat(5_000)
+    );
+    let data = format!(r#"<dgm:dataModel xmlns:dgm="{DGM}"><dgm:ptLst/></dgm:dataModel>"#);
+    let bytes = build(
+        &[(
+            frames,
+            vec![
+                rel(
+                    "rId2",
+                    &format!("{REL}/diagramData"),
+                    "../diagrams/data1.xml",
+                ),
+                rel("rId6", REL_DRAWING, "../diagrams/drawing1.xml"),
+            ],
+        )],
+        &[
+            ("ppt/diagrams/data1.xml", data),
+            ("ppt/diagrams/drawing1.xml", drawing),
+        ],
+    );
+    let p = parse_bytes_with_limits(&bytes, &limits).unwrap();
+    assert_eq!(leaves(&p.presentation.slides[0].shapes), 100);
+    assert_eq!(
+        diag_at(
+            &p,
+            DiagnosticKind::ShapesTruncated,
+            "ppt/diagrams/drawing1.xml"
+        ),
+        4_900
+    );
+}
+
+/// 文本节点:单个文本框 25 万个 `<a:p/>`(约 1.7 MB)被默认单部件节点预算(20 万)截住。
+#[test]
+fn paragraph_flood_is_bounded_by_the_default_item_budget() {
+    let limits = ZipLimits::default();
+    let bytes = build(&[(text_box(&"<a:p/>".repeat(250_000)), vec![])], &[]);
+    assert!(bytes.len() < 2_000_000, "输入必须是小文件:{}", bytes.len());
+    let p = parse_bytes(&bytes).unwrap();
+    assert_eq!(paragraphs_of(&p), limits.max_part_items);
+    assert_eq!(
+        diag_at(&p, DiagnosticKind::ContentTruncated, SLIDE1),
+        50_000
+    );
+}
+
+/// run 洪水:一个段落里的 `<a:br/>` / `<a:r>` 也计入节点预算。
+#[test]
+fn run_flood_is_bounded_by_the_item_budget() {
+    let limits = ZipLimits {
+        max_part_items: 1_000,
+        ..ZipLimits::default()
+    };
+    let para = format!(
+        "<a:p>{}{}</a:p>",
+        "<a:br/>".repeat(800),
+        "<a:r><a:t>x</a:t></a:r>".repeat(800)
+    );
+    let p = parse_bytes_with_limits(&build(&[(text_box(&para), vec![])], &[]), &limits).unwrap();
+    let Shape::TextBox(t) = &p.presentation.slides[0].shapes[0] else {
+        panic!("expected a text box");
+    };
+    // 1 个段落 + 999 个 run = 1 000 个节点。
+    assert_eq!(t.paragraphs.len(), 1);
+    assert_eq!(t.paragraphs[0].runs.len(), 999);
+    assert_eq!(diag_at(&p, DiagnosticKind::ContentTruncated, SLIDE1), 601);
+}
+
+/// 表格:行 / 单元格 / 网格列都计入节点预算(`<a:tc/>` 只有 7 字节,模型里一个 `Cell` 800+ 字节)。
+#[test]
+fn table_flood_is_bounded_by_the_item_budget() {
+    let limits = ZipLimits {
+        max_part_items: 5_000,
+        ..ZipLimits::default()
+    };
+    let grid = "<a:gridCol w=\"1\"/>".repeat(1_000);
+    let rows = format!("<a:tr h=\"1\">{}</a:tr>", "<a:tc/>".repeat(1_000)).repeat(50);
+    let table = format!(
+        r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="4" name="T"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>
+<p:xfrm><a:off x="0" y="0"/><a:ext cx="100" cy="100"/></p:xfrm>
+<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table"><a:tbl><a:tblGrid>{grid}</a:tblGrid>{rows}</a:tbl></a:graphicData></a:graphic></p:graphicFrame>"#
+    );
+    let p = parse_bytes_with_limits(&build(&[(table, vec![])], &[]), &limits).unwrap();
+    let Shape::Table(t) = &p.presentation.slides[0].shapes[0] else {
+        panic!("expected a table");
+    };
+    let nodes =
+        t.col_widths.len() + t.rows.len() + t.rows.iter().map(|r| r.cells.len()).sum::<usize>();
+    assert_eq!(nodes, limits.max_part_items);
+    assert!(diag_at(&p, DiagnosticKind::ContentTruncated, SLIDE1) > 0);
+}
+
+/// 演示文稿级节点总预算:每页在单部件预算内,累计超出后后面的页被截。
+#[test]
+fn item_flood_across_slides_is_bounded_by_the_total_budget() {
+    let limits = ZipLimits {
+        max_part_items: 100,
+        max_total_items: 250,
+        ..ZipLimits::default()
+    };
+    let slides: Vec<_> = (0..4)
+        .map(|_| (text_box(&"<a:p/>".repeat(100)), vec![]))
+        .collect();
+    let p = parse_bytes_with_limits(&build(&slides, &[]), &limits).unwrap();
+    let per_slide: Vec<usize> = p
+        .presentation
+        .slides
+        .iter()
+        .map(|s| match &s.shapes[0] {
+            Shape::TextBox(t) => t.paragraphs.len(),
+            _ => 0,
+        })
+        .collect();
+    assert_eq!(per_slide, [100, 100, 50, 0]);
+}
+
+/// 默认预算下正常文档不受影响:几百个带文字的形状 + 一张表,没有任何截断诊断。
+#[test]
+fn normal_documents_are_unaffected_by_the_default_budgets() {
+    let boxes: String = (0..300)
+        .map(|i| {
+            text_box(&format!(
+                "<a:p><a:r><a:t>line {i}</a:t></a:r><a:br/><a:r><a:t>more</a:t></a:r></a:p>"
+            ))
+        })
+        .collect();
+    let p = parse_bytes(&build(
+        &[(boxes, vec![]), (TINY_SHAPE.repeat(50), vec![])],
+        &[],
+    ))
+    .unwrap();
+    assert_eq!(p.presentation.slides[0].shapes.len(), 300);
+    assert_eq!(p.presentation.slides[1].shapes.len(), 50);
+    assert_eq!(diag_total(&p, DiagnosticKind::ShapesTruncated), 0);
+    assert_eq!(diag_total(&p, DiagnosticKind::ContentTruncated), 0);
+}
+
+/// 主题的 `a:lnStyleLst` 里 25 万个 `<a:ln w="1"/>`(1.5 MB)也被默认节点预算截住
+/// (`parse_part` 之外的部件同样是放大点)。
+#[test]
+fn theme_style_flood_is_bounded_by_the_default_item_budget() {
+    let theme = format!(
+        r#"<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:themeElements><a:fmtScheme name="x"><a:lnStyleLst>{}</a:lnStyleLst></a:fmtScheme></a:themeElements></a:theme>"#,
+        r#"<a:ln w="1"/>"#.repeat(250_000)
+    );
+    let layout =
+        format!(r#"<p:sldLayout {NS}><p:cSld><p:spTree></p:spTree></p:cSld></p:sldLayout>"#);
+    let master =
+        format!(r#"<p:sldMaster {NS}><p:cSld><p:spTree></p:spTree></p:cSld></p:sldMaster>"#);
+    let bytes = build(
+        &[(
+            String::new(),
+            vec![rel(
+                "rId1",
+                &format!("{REL}/slideLayout"),
+                "../slideLayouts/slideLayout1.xml",
+            )],
+        )],
+        &[
+            ("ppt/slideLayouts/slideLayout1.xml", layout),
+            (
+                "ppt/slideLayouts/_rels/slideLayout1.xml.rels",
+                rels(&[rel(
+                    "rId1",
+                    &format!("{REL}/slideMaster"),
+                    "../slideMasters/slideMaster1.xml",
+                )]),
+            ),
+            ("ppt/slideMasters/slideMaster1.xml", master),
+            (
+                "ppt/slideMasters/_rels/slideMaster1.xml.rels",
+                rels(&[rel("rId1", &format!("{REL}/theme"), "../theme/theme1.xml")]),
+            ),
+            ("ppt/theme/theme1.xml", theme),
+        ],
+    );
+    let p = parse_bytes(&bytes).unwrap();
+    let lines: usize = p.inherit.themes.values().map(|t| t.line_styles.len()).sum();
+    assert_eq!(lines, ZipLimits::default().max_part_items);
 }

@@ -366,6 +366,16 @@ fn defaults_for_expansion_budgets() {
     assert_eq!(d.max_chart_points, 1_000_000);
 }
 
+/// 解析时预算的缺省值(单部件 < 总量;封住最坏内存的依据见 `ZipLimits` 文档)。
+#[test]
+fn defaults_for_parse_time_budgets() {
+    let d = ZipLimits::default();
+    assert_eq!((d.max_part_shapes, d.max_total_shapes), (20_000, 200_000));
+    assert_eq!((d.max_part_items, d.max_total_items), (200_000, 1_000_000));
+    assert!(d.max_part_shapes < d.max_total_shapes);
+    assert!(d.max_part_items < d.max_total_items);
+}
+
 #[test]
 fn diagram_shape_budget_caps_total_expansion_across_frames() {
     // 200 形状 × 50 frame = 10 000;预算 1 000 => 只有 5 个 frame 能展开,其余 45 个降级。

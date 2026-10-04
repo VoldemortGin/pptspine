@@ -7,7 +7,7 @@ use ppt_core::theme::{ColorScheme, FontScheme, FontSet, Theme, ThemeLine};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 
-use super::slide::parse_ln;
+use super::slide::{parse_ln, take_item};
 use super::text_style::parse_color_in;
 use super::{attr_of, local_name, skip_element};
 
@@ -154,14 +154,16 @@ fn parse_fill_styles<R: std::io::BufRead>(
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
-                if name.as_slice() == b"solidFill" {
+                if !take_item() {
+                    skip_element(reader, &name);
+                } else if name.as_slice() == b"solidFill" {
                     out.push(parse_color_in(reader));
                 } else {
                     out.push(None);
                     skip_element(reader, &name);
                 }
             }
-            Ok(Event::Empty(_)) => out.push(None),
+            Ok(Event::Empty(_)) if take_item() => out.push(None),
             Ok(Event::End(_)) => break,
             Ok(Event::Eof) => break,
             Err(_) => break,
@@ -180,7 +182,7 @@ fn parse_ln_styles<R: std::io::BufRead>(reader: &mut Reader<R>) -> Vec<ThemeLine
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
-                if name.as_slice() == b"ln" {
+                if name.as_slice() == b"ln" && take_item() {
                     let stroke = parse_ln(reader, &e);
                     out.push(ThemeLine {
                         color: stroke.as_ref().and_then(|s| s.color.clone()),
@@ -193,7 +195,7 @@ fn parse_ln_styles<R: std::io::BufRead>(reader: &mut Reader<R>) -> Vec<ThemeLine
                 }
             }
             Ok(Event::Empty(e)) => {
-                if local_name(e.name().as_ref()) == b"ln" {
+                if local_name(e.name().as_ref()) == b"ln" && take_item() {
                     out.push(ThemeLine {
                         color: None,
                         width_emu: attr_of(&e, b"w").and_then(|s| s.parse().ok()),

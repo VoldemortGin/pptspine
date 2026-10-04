@@ -32,7 +32,7 @@ offline, and deterministically via the sibling [`ocrspine`](../ocrspine) crate
 | Pictures: `r:embed` rel → media name; raw bytes via `Presentation.image_bytes()`; alt text `cNvPr@descr` / `@title` / `@name` (`alt_text` / `title` / `name` keys) | parsed |
 | Hyperlinks `a:hlinkClick` (run- and shape-level): external URL via rels, internal jumps (`ppaction://hlinksldjump` / `hlinkshowjump`) → target slide index (`hyperlink` key) | parsed; PDF: run-level external `http` / `https` / `mailto` links → URI link annotations |
 | Placeholders: `p:ph` type/idx on every shape dict (`placeholder` key: `{"type", "idx"}` or `None`) | parsed |
-| Parse diagnostics (`Presentation.diagnostics()`): content silently lost / degraded during parsing is reported as `{kind, part, count}` (never document text) — `xml-truncated` (part XML broken mid-way; the parsed prefix is kept), `nesting-too-deep`, `duplicate-slide-ref`, `missing-part` (relationship to an absent part), `smartart-degraded`, `chart-degraded`, `custom-geometry-degraded`, `duplicate-comment-ref`, `comments-truncated`; empty for a clean file | parsed |
+| Parse diagnostics (`Presentation.diagnostics()`): content silently lost / degraded during parsing is reported as `{kind, part, count}` (never document text) — `xml-truncated` (part XML broken mid-way; the parsed prefix is kept), `nesting-too-deep`, `duplicate-slide-ref`, `missing-part` (relationship to an absent part), `smartart-degraded`, `chart-degraded`, `custom-geometry-degraded`, `duplicate-comment-ref`, `comments-truncated`, `shapes-truncated`, `content-truncated`; empty for a clean file | parsed |
 | Hidden slides (`p:sld@show="0"` → `Slide.hidden`), sections (`p14:sectionLst` → `Presentation.sections()`), document properties (`docProps/core.xml` + `app.xml` → `Presentation.core_properties()`) | parsed |
 | Autoshapes: geometry name, fill (solid / gradient / picture / pattern / `grpFill` inherited), stroke, optional text | parsed (best-effort); PDF: picture fills clipped to the shape geometry (`tile` → stretched + `blip-fill-tiled`), pattern → flat mean color + `pattern-fill-degraded` |
 | Groups (`p:grpSp`): recursive | parsed |
@@ -74,7 +74,20 @@ default 1,000,000) and `max_comments` (comments including replies, default
 placeholder box and recorded as a `smartart-degraded` / `chart-degraded`
 diagnostic instead of raising; comments past `max_comments` are cut off and
 recorded as `comments-truncated`. A comments part referenced several times by
-one slide is read once (`duplicate-comment-ref`). E.g. `pptspine.open_bytes(untrusted, max_slides=200, max_total_bytes=64 * 2**20)`.
+one slide is read once (`duplicate-comment-ref`).
+
+Four more *parse-time* budgets bound what a short XML can inflate into the model
+(an empty `<a:p/>` is 7 bytes, its model object hundreds): `max_part_shapes` /
+`max_total_shapes` (shape elements parsed per part / across all slides, layouts,
+masters and SmartArt drawings, each part counted once; defaults 20,000 /
+200,000 — roughly 200 MB of shapes at worst) and `max_part_items` /
+`max_total_items` (text and table nodes: paragraphs, runs, table rows / cells /
+grid columns, gradient stops, colour transforms, theme styles; defaults 200,000 /
+1,000,000 — roughly 400 MB at worst). Past a budget the part stops growing (what
+was already parsed is kept, the rest is only skipped) and a `shapes-truncated` /
+`content-truncated` diagnostic records how many were dropped. They are
+independent of `max_diagram_shapes`, which counts the *copies* made per SmartArt
+frame; both apply. E.g. `pptspine.open_bytes(untrusted, max_slides=200, max_total_bytes=64 * 2**20)`.
 
 ## Install
 

@@ -234,6 +234,10 @@ _LIMIT_KWARGS = (
     "max_diagram_text_bytes",
     "max_chart_points",
     "max_comments",
+    "max_part_shapes",
+    "max_total_shapes",
+    "max_part_items",
+    "max_total_items",
 )
 
 
