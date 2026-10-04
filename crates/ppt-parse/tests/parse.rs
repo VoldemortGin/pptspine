@@ -513,7 +513,7 @@ fn paragraph_alternate_content_fallback_and_choice_only() {
     assert_eq!(runs[1].kind, RunKind::Break);
 }
 
-/// 公式线性化(与 docspine 同规则):分式 / 上下标 / 根号 / 括号 / 纯拼接。
+/// 公式线性化:分式 / 上下标 / 根号 / 定界符(括号看槽位结果,见 `slide.rs` 公式段注释)。
 #[test]
 fn math_linearization_rules() {
     let frac = |n: &str, d: &str| format!("<m:f><m:num>{n}</m:num><m:den>{d}</m:den></m:f>");
@@ -556,7 +556,7 @@ fn math_linearization_rules() {
         )),
         "root(3,x)"
     );
-    // 其它结构(定界符)按文档顺序纯拼接。
+    // 定界符不再被丢括号(旧期望 `fx=1` 恰是该 bug 的编码:`m:d` 的 `(` `)` 被吞掉)。
     assert_eq!(
         math_text(&format!(
             "{}<m:d><m:e>{}</m:e></m:d>{}",
@@ -564,8 +564,264 @@ fn math_linearization_rules() {
             mr("x"),
             mr("=1")
         )),
-        "fx=1"
+        "f(x)=1"
     );
+}
+
+/// 公式测试用的小构造器:`<m:tag>` 包裹 + 单 run 文本。
+fn mw(tag: &str, inner: &str) -> String {
+    format!("<m:{tag}>{inner}</m:{tag}>")
+}
+
+fn mfrac(n: &str, d: &str) -> String {
+    mw("f", &format!("{}{}", mw("num", n), mw("den", d)))
+}
+
+fn msup(e: &str, s: &str) -> String {
+    mw("sSup", &format!("{}{}", mw("e", e), mw("sup", s)))
+}
+
+fn msub(e: &str, s: &str) -> String {
+    mw("sSub", &format!("{}{}", mw("e", e), mw("sub", s)))
+}
+
+/// 错误复现 1:分子是单个 `m:t` 写着 `a+b` 时,括号不能因为"只有一个片段"而丢。
+#[test]
+fn math_single_run_compound_numerator_is_parenthesised() {
+    assert_eq!(math_text(&mfrac(&mr("a+b"), &mr("c"))), "(a+b)/c");
+    assert_eq!(math_text(&mfrac(&mr("a"), &mr("b+c"))), "a/(b+c)");
+}
+
+/// 错误复现 2:上标 / 下标是单个 `m:t` 写着 `n+1`。
+#[test]
+fn math_single_run_compound_script_is_parenthesised() {
+    assert_eq!(math_text(&msup(&mr("x"), &mr("n+1"))), "x^(n+1)");
+    assert_eq!(math_text(&msub(&mr("x"), &mr("i-1"))), "x_(i-1)");
+    assert_eq!(math_text(&msup(&mr("a+b"), &mr("2"))), "(a+b)^2");
+}
+
+/// 错误复现 3:`m:d` 的括号字符在 `m:dPr` 属性里,不能丢。
+#[test]
+fn math_delimiter_keeps_characters_from_properties() {
+    let d = |pr: &str, es: &[&str]| {
+        mw(
+            "d",
+            &format!("{pr}{}", es.iter().map(|e| mw("e", e)).collect::<String>()),
+        )
+    };
+    assert_eq!(
+        math_text(&format!("{}{}", mr("2"), d("", &[&mr("x+1")]))),
+        "2(x+1)"
+    );
+    assert_eq!(
+        math_text(&d(
+            r#"<m:dPr><m:begChr m:val="["/><m:endChr m:val="]"/></m:dPr>"#,
+            &[&mr("x")]
+        )),
+        "[x]"
+    );
+    // 多个 `m:e` 默认用 `|` 连接,sepChr 可改。
+    assert_eq!(math_text(&d("", &[&mr("a"), &mr("b")])), "(a|b)");
+    assert_eq!(
+        math_text(&d(
+            r#"<m:dPr><m:sepChr m:val=","/></m:dPr>"#,
+            &[&mr("a"), &mr("b")]
+        )),
+        "(a,b)"
+    );
+    // 显式空串 = 该侧无括号;展开写法(非自闭合)等价。
+    assert_eq!(
+        math_text(&d(
+            r#"<m:dPr><m:begChr m:val=""/><m:endChr m:val="}"></m:endChr></m:dPr>"#,
+            &[&mr("x")]
+        )),
+        "x}"
+    );
+}
+
+/// 错误复现 4:`m:nary` 的运算符在 `m:naryPr > m:chr`,上下限不能直接拼接;`m:sSubSup` 不能拼成 `xi2`。
+#[test]
+fn math_nary_and_subsup_keep_operator_and_structure() {
+    let nary = |pr: &str, sub: &str, sup: &str, e: &str| {
+        mw(
+            "nary",
+            &format!("{pr}{}{}{}", mw("sub", sub), mw("sup", sup), mw("e", e)),
+        )
+    };
+    assert_eq!(
+        math_text(&nary(
+            r#"<m:naryPr><m:chr m:val="∑"/></m:naryPr>"#,
+            &mr("i=1"),
+            &mr("n"),
+            &msub(&mr("x"), &mr("i"))
+        )),
+        "∑_(i=1)^n x_i"
+    );
+    // 缺省运算符 ∫;空上下限省略。
+    assert_eq!(math_text(&nary("", "", "", &mr("f"))), "∫ f");
+    assert_eq!(
+        math_text(&nary("", &mr("0"), &mr("1"), &mr("f"))),
+        "∫_0^1 f"
+    );
+    assert_eq!(
+        math_text(&mw(
+            "sSubSup",
+            &format!(
+                "{}{}{}",
+                mw("e", &mr("x")),
+                mw("sub", &mr("i")),
+                mw("sup", &mr("2"))
+            )
+        )),
+        "x_i^2"
+    );
+}
+
+#[test]
+fn math_prescript_limits_func_bar_acc() {
+    assert_eq!(
+        math_text(&mw(
+            "sPre",
+            &format!(
+                "{}{}{}",
+                mw("sub", &mr("1")),
+                mw("sup", &mr("2")),
+                mw("e", &mr("X"))
+            )
+        )),
+        "_1^2 X"
+    );
+    assert_eq!(
+        math_text(&mw(
+            "limLow",
+            &format!("{}{}", mw("e", &mr("lim")), mw("lim", &mr("n→∞")))
+        )),
+        "lim_(n→∞)"
+    );
+    assert_eq!(
+        math_text(&mw(
+            "limUpp",
+            &format!("{}{}", mw("e", &mr("max")), mw("lim", &mr("x")))
+        )),
+        "max^x"
+    );
+    let func =
+        |name: &str, arg: &str| mw("func", &format!("{}{}", mw("fName", name), mw("e", arg)));
+    assert_eq!(math_text(&func(&mr("sin"), &mr("x"))), "sin x");
+    assert_eq!(math_text(&func(&mr("sin"), &mr("x+1"))), "sin(x+1)");
+    assert_eq!(
+        math_text(&mw(
+            "bar",
+            &format!(
+                "{}{}",
+                "<m:barPr><m:pos m:val=\"top\"/></m:barPr>",
+                mw("e", &mr("x"))
+            )
+        )),
+        "x¯"
+    );
+    assert_eq!(math_text(&mw("bar", &mw("e", &mr("a+b")))), "(a+b)¯");
+    assert_eq!(
+        math_text(&mw(
+            "acc",
+            &format!(
+                "<m:accPr><m:chr m:val=\"~\"/></m:accPr>{}",
+                mw("e", &mr("x"))
+            )
+        )),
+        "x~"
+    );
+}
+
+#[test]
+fn math_matrix_eqarr_and_transparent_wrappers() {
+    let row = |cells: &[&str]| {
+        mw(
+            "mr",
+            &cells.iter().map(|c| mw("e", &mr(c))).collect::<String>(),
+        )
+    };
+    assert_eq!(
+        math_text(&mw(
+            "m",
+            &format!("{}{}", row(&["a", "b"]), row(&["c", "d"]))
+        )),
+        "[a, b; c, d]"
+    );
+    assert_eq!(
+        math_text(&mw(
+            "eqArr",
+            &format!("{}{}", mw("e", &mr("x=1")), mw("e", &mr("y=2")))
+        )),
+        "x=1; y=2"
+    );
+    for tag in ["box", "borderBox", "groupChr", "phant"] {
+        assert_eq!(
+            math_text(&format!("{}{}", mw(tag, &mw("e", &mr("a+b"))), mr("=c"))),
+            "a+b=c",
+            "{tag}"
+        );
+    }
+}
+
+/// 嵌套:分式里的上标、根号里的分式、定界符里的分式。
+#[test]
+fn math_nested_structures() {
+    assert_eq!(
+        math_text(&mfrac(&msup(&mr("x"), &mr("2")), &mr("y+1"))),
+        "(x^2)/(y+1)"
+    );
+    assert_eq!(
+        math_text(&mw(
+            "rad",
+            &format!(
+                "<m:radPr><m:degHide m:val=\"1\"/></m:radPr><m:deg/>{}",
+                mw("e", &mfrac(&mr("a"), &mr("b")))
+            )
+        )),
+        "sqrt(a/b)"
+    );
+    assert_eq!(
+        math_text(&mw("d", &mw("e", &mfrac(&mr("a"), &mr("b"))))),
+        "(a/b)"
+    );
+    // 已被括号完整包住的槽位不再重复加括号;根号的非原子被开方式不额外加括号。
+    assert_eq!(
+        math_text(&mfrac(&mw("d", &mw("e", &mr("a+b"))), &mr("c"))),
+        "(a+b)/c"
+    );
+    assert_eq!(
+        math_text(&msup(&mr("e"), &mfrac(&mr("1"), &mr("2")))),
+        "e^(1/2)"
+    );
+}
+
+/// 原子判定边界:`2x` / `x1` / `3.14` / `α` / `(a)` 是原子;`-1` / `(a)+(b)` 不是;空槽位不加括号。
+#[test]
+fn math_atom_boundaries() {
+    let num = |s: &str| math_text(&mfrac(&mr(s), &mr("d")));
+    assert_eq!(num("2x"), "2x/d");
+    assert_eq!(num("x1"), "x1/d");
+    assert_eq!(num("3.14"), "3.14/d");
+    assert_eq!(num("α"), "α/d");
+    assert_eq!(num("(a)"), "(a)/d");
+    assert_eq!(num("-1"), "(-1)/d");
+    assert_eq!(num("(a)+(b)"), "((a)+(b))/d");
+    assert_eq!(num("(a"), "((a)/d");
+    // 空槽位:空串,不加括号。
+    assert_eq!(math_text(&mfrac("", &mr("c"))), "/c");
+    assert_eq!(math_text(&msup(&mr("x"), "")), "x^");
+}
+
+/// 不认识的结构仍按文档顺序拼接,但相邻子结构间补一个空格,避免数字粘连。
+#[test]
+fn math_unknown_structure_separates_adjacent_children() {
+    assert_eq!(
+        math_text("<m:zzz><m:p1><m:r><m:t>1</m:t></m:r></m:p1><m:p2><m:r><m:t>2</m:t></m:r></m:p2></m:zzz>"),
+        "1 2"
+    );
+    // 连续的 run 仍直接拼接。
+    assert_eq!(math_text(&format!("{}{}", mr("1"), mr("2"))), "12");
 }
 
 /// 公式文本进入 `to_text` 导出。

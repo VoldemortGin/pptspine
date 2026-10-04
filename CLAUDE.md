@@ -25,7 +25,7 @@ Spine 家族成员之一:**纯 Rust 的 PowerPoint(.pptx / OOXML)结构化解析
     的条目名直接拒绝(`PptError::Zip`)。`parse_bytes` / `parse_path` 用默认值,
     `parse_*_with_limits` 可自定(Python:`open` / `open_bytes` 的仅关键字参数 `max_entries` / `max_entry_bytes` / `max_total_bytes` / `max_compression_ratio` / `max_name_len` / `max_slides` / `max_diagram_shapes` / `max_diagram_text_bytes` / `max_chart_points` / `max_comments`,非法值 `ValueError`)。组合 / `mc:AlternateContent` 嵌套超过 64 层的子树整体跳过
     (防递归下降爆栈)。`mc:AlternateContent` 取文档顺序第一个解析出内容的 `mc:Choice`,全空才取 `mc:Fallback`
-    (形状树与段落层同策略,绝不同取;递归判定 `has_substance`:只含无预览图 OLE 占位框、或没有任何实质后代的组合的分支算弱内容,让位给有实质内容的分支);`a14:m` 公式线性化为 `RunKind::Math` run(规则与 docspine 对齐)。
+    (形状树与段落层同策略,绝不同取;递归判定 `has_substance`:只含无预览图 OLE 占位框、或没有任何实质后代的组合的分支算弱内容,让位给有实质内容的分支);`a14:m` 公式线性化为 `RunKind::Math` run(括号只看槽位线性化结果:非原子才加括号;`m:d` / `m:nary` / `m:sSubSup` / `m:sPre` / `m:limLow|Upp` / `m:func` / `m:bar|acc` / `m:m` / `m:eqArr` 各有确定形式,见 `xml/slide.rs` 公式段注释;与 docspine 各自独立实现)。
 - **缝的元模式(家族统一)。** 唯一外部能力(OCR)经 Protocol seam 接入:`OcrEngine`(来自
   `ocrspine`)是协议,`PaddleOcr` 是确定性默认实现。core 只依赖协议,**绝不**直接 import 任何
   推理 SDK。
