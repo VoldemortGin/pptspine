@@ -1738,3 +1738,82 @@ fn slide_accents_follow_theme_through_clr_map() {
     );
     assert_eq!(slide.accents[1], [0xED, 0x7D, 0x31]);
 }
+
+// ---- 自选图形 / 连接线显式无轮廓(a:ln > a:noFill)--------------------------
+
+/// 一个带 `lnRef idx=2`(主题线 w=12700)的矩形,`ln` 是 spPr 里的 `a:ln` 片段。
+fn styled_rect(ln: &str) -> String {
+    format!(
+        r#"<p:sp>
+        <p:spPr><a:prstGeom prst="rect"/>{ln}</p:spPr>
+        <p:style><a:lnRef idx="2"><a:schemeClr val="accent1"/></a:lnRef></p:style>
+      </p:sp>"#
+    )
+}
+
+fn auto_stroke(xml: &str) -> Option<ppt_core::resolved::ResolvedStroke> {
+    match &resolve_slide(&slide_with(xml, ""), "").shapes[0] {
+        ResolvedShape::Auto(a) => a.stroke.clone(),
+        other => panic!("expected auto shape, got {other:?}"),
+    }
+}
+
+/// 显式 `a:ln > a:noFill`(带 / 不带线宽)= 不画线,且胜过 `lnRef` 主题线;
+/// 无 `a:ln` 时仍走 `lnRef` 继承;显式有色线照常;无 `a:ln` 无样式 = 无描边。
+#[test]
+fn explicit_no_fill_shape_outline_is_not_drawn() {
+    for ln in [
+        r#"<a:ln w="25400"><a:noFill/></a:ln>"#,
+        r#"<a:ln><a:noFill/></a:ln>"#,
+        r#"<a:ln w="25400" cap="flat"><a:noFill/><a:prstDash val="solid"/></a:ln>"#,
+    ] {
+        assert_eq!(
+            auto_stroke(&styled_rect(ln)),
+            None,
+            "{ln}: 显式无线压制 lnRef"
+        );
+    }
+    // 对照 1:无 a:ln → 继承 lnRef 主题线(不能回归成"全都不画")。
+    let inherited = auto_stroke(&styled_rect("")).expect("lnRef 继承线");
+    assert_eq!(inherited.width_emu, Some(12_700));
+    // 对照 2:显式有色线胜过继承。
+    let own = auto_stroke(&styled_rect(
+        r#"<a:ln w="38100"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:ln>"#,
+    ))
+    .expect("显式线");
+    assert_eq!(own.width_emu, Some(38_100));
+    assert_eq!(own.color.expect("color").rgb, [0xFF, 0x00, 0x00]);
+    // 对照 3:无 a:ln 无样式 → 无描边(旧行为)。
+    assert_eq!(
+        auto_stroke(r#"<p:sp><p:spPr><a:prstGeom prst="rect"/></p:spPr></p:sp>"#),
+        None
+    );
+}
+
+/// 连接线显式 `a:ln > a:noFill`:`stroke` 为空且 `no_line` = true(渲染侧据此不套
+/// "无描边 → 缺省黑线"兜底);无 `a:ln` 时 `no_line` = false。
+#[test]
+fn explicit_no_fill_connector_sets_no_line() {
+    let conn = |ln: &str| {
+        format!(
+            r#"<p:cxnSp>
+        <p:nvCxnSpPr><p:cNvPr id="4" name="Conn"/><p:cNvCxnSpPr/><p:nvPr/></p:nvCxnSpPr>
+        <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="100" cy="100"/></a:xfrm>
+          <a:prstGeom prst="line"/>{ln}</p:spPr>
+        <p:style><a:lnRef idx="2"><a:schemeClr val="accent1"/></a:lnRef></p:style>
+      </p:cxnSp>"#
+        )
+    };
+    let inner = [conn(r#"<a:ln w="12700"><a:noFill/></a:ln>"#), conn("")].concat();
+    let slide = resolve_slide(&slide_with(&inner, ""), "");
+    let get = |i: usize| match &slide.shapes[i] {
+        ResolvedShape::Connector(c) => c.clone(),
+        other => panic!("expected connector, got {other:?}"),
+    };
+    let (hidden, inherited) = (get(0), get(1));
+    assert!(hidden.stroke.is_none() && hidden.no_line, "显式无线");
+    assert!(
+        inherited.stroke.is_some() && !inherited.no_line,
+        "继承 lnRef"
+    );
+}

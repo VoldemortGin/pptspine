@@ -605,6 +605,7 @@ mod tests {
                 head_end: None,
                 tail_end: None,
             }),
+            no_line: false,
             custom_geometry: false,
         })
     }
@@ -1177,6 +1178,29 @@ mod tests {
         assert!(
             !solid_hay.contains(" d\n"),
             "solid stroke must not set dashes"
+        );
+    }
+
+    /// 显式无线(`no_line`)的连接线不画描边;无描边解析结果且非显式无线仍走缺省黑线兜底。
+    #[test]
+    fn connector_no_line_draws_nothing_but_default_still_black() {
+        let rect = Rect::new(914_400, 914_400, 1_828_800, 914_400);
+        let with = |no_line: bool, keep_stroke: bool| {
+            let ResolvedShape::Connector(mut c) = connector(rect, Xfrm::default(), None) else {
+                unreachable!()
+            };
+            c.no_line = no_line;
+            if !keep_stroke {
+                c.stroke = None;
+            }
+            let out = render(&one_slide(vec![ResolvedShape::Connector(c)]));
+            String::from_utf8_lossy(&out.pdf).into_owned()
+        };
+        let strokes = |hay: &str| hay.lines().any(|l| l.trim() == "S" || l.ends_with(" RG"));
+        assert!(!strokes(&with(true, false)), "显式无线不画线");
+        assert!(
+            strokes(&with(false, false)),
+            "无描边且非显式无线 → 缺省黑线"
         );
     }
 

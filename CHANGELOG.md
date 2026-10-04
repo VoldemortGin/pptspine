@@ -39,6 +39,7 @@ still change.
 
 ### Fixed
 
+- Explicit "no outline" shapes (`a:spPr > a:ln > a:noFill`, with or without `@w`) were parsed as a width-only stroke and drawn as a default black line (connectors: the "no stroke → black" fallback); `parse_ln` now returns `Stroke.no_fill`, so the outline is not drawn and wins over the `lnRef` theme line (`ResolvedConnector.no_line`). Shapes without `a:ln` still inherit `lnRef`. Pictures and text runs do not model `a:ln`, so are unaffected.
 - Explicit "no border" cell edges (`a:lnL/lnR/lnT/lnB > a:noFill`, with or without `@w`) were parsed as a width-only stroke and drawn as a default black line, overriding the table style's edge; they now hide that edge (`CellBorders.no_left/no_right/no_top/no_bottom`) and win over the table style as explicit properties.
 - CI wheels job "Wheel OCR smoke" had failed since 2026-07 (the `--no-index`
   install could not resolve the hard dependency `ocrspine-models`); it now

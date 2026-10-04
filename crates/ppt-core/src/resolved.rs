@@ -214,6 +214,8 @@ pub struct ResolvedConnector {
     pub adjusts: Vec<(String, i64)>,
     pub fill: Option<ResolvedFill>,
     pub stroke: Option<ResolvedStroke>,
+    /// 显式无线(`a:ln > a:noFill`):渲染不套"无描边 → 缺省黑线"的兜底。
+    pub no_line: bool,
     /// 几何来自 `a:custGeom`(渲染按缺省直线降级 + 告警)。
     pub custom_geometry: bool,
 }

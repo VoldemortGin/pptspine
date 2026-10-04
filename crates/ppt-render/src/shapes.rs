@@ -269,10 +269,14 @@ pub(crate) fn connector_ops(
         return;
     };
     let fill = conn.fill.map(|f| fill_of(ctx, f));
-    let stroke = conn.stroke.as_ref().map_or_else(
-        || Stroke::new(Rgb::BLACK, DEFAULT_STROKE_PT * flat.s),
-        |s| stroke_of(s, flat.s),
-    );
+    let stroke = if conn.no_line {
+        None
+    } else {
+        Some(conn.stroke.as_ref().map_or_else(
+            || Stroke::new(Rgb::BLACK, DEFAULT_STROKE_PT * flat.s),
+            |s| stroke_of(s, flat.s),
+        ))
+    };
     outline_op(
         ctx,
         conn.geometry.as_deref(),
@@ -281,7 +285,7 @@ pub(crate) fn connector_ops(
         conn.xfrm,
         &conn.adjusts,
         fill,
-        Some(stroke),
+        stroke,
         LineEnds::of(conn.stroke.as_ref()),
         conn.custom_geometry,
         flat.s,

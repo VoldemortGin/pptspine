@@ -530,7 +530,8 @@ fn parse_sp<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Shape> {
     });
     if pr.geometry.is_some()
         || has_paint
-        || pr.stroke.is_some()
+        // 显式无线(`no_fill`)本身不构成描边:保持旧分类(无几何 / 填充时仍是文本框)。
+        || pr.stroke.as_ref().is_some_and(|s| !s.no_fill)
         || (pr.custom_geometry && style_paint)
     {
         // 段落非空,或带 lstStyle(layout/master 占位符常态——继承链需要),才保留文字体。
@@ -962,13 +963,20 @@ fn parse_grad_fill<R: std::io::BufRead>(reader: &mut Reader<R>) -> Vec<ColorSpec
 /// 解析 `a:ln`(描边):自身 `@w` 线宽 + 其内 `a:solidFill` 颜色 + `a:prstDash@val`
 /// 虚线预设 + `a:headEnd` / `a:tailEnd` 线端装饰。已消费 `<a:ln>` 起始标签;`start`
 /// 是该起始标签(读取 `w`)。颜色 / 线宽 / 虚线 / 有效线端全缺时返回 `None`(与旧行为
-/// 一致:空 `a:ln` 不产生描边)。`a:ln > a:noFill`(不可见线)下的线端装饰丢弃——
-/// 否则孤立的箭头会让本无描边的形状凭空长出缺省黑线。
+/// 一致:空 `a:ln` 不产生描边)。`a:ln > a:noFill`(不可见线)返回 `Stroke { no_fill: true, .. }`
+/// (其余字段清空)——显式无线必须能压制 `lnRef` 主题线,否则只剩线宽会被画成缺省黑线;
+/// 其下的线端装饰同样丢弃。
 pub(crate) fn parse_ln<R: std::io::BufRead>(
     reader: &mut Reader<R>,
     start: &BytesStart,
 ) -> Option<Stroke> {
-    parse_ln_no_fill(reader, start).0
+    match parse_ln_no_fill(reader, start) {
+        (_, true) => Some(Stroke {
+            no_fill: true,
+            ..Stroke::default()
+        }),
+        (stroke, false) => stroke,
+    }
 }
 
 /// 同 [`parse_ln`],另返回是否含 `a:noFill`(表格样式边框据此区分"显式无线"与"未指定")。

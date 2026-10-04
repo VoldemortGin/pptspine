@@ -424,6 +424,7 @@ fn resolve_connector(c: &Connector, ctx: &Ctx) -> ResolvedConnector {
         adjusts: c.adjusts.clone(),
         fill: resolve_fill(ctx, c.fill.as_ref(), c.style.as_ref()),
         stroke: resolve_stroke(ctx, c.stroke.as_ref(), c.style.as_ref()),
+        no_line: c.stroke.as_ref().is_some_and(|s| s.no_fill),
         custom_geometry: c.custom_geometry,
     }
 }
@@ -718,6 +719,9 @@ fn resolve_stroke(
     stroke: Option<&Stroke>,
     style: Option<&ShapeStyle>,
 ) -> Option<ResolvedStroke> {
+    if stroke.is_some_and(|s| s.no_fill) {
+        return None;
+    }
     let ln_ref = style.and_then(|s| s.ln_ref.as_ref()).filter(|r| r.idx >= 1);
     let ph_rgb = ln_ref
         .and_then(|r| r.color.as_ref())

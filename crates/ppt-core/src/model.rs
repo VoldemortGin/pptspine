@@ -643,6 +643,8 @@ pub struct ChartSeries {
 /// 描边属性(`a:ln`):颜色 + 线宽 + 虚线预设 + 两端线端装饰。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Stroke {
+    /// 显式无线(`a:ln` > `a:noFill`):压制 `lnRef` 主题线,不画描边;此时其余字段均为空。
+    pub no_fill: bool,
     /// 描边色(`a:ln` > `a:solidFill`)。
     pub color: Option<ColorSpec>,
     /// 线宽(EMU,`a:ln@w`);缺省 `None`。
