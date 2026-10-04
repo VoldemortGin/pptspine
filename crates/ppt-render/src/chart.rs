@@ -32,6 +32,8 @@ const GAP_RATIO: f64 = 1.5;
 const LATIN_EM: f64 = 0.55;
 /// 图例最多行数(超出的条目不画)。
 const MAX_LEGEND_ROWS: usize = 3;
+/// 图例条目数上限(3 行最多也放不下几十条;超出的从尾部省略,避免按规模建大向量)。
+const MAX_LEGEND_ENTRIES: usize = 64;
 /// 降级告警种类。
 pub(crate) const CHART_DEGRADED_KIND: &str = "chart-degraded";
 
@@ -488,6 +490,11 @@ pub(crate) fn layout(chart: &Chart, frame: Rect) -> Result<ChartGeometry, Unsupp
     if chart.three_d {
         return Err(Unsupported::ThreeD);
     }
+    // 点数 / 类别数上限先于一切与规模相关的工作(图例、扇区、堆积都在其后)。
+    let marks = mark_count(chart);
+    if marks > MAX_MARKS {
+        return Err(Unsupported::TooManyPoints(marks));
+    }
     let w = frame.x1 - frame.x0;
     let h = frame.y1 - frame.y0;
     if !(w.is_finite() && h.is_finite()) || w < 40.0 || h < 30.0 {
@@ -522,33 +529,7 @@ pub(crate) fn layout(chart: &Chart, frame: Rect) -> Result<ChartGeometry, Unsupp
     }
 
     // 图例条目:柱 / 线为系列(有系列名时),饼为类别。
-    let legend: Vec<(String, usize, Option<[u8; 3]>)> = match chart.kind {
-        ChartKind::Pie => chart
-            .categories
-            .iter()
-            .enumerate()
-            .map(|(i, c)| {
-                (
-                    c.clone(),
-                    i,
-                    pie_series(chart).and_then(|s| point_rgb(s, i)),
-                )
-            })
-            .collect(),
-        _ if chart.series.iter().any(|s| s.name.is_some()) => chart
-            .series
-            .iter()
-            .enumerate()
-            .map(|(i, s)| {
-                let name = s
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| format!("Series {}", i + 1));
-                (name, i, series_rgb(s))
-            })
-            .collect(),
-        _ => Vec::new(),
-    };
+    let legend = legend_entries(chart);
     if !legend.is_empty() {
         inner.y1 = legend_layout(&mut g, &legend, inner, size);
     }
@@ -561,6 +542,53 @@ pub(crate) fn layout(chart: &Chart, frame: Rect) -> Result<ChartGeometry, Unsupp
         _ => axis_layout(&mut g, chart, inner, size)?,
     }
     Ok(g)
+}
+
+/// 标记总数:类别数与各系列点数取大(饼图只算这一维),柱 / 线再乘系列数。
+fn mark_count(chart: &Chart) -> usize {
+    let n = chart
+        .series
+        .iter()
+        .map(|s| s.values.len())
+        .max()
+        .unwrap_or(0)
+        .max(chart.categories.len());
+    if chart.kind == ChartKind::Pie {
+        n
+    } else {
+        n.saturating_mul(chart.series.len())
+    }
+}
+
+/// 图例条目 `(文字, 调色板序号, 显式色)`:柱 / 线为系列(有系列名时),饼为类别;
+/// 至多 [`MAX_LEGEND_ENTRIES`] 条,饼图取数系列只算一次。
+fn legend_entries(chart: &Chart) -> Vec<(String, usize, Option<[u8; 3]>)> {
+    match chart.kind {
+        ChartKind::Pie => {
+            let series = pie_series(chart);
+            chart
+                .categories
+                .iter()
+                .take(MAX_LEGEND_ENTRIES)
+                .enumerate()
+                .map(|(i, c)| (c.clone(), i, series.and_then(|s| point_rgb(s, i))))
+                .collect()
+        }
+        _ if chart.series.iter().any(|s| s.name.is_some()) => chart
+            .series
+            .iter()
+            .take(MAX_LEGEND_ENTRIES)
+            .enumerate()
+            .map(|(i, s)| {
+                let name = s
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| format!("Series {}", i + 1));
+                (name, i, series_rgb(s))
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// 图例一行里的一条:`(文字, 调色板序号, 显式色, 估算宽)`。
@@ -637,9 +665,6 @@ fn pie_layout(
     size: f64,
 ) -> Result<(), Unsupported> {
     let series = pie_series(chart).ok_or(Unsupported::NoData)?;
-    if series.values.len() > MAX_MARKS {
-        return Err(Unsupported::TooManyPoints(series.values.len()));
-    }
     let vals: Vec<(usize, f64)> = (0..series.values.len())
         .filter_map(|i| value_at(series, i).map(|v| (i, v.abs())))
         .filter(|(_, v)| *v > 0.0)
@@ -784,10 +809,6 @@ fn axis_layout(
         .unwrap_or(0)
         .max(chart.categories.len());
     let ns = chart.series.len();
-    let marks = n.saturating_mul(ns);
-    if marks > MAX_MARKS {
-        return Err(Unsupported::TooManyPoints(marks));
-    }
     let items = stack_items(chart, n, stacking, bars);
     if n == 0 || items.is_empty() {
         return Err(Unsupported::NoData);
@@ -1743,6 +1764,37 @@ mod tests {
             layout(&c, frame()),
             Err(Unsupported::TooManyPoints(MAX_MARKS + 1))
         );
+    }
+
+    #[test]
+    fn pie_with_huge_declared_counts_degrades_before_any_scale_work() {
+        // 审查探针:ptCount 声明 N 却没有任何 pt(类别全空串、值全缺)。
+        // 上限检查必须先于图例 / 扇区等与规模相关的工作,且不论值是否为空。
+        let n = MAX_MARKS + 1;
+        let cats = vec![String::new(); n];
+        let mut c = chart(ChartKind::Pie, &[], vec![series(None, &vec![None; n])]);
+        c.categories = cats;
+        assert_eq!(layout(&c, frame()), Err(Unsupported::TooManyPoints(n)));
+        // 只有类别、没有系列值,同样按类别数拦下。
+        let mut c = chart(ChartKind::Pie, &[], vec![]);
+        c.categories = vec![String::new(); n];
+        assert_eq!(layout(&c, frame()), Err(Unsupported::TooManyPoints(n)));
+    }
+
+    #[test]
+    fn legend_entries_are_capped_deterministically() {
+        let cats: Vec<String> = (0..5_000).map(|i| format!("c{i}")).collect();
+        let refs: Vec<&str> = cats.iter().map(String::as_str).collect();
+        let vals = vec![Some(1.0); 5_000];
+        let c = chart(ChartKind::Pie, &refs, vec![series(None, &vals)]);
+        let entries = legend_entries(&c);
+        assert_eq!(entries.len(), MAX_LEGEND_ENTRIES);
+        assert_eq!(entries[0].0, "c0", "超出部分从尾部省略");
+        let many: Vec<ChartSeries> = (0..5_000)
+            .map(|i| series(Some(&format!("s{i}")), &[]))
+            .collect();
+        let c = chart(ChartKind::Bar, &[], many);
+        assert_eq!(legend_entries(&c).len(), MAX_LEGEND_ENTRIES);
     }
 
     #[test]
