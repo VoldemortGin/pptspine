@@ -16,11 +16,13 @@
 //! - **形状样式**:`p:style` fillRef/lnRef 经主题 `fmtScheme` 纯色解析
 //!   (`phClr` 以引用色替换;非纯色项降级为代表色)。
 
+use std::collections::BTreeMap;
+
 use ppt_core::color::{apply_transforms, ColorSpec, ResolvedColor};
 use ppt_core::geom::Rect;
 use ppt_core::model::{
     AutoShape, Autofit, Background, BodyProps, Cell, Connector, Fill, Paragraph, Presentation,
-    Shape, Slide, Stroke, Table, TextFrame, TextRun,
+    Shape, Slide, Stroke, Table, TableFlags, TablePartStyle, TableStyle, TextFrame, TextRun,
 };
 use ppt_core::model::{LineEnd, LineEndKind};
 use ppt_core::resolved::{
@@ -66,6 +68,7 @@ struct Ctx<'a> {
     master_shapes: &'a [Shape],
     tx_styles: Option<&'a TxStyles>,
     default_text_style: Option<&'a TextStyleLevels>,
+    table_styles: &'a BTreeMap<String, TableStyle>,
 }
 
 fn resolve_slide(slide: &Slide, inherit: &InheritanceParts) -> ResolvedSlide {
@@ -93,6 +96,7 @@ fn resolve_slide(slide: &Slide, inherit: &InheritanceParts) -> ResolvedSlide {
         master_shapes: master.map(|m| m.shapes.as_slice()).unwrap_or(&[]),
         tx_styles: master.and_then(|m| m.tx_styles.as_ref()),
         default_text_style: inherit.default_text_style.as_ref(),
+        table_styles: &inherit.table_styles,
     };
     // B-10:背景继承链 slide → layout → master(第一个存在的赢,不逐字段合并)。
     let background = slide
@@ -425,20 +429,43 @@ fn resolve_connector(c: &Connector, ctx: &Ctx) -> ResolvedConnector {
 
 fn resolve_table(t: &Table, ctx: &Ctx) -> ResolvedTable {
     // 单元格文字无占位符链;用非占位符基链(otherStyle + defaultTextStyle)。
-    // `tableStyles.xml` 语义在 v1 之外(PRD §1)。
     let chain = style_chain(ctx, None, None, None, None);
+    // 表格样式(`tableStyles.xml`):找不到 styleId 时退回只用显式属性。
+    let style = t
+        .table_style_id
+        .as_deref()
+        .and_then(|id| ctx.table_styles.get(id));
+    let nrows = t.rows.len();
+    let ncols = t
+        .col_widths
+        .len()
+        .max(t.rows.iter().map(|r| r.cells.len()).max().unwrap_or(0));
     ResolvedTable {
         rect: t.rect,
         col_widths: t.col_widths.clone(),
         table_style_id: t.table_style_id.clone(),
+        style_resolved: style.is_some(),
         rows: t
             .rows
             .iter()
-            .map(|row| ResolvedRow {
+            .enumerate()
+            .map(|(ri, row)| ResolvedRow {
                 cells: row
                     .cells
                     .iter()
-                    .map(|c| resolve_cell(c, &chain, ctx))
+                    .enumerate()
+                    .map(|(ci, c)| {
+                        let pos = GridPos {
+                            row: ri,
+                            col: ci,
+                            row_span: (c.row_span.max(1) as usize).min(nrows - ri),
+                            col_span: (c.col_span.max(1) as usize).min(ncols - ci),
+                            nrows,
+                            ncols,
+                        };
+                        let cs = style.map(|s| cell_table_style(s, t.flags, &pos));
+                        resolve_cell(c, &chain, cs.as_ref(), ctx)
+                    })
                     .collect(),
                 height: row.height,
             })
@@ -446,17 +473,169 @@ fn resolve_table(t: &Table, ctx: &Ctx) -> ResolvedTable {
     }
 }
 
-fn resolve_cell(cell: &Cell, chain: &[&TextStyleLevels], ctx: &Ctx) -> ResolvedCell {
-    let border = |s: Option<&Stroke>| resolve_stroke(ctx, s, None);
+/// 单元格在表格网格中的位置(跨行 / 跨列已按表格边界截断)。
+struct GridPos {
+    row: usize,
+    col: usize,
+    row_span: usize,
+    col_span: usize,
+    nrows: usize,
+    ncols: usize,
+}
+
+/// 表格样式部件作用的区域形状:决定部件的 left/right/top/bottom 是外沿还是取
+/// insideH/insideV。整表 = 全表;行部件(行带 / 首末行)= 单行;列部件 = 单列。
+#[derive(Clone, Copy)]
+enum PartRegion {
+    Table,
+    Row,
+    Col,
+}
+
+/// 一个单元格叠加完毕的表格样式(终态:未指定与显式"无"已合一为 `None`)。
+struct CellTableStyle {
+    fill: Option<ColorSpec>,
+    left: Option<Stroke>,
+    right: Option<Stroke>,
+    top: Option<Stroke>,
+    bottom: Option<Stroke>,
+    text_color: Option<ColorSpec>,
+    bold: Option<bool>,
+}
+
+/// 按 OOXML 优先级叠加单元格适用的样式部件(后者逐属性覆盖前者):
+/// wholeTbl < band1V/band2V < band1H/band2H < lastCol < firstCol < lastRow < firstRow。
+/// 行带 / 列带计数跳过启用的首末行 / 首末列(表头行不计入行带)。
+fn cell_table_style(style: &TableStyle, flags: TableFlags, pos: &GridPos) -> CellTableStyle {
+    let first_row = flags.first_row && pos.row == 0;
+    let last_row = flags.last_row && pos.row + pos.row_span >= pos.nrows;
+    let first_col = flags.first_col && pos.col == 0;
+    let last_col = flags.last_col && pos.col + pos.col_span >= pos.ncols;
+    let mut parts: Vec<(&TablePartStyle, PartRegion)> = vec![(&style.whole_tbl, PartRegion::Table)];
+    if flags.band_col && !first_col && !last_col {
+        let band = pos.col - usize::from(flags.first_col);
+        let part = if band.is_multiple_of(2) {
+            &style.band1_v
+        } else {
+            &style.band2_v
+        };
+        parts.push((part, PartRegion::Col));
+    }
+    if flags.band_row && !first_row && !last_row {
+        let band = pos.row - usize::from(flags.first_row);
+        let part = if band.is_multiple_of(2) {
+            &style.band1_h
+        } else {
+            &style.band2_h
+        };
+        parts.push((part, PartRegion::Row));
+    }
+    if last_col {
+        parts.push((&style.last_col, PartRegion::Col));
+    }
+    if first_col {
+        parts.push((&style.first_col, PartRegion::Col));
+    }
+    if last_row {
+        parts.push((&style.last_row, PartRegion::Row));
+    }
+    if first_row {
+        parts.push((&style.first_row, PartRegion::Row));
+    }
+
+    let at_left = pos.col == 0;
+    let at_right = pos.col + pos.col_span >= pos.ncols;
+    let at_top = pos.row == 0;
+    let at_bottom = pos.row + pos.row_span >= pos.nrows;
+    let (mut fill, mut text_color, mut bold) = (None, None, None);
+    let (mut left, mut right, mut top, mut bottom) = (None, None, None, None);
+    for (part, region) in parts {
+        let b = &part.borders;
+        // 区域外沿取对应边,区域内部取格间线(列部件左右恒为外沿,行部件上下恒为外沿)。
+        let (outer_l, outer_r) = match region {
+            PartRegion::Col => (true, true),
+            _ => (at_left, at_right),
+        };
+        let (outer_t, outer_b) = match region {
+            PartRegion::Row => (true, true),
+            _ => (at_top, at_bottom),
+        };
+        let pick = |outer: bool, edge: &Option<Option<Stroke>>, inside: &Option<Option<Stroke>>| {
+            if outer {
+                edge.clone()
+            } else {
+                inside.clone()
+            }
+        };
+        left = pick(outer_l, &b.left, &b.inside_v).or(left);
+        right = pick(outer_r, &b.right, &b.inside_v).or(right);
+        top = pick(outer_t, &b.top, &b.inside_h).or(top);
+        bottom = pick(outer_b, &b.bottom, &b.inside_h).or(bottom);
+        fill = part.fill.clone().or(fill);
+        text_color = part.text_color.clone().or(text_color);
+        bold = part.bold.or(bold);
+    }
+    CellTableStyle {
+        fill: fill.flatten(),
+        left: left.flatten(),
+        right: right.flatten(),
+        top: top.flatten(),
+        bottom: bottom.flatten(),
+        text_color,
+        bold,
+    }
+}
+
+/// 表格样式的文字色 / 粗体 → 一层各级相同的缺省 run 样式,接在非占位符基链之后
+/// (段落 `pPr` / run `rPr` 的显式属性仍然更近、获胜)。
+fn table_text_layer(style: &CellTableStyle) -> Option<TextStyleLevels> {
+    if style.text_color.is_none() && style.bold.is_none() {
+        return None;
+    }
+    let level = TextLevelStyle {
+        def_rpr: Some(RunStyle {
+            color: style.text_color.clone(),
+            bold: style.bold,
+            ..RunStyle::default()
+        }),
+        ..TextLevelStyle::default()
+    };
+    Some(TextStyleLevels {
+        levels: Box::new(std::array::from_fn(|_| Some(level.clone()))),
+    })
+}
+
+fn resolve_cell(
+    cell: &Cell,
+    chain: &[&TextStyleLevels],
+    style: Option<&CellTableStyle>,
+    ctx: &Ctx,
+) -> ResolvedCell {
+    // 显式 `tcPr` 逐边 / 填充获胜;缺失时取表格样式(显式 `noFill` 压制样式填充)。
+    let border = |explicit: Option<&Stroke>, styled: Option<&Stroke>| {
+        resolve_stroke(ctx, explicit.or(styled), None)
+    };
+    let styled_fill = style
+        .and_then(|s| s.fill.as_ref())
+        .filter(|_| !cell.no_fill);
+    let text_layer = style.and_then(table_text_layer);
+    let mut cell_chain = chain.to_vec();
+    if let Some(layer) = &text_layer {
+        cell_chain.push(layer);
+    }
     ResolvedCell {
         paragraphs: cell
             .paragraphs
             .iter()
-            .map(|p| resolve_paragraph(p, chain, None, ctx))
+            .map(|p| resolve_paragraph(p, &cell_chain, None, ctx))
             .collect(),
         col_span: cell.col_span,
         row_span: cell.row_span,
-        fill: cell.fill.as_ref().map(|c| resolve_color(ctx, c, None)),
+        fill: cell
+            .fill
+            .as_ref()
+            .or(styled_fill)
+            .map(|c| resolve_color(ctx, c, None)),
         merged: cell.merged,
         mar_l: cell.mar_l.unwrap_or(DEFAULT_INSET_LR_EMU),
         mar_r: cell.mar_r.unwrap_or(DEFAULT_INSET_LR_EMU),
@@ -464,10 +643,22 @@ fn resolve_cell(cell: &Cell, chain: &[&TextStyleLevels], ctx: &Ctx) -> ResolvedC
         mar_b: cell.mar_b.unwrap_or(DEFAULT_INSET_TB_EMU),
         anchor: ResolvedAnchor::from_ooxml(cell.anchor.as_deref()),
         borders: ResolvedCellBorders {
-            left: border(cell.borders.left.as_ref()),
-            right: border(cell.borders.right.as_ref()),
-            top: border(cell.borders.top.as_ref()),
-            bottom: border(cell.borders.bottom.as_ref()),
+            left: border(
+                cell.borders.left.as_ref(),
+                style.and_then(|s| s.left.as_ref()),
+            ),
+            right: border(
+                cell.borders.right.as_ref(),
+                style.and_then(|s| s.right.as_ref()),
+            ),
+            top: border(
+                cell.borders.top.as_ref(),
+                style.and_then(|s| s.top.as_ref()),
+            ),
+            bottom: border(
+                cell.borders.bottom.as_ref(),
+                style.and_then(|s| s.bottom.as_ref()),
+            ),
         },
     }
 }

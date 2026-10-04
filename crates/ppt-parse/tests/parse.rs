@@ -889,3 +889,44 @@ fn custom_geometry_is_flagged_and_style_painted_custgeom_is_auto() {
     };
     assert!(!d.custom_geometry);
 }
+
+/// §3.r:`a:tblPr` 开关属性(自闭合与带 `tableStyleId` 子元素两种形式)+ `tcPr > a:noFill`。
+#[test]
+fn tbl_pr_flags_and_tcpr_no_fill_parsed() {
+    let frame = |tbl_pr: &str, tc_pr: &str| {
+        format!(
+            r#"<p:graphicFrame>
+             <p:xfrm><a:off x="0" y="0"/><a:ext cx="100" cy="100"/></p:xfrm>
+             <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table">
+               <a:tbl>{tbl_pr}<a:tblGrid><a:gridCol w="100"/></a:tblGrid>
+                 <a:tr h="100"><a:tc><a:txBody><a:p/></a:txBody>{tc_pr}</a:tc></a:tr>
+               </a:tbl>
+             </a:graphicData></a:graphic>
+           </p:graphicFrame>"#
+        )
+    };
+    let shapes = shapes_of(&format!(
+        "{}{}",
+        frame(
+            r#"<a:tblPr firstRow="1" bandRow="1" lastCol="true"/>"#,
+            "<a:tcPr><a:noFill/></a:tcPr>"
+        ),
+        frame(
+            r#"<a:tblPr firstCol="1" lastRow="1" bandCol="1"><a:tableStyleId>{X}</a:tableStyleId></a:tblPr>"#,
+            ""
+        ),
+    ));
+    let (Shape::Table(a), Shape::Table(b)) = (&shapes[0], &shapes[1]) else {
+        panic!("expected two tables");
+    };
+    let fa = a.flags;
+    assert!(fa.first_row && fa.band_row && fa.last_col);
+    assert!(!fa.last_row && !fa.first_col && !fa.band_col);
+    assert_eq!(a.table_style_id, None);
+    assert!(a.rows[0].cells[0].no_fill, "tcPr > noFill");
+    let fb = b.flags;
+    assert!(fb.first_col && fb.last_row && fb.band_col);
+    assert!(!fb.first_row && !fb.band_row && !fb.last_col);
+    assert_eq!(b.table_style_id.as_deref(), Some("{X}"));
+    assert!(!b.rows[0].cells[0].no_fill);
+}

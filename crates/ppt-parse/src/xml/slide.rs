@@ -24,7 +24,7 @@ use ppt_core::geom::{Emu, Rect};
 use ppt_core::model::{
     AutoShape, Autofit, Background, BodyProps, Cell, CellBorders, Connector, Fill,
     GraphicPlaceholder, GroupShape, Hyperlink, Paragraph, Picture, RelRect, Row, RunKind, Shape,
-    Stroke, Table, TextFrame, TextRun, Xfrm,
+    Stroke, Table, TableFlags, TextFrame, TextRun, Xfrm,
 };
 use ppt_core::model::{LineEnd, LineEndKind, LineEndSize};
 use ppt_core::style::{
@@ -968,6 +968,14 @@ pub(crate) fn parse_ln<R: std::io::BufRead>(
     reader: &mut Reader<R>,
     start: &BytesStart,
 ) -> Option<Stroke> {
+    parse_ln_no_fill(reader, start).0
+}
+
+/// 同 [`parse_ln`],另返回是否含 `a:noFill`(表格样式边框据此区分"显式无线"与"未指定")。
+pub(crate) fn parse_ln_no_fill<R: std::io::BufRead>(
+    reader: &mut Reader<R>,
+    start: &BytesStart,
+) -> (Option<Stroke>, bool) {
     let mut stroke = Stroke {
         width_emu: ln_width(start),
         ..Stroke::default()
@@ -1011,7 +1019,7 @@ pub(crate) fn parse_ln<R: std::io::BufRead>(
         stroke.head_end = None;
         stroke.tail_end = None;
     }
-    stroke_if_any(stroke)
+    (stroke_if_any(stroke), no_fill)
 }
 
 /// `a:ln` 的线端 / `noFill` 子元素(属性即全部信息)。
@@ -1054,7 +1062,7 @@ fn ln_width(e: &BytesStart) -> Option<Emu> {
 }
 
 /// 自闭合 `<a:ln w="…"/>`(无子元素,只有线宽)。
-fn bare_ln(e: &BytesStart) -> Option<Stroke> {
+pub(crate) fn bare_ln(e: &BytesStart) -> Option<Stroke> {
     stroke_if_any(Stroke {
         width_emu: ln_width(e),
         ..Stroke::default()
@@ -1368,12 +1376,13 @@ fn parse_graphic_frame<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Sh
     }
 }
 
-/// 解析 `a:tbl` -> `Table`(`a:tblGrid` 列宽 + `a:tr` 行 + `a:tblPr` 样式 id)。
+/// 解析 `a:tbl` -> `Table`(`a:tblGrid` 列宽 + `a:tr` 行 + `a:tblPr` 样式 id 与开关属性)。
 /// 已消费 `<a:tbl>` 起始标签。
 fn parse_table<R: std::io::BufRead>(reader: &mut Reader<R>, rect: Option<Rect>) -> Table {
     let mut col_widths = Vec::new();
     let mut rows = Vec::new();
     let mut table_style_id = None;
+    let mut flags = TableFlags::default();
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
@@ -1381,13 +1390,22 @@ fn parse_table<R: std::io::BufRead>(reader: &mut Reader<R>, rect: Option<Rect>) 
                 let name = local_name(e.name().as_ref()).to_vec();
                 match name.as_slice() {
                     b"tblGrid" => col_widths = parse_tbl_grid(reader),
-                    b"tblPr" => table_style_id = parse_tbl_pr(reader).or(table_style_id),
+                    b"tblPr" => {
+                        flags = tbl_pr_flags(&e);
+                        table_style_id = parse_tbl_pr(reader).or(table_style_id);
+                    }
                     b"tr" => {
                         let height = attr_of(&e, b"h").and_then(|s| s.parse().ok());
                         let cells = parse_table_row(reader);
                         rows.push(Row { cells, height });
                     }
                     _ => skip_element(reader, &name),
+                }
+            }
+            // 自闭合 `<a:tblPr firstRow="1" bandRow="1"/>`:只有开关属性。
+            Ok(Event::Empty(e)) => {
+                if local_name(e.name().as_ref()) == b"tblPr" {
+                    flags = tbl_pr_flags(&e);
                 }
             }
             Ok(Event::End(_)) => break,
@@ -1402,11 +1420,24 @@ fn parse_table<R: std::io::BufRead>(reader: &mut Reader<R>, rect: Option<Rect>) 
         col_widths,
         rows,
         table_style_id,
+        flags,
     }
 }
 
-/// 解析 `a:tblPr` 内的 `a:tableStyleId` 文本(v1 不解析 `tableStyles.xml` 语义,
-/// 仅捕获 id 供渲染降级告警,PRD §1)。已消费 `<a:tblPr>` 起始标签。
+/// `a:tblPr` 的开关属性(缺失为关)。
+fn tbl_pr_flags(e: &BytesStart) -> TableFlags {
+    TableFlags {
+        first_row: bool_attr(e, b"firstRow"),
+        last_row: bool_attr(e, b"lastRow"),
+        first_col: bool_attr(e, b"firstCol"),
+        last_col: bool_attr(e, b"lastCol"),
+        band_row: bool_attr(e, b"bandRow"),
+        band_col: bool_attr(e, b"bandCol"),
+    }
+}
+
+/// 解析 `a:tblPr` 内的 `a:tableStyleId` 文本(指向 `tableStyles.xml` 的样式,在
+/// 继承链解析时合进单元格)。已消费 `<a:tblPr>` 起始标签。
 fn parse_tbl_pr<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<String> {
     let mut id = None;
     let mut buf = Vec::new();
@@ -1513,6 +1544,7 @@ fn cell_skeleton(e: &BytesStart) -> Cell {
         col_span,
         row_span,
         fill: None,
+        no_fill: false,
         merged,
         // 无 `a:tcPr` 时的缺省占位:内边距 / 锚定 / 逐边框线均置 None(表示无覆盖),
         // 缺省在终态 IR 回填。解析本身已实现(tcpr_attrs / parse_tcpr_children);
@@ -1566,6 +1598,7 @@ fn parse_table_cell<R: std::io::BufRead>(reader: &mut Reader<R>, start: &BytesSt
 #[derive(Default)]
 struct TcPr {
     fill: Option<ColorSpec>,
+    no_fill: bool,
     mar_l: Option<Emu>,
     mar_r: Option<Emu>,
     mar_t: Option<Emu>,
@@ -1587,8 +1620,9 @@ fn tcpr_attrs(e: &BytesStart) -> TcPr {
     }
 }
 
-/// 读 `a:tcPr` 的子元素:`a:solidFill`(单元格填充)、`a:lnL/lnR/lnT/lnB`(逐边框线,
-/// 各是一个 `a:ln`——width/dash/solidFill 走 [`parse_ln`];自闭合仅 width)。
+/// 读 `a:tcPr` 的子元素:`a:solidFill`(单元格填充)、`a:noFill`(显式无填充)、
+/// `a:lnL/lnR/lnT/lnB`(逐边框线,各是一个 `a:ln`——width/dash/solidFill 走
+/// [`parse_ln`];自闭合仅 width)。
 /// 对角线 `lnTlToBr`/`lnBlToTr` v1 忽略。
 fn parse_tcpr_children<R: std::io::BufRead>(reader: &mut Reader<R>, t: &mut TcPr) {
     let mut buf = Vec::new();
@@ -1602,6 +1636,10 @@ fn parse_tcpr_children<R: std::io::BufRead>(reader: &mut Reader<R>, t: &mut TcPr
                     b"lnR" => t.borders.right = parse_ln(reader, &e),
                     b"lnT" => t.borders.top = parse_ln(reader, &e),
                     b"lnB" => t.borders.bottom = parse_ln(reader, &e),
+                    b"noFill" => {
+                        t.no_fill = true;
+                        skip_element(reader, &name);
+                    }
                     _ => skip_element(reader, &name),
                 }
             }
@@ -1613,6 +1651,7 @@ fn parse_tcpr_children<R: std::io::BufRead>(reader: &mut Reader<R>, t: &mut TcPr
                     b"lnR" => t.borders.right = w(),
                     b"lnT" => t.borders.top = w(),
                     b"lnB" => t.borders.bottom = w(),
+                    b"noFill" => t.no_fill = true,
                     _ => {}
                 }
             }
@@ -1631,6 +1670,7 @@ fn apply_tcpr(cell: &mut Cell, t: TcPr) {
     if t.fill.is_some() {
         cell.fill = t.fill;
     }
+    cell.no_fill |= t.no_fill;
     cell.mar_l = t.mar_l;
     cell.mar_r = t.mar_r;
     cell.mar_t = t.mar_t;

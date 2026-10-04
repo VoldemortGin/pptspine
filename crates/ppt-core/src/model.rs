@@ -348,9 +348,66 @@ pub struct Table {
     /// 各列宽(EMU,`a:tblGrid` > `a:gridCol@w`,按文档顺序);无 `tblGrid` 时为空。
     pub col_widths: Vec<Emu>,
     pub rows: Vec<Row>,
-    /// 表格样式 id(`a:tblPr > a:tableStyleId`)。v1 不解析 `tableStyles.xml`
-    /// 语义(PRD §1 CUT),仅保留 id 供渲染侧降级告警。
+    /// 表格样式 id(`a:tblPr > a:tableStyleId`),指向 `ppt/tableStyles.xml` 的
+    /// `a:tblStyle@styleId`;找不到时渲染侧降级告警。
     pub table_style_id: Option<String>,
+    /// `a:tblPr` 的开关属性(决定表格样式哪些部件生效)。
+    pub flags: TableFlags,
+}
+
+/// 表格开关属性(`a:tblPr@firstRow/@lastRow/@firstCol/@lastCol/@bandRow/@bandCol`),
+/// 决定表格样式的哪些部件生效;缺省全关。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TableFlags {
+    pub first_row: bool,
+    pub last_row: bool,
+    pub first_col: bool,
+    pub last_col: bool,
+    pub band_row: bool,
+    pub band_col: bool,
+}
+
+/// 表格样式部件的边框(`a:tcStyle > a:tcBdr`)。三态:`None` = 未指定(沿用更低优先级
+/// 部件),`Some(None)` = 显式无线(`a:ln > a:noFill`),`Some(Some(_))` = 画线。
+/// `left`/`right`/`top`/`bottom` 作用于该部件区域的外沿,`inside_h`/`inside_v` 作用于区域内部
+/// 的格间线。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TableStyleBorders {
+    pub left: Option<Option<Stroke>>,
+    pub right: Option<Option<Stroke>>,
+    pub top: Option<Option<Stroke>>,
+    pub bottom: Option<Option<Stroke>>,
+    pub inside_h: Option<Option<Stroke>>,
+    pub inside_v: Option<Option<Stroke>>,
+}
+
+/// 表格样式的一个部件(`a:wholeTbl` / `a:band1H` / … / `a:lastCol`)。全字段三态,
+/// 按优先级逐属性叠加;空部件不产生任何效果。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TablePartStyle {
+    /// `a:tcStyle > a:fill`:`None` 未指定;`Some(None)` 显式 `a:noFill`;
+    /// `Some(Some(_))` 纯色(渐变 / 图案等不支持的填充视为未指定)。
+    pub fill: Option<Option<ColorSpec>>,
+    /// `a:tcStyle > a:tcBdr`。
+    pub borders: TableStyleBorders,
+    /// `a:tcTxStyle` 的直接颜色子元素。
+    pub text_color: Option<ColorSpec>,
+    /// `a:tcTxStyle@b`(`on` / `off`;`def` 或缺失为 `None`)。
+    pub bold: Option<bool>,
+}
+
+/// 一个表格样式(`ppt/tableStyles.xml` 的 `a:tblStyle`),按部件拆开。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TableStyle {
+    pub whole_tbl: TablePartStyle,
+    pub band1_h: TablePartStyle,
+    pub band2_h: TablePartStyle,
+    pub band1_v: TablePartStyle,
+    pub band2_v: TablePartStyle,
+    pub first_row: TablePartStyle,
+    pub last_row: TablePartStyle,
+    pub first_col: TablePartStyle,
+    pub last_col: TablePartStyle,
 }
 
 /// 表格的一行(`a:tr`)。
@@ -362,7 +419,7 @@ pub struct Row {
 }
 
 /// 单元格逐边框线(`a:tcPr > a:lnL/lnR/lnT/lnB`,§3.q)。
-/// `None` 边不画——v1 只画显式边框(`tableStyles.xml` 语义在 v1 之外,PRD §1)。
+/// `None` 边 = 无显式边框(终态取表格样式的对应边,样式也无则不画)。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CellBorders {
     pub left: Option<Stroke>,
@@ -381,6 +438,8 @@ pub struct Cell {
     pub row_span: u32,
     /// 单元格纯色填充(`a:tcPr` > `a:solidFill`)。
     pub fill: Option<ColorSpec>,
+    /// 显式无填充(`a:tcPr` > `a:noFill`):压制表格样式的填充。
+    pub no_fill: bool,
     /// 是否是被合并掉的延续格(`a:tc@hMerge` / `a:tc@vMerge`)。
     pub merged: bool,
     /// 单元格内边距(EMU,`a:tcPr@marL/@marR/@marT/@marB`;缺失 → OOXML 缺省

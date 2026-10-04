@@ -325,6 +325,7 @@ mod tests {
             col_span,
             row_span,
             fill: None,
+            no_fill: false,
             merged,
             mar_l: None,
             mar_r: None,
@@ -355,6 +356,7 @@ mod tests {
             rect: None,
             col_widths: Vec::new(),
             table_style_id: None,
+            flags: crate::model::TableFlags::default(),
             rows: vec![
                 Row {
                     cells: vec![cell("A1", 1, 1, false), cell("B1", 1, 1, false)],
@@ -379,6 +381,7 @@ mod tests {
             rect: None,
             col_widths: Vec::new(),
             table_style_id: None,
+            flags: crate::model::TableFlags::default(),
             rows: vec![
                 Row {
                     // gridSpan=2 表头 + 一个 hMerge 延续格
@@ -431,6 +434,7 @@ mod tests {
             rect: None,
             col_widths: Vec::new(),
             table_style_id: None,
+            flags: crate::model::TableFlags::default(),
             rows: vec![Row {
                 cells: vec![cell("a<b>&c", 2, 1, false), cell("", 1, 1, true)],
                 height: None,

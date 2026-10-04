@@ -187,6 +187,17 @@ fn build_deck_parts(
     layout_xml: &str,
     master_xml: &str,
 ) -> Vec<u8> {
+    build_deck_extra(slide_xml, presentation_extra, layout_xml, master_xml, &[])
+}
+
+/// 同 [`build_deck_parts`],另附额外部件(如 `ppt/tableStyles.xml`)。
+fn build_deck_extra(
+    slide_xml: &str,
+    presentation_extra: &str,
+    layout_xml: &str,
+    master_xml: &str,
+    extra_parts: &[(&str, &str)],
+) -> Vec<u8> {
     let presentation = format!(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:presentation {XMLNS}>
@@ -252,6 +263,10 @@ fn build_deck_parts(
         ),
         ("ppt/theme/theme1.xml", THEME1.into()),
     ];
+    let parts: Vec<(&str, String)> = parts
+        .into_iter()
+        .chain(extra_parts.iter().map(|(n, b)| (*n, (*b).to_string())))
+        .collect();
     let mut buf = Cursor::new(Vec::new());
     {
         let mut zip = ZipWriter::new(&mut buf);
@@ -1282,4 +1297,375 @@ fn show_master_sp_true_is_default() {
 #[test]
 fn placeholder_only_parts_inherit_nothing() {
     assert!(resolve_default().inherited_shapes.is_empty());
+}
+
+// ---- 表格样式(`ppt/tableStyles.xml`)----------------------------------------
+
+/// 测试用表格样式:wholeTbl(accent1 tint20 填充 + 六向边框 + tx2 文字色)、
+/// band1H / band1V / firstCol / lastCol / lastRow / firstRow 各带可辨识的填充;
+/// firstCol 左边框显式 `noFill`;`seCell` 角单元格(不支持,应被跳过)。
+/// `{GRAD}`:wholeTbl 渐变填充(不支持,应被跳过)+ 纯色上边框。
+const TABLE_STYLES: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<a:tblStyleLst xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" def="{TEST-STYLE}">
+  <a:tblStyle styleId="{TEST-STYLE}" styleName="Test Style">
+    <a:wholeTbl>
+      <a:tcTxStyle><a:fontRef idx="minor"><a:prstClr val="black"/></a:fontRef><a:schemeClr val="tx2"/></a:tcTxStyle>
+      <a:tcStyle>
+        <a:tcBdr>
+          <a:left><a:ln w="12700"><a:solidFill><a:srgbClr val="111111"/></a:solidFill></a:ln></a:left>
+          <a:right><a:ln w="12700"><a:solidFill><a:srgbClr val="222222"/></a:solidFill></a:ln></a:right>
+          <a:top><a:ln w="12700"><a:solidFill><a:srgbClr val="333333"/></a:solidFill></a:ln></a:top>
+          <a:bottom><a:ln w="12700"><a:solidFill><a:srgbClr val="444444"/></a:solidFill></a:ln></a:bottom>
+          <a:insideH><a:ln w="6350"><a:solidFill><a:srgbClr val="555555"/></a:solidFill></a:ln></a:insideH>
+          <a:insideV><a:ln w="6350"><a:solidFill><a:srgbClr val="666666"/></a:solidFill></a:ln></a:insideV>
+        </a:tcBdr>
+        <a:fill><a:solidFill><a:schemeClr val="accent1"><a:tint val="20000"/></a:schemeClr></a:solidFill></a:fill>
+      </a:tcStyle>
+    </a:wholeTbl>
+    <a:band1H><a:tcStyle><a:tcBdr/><a:fill><a:solidFill><a:srgbClr val="B1B1B1"/></a:solidFill></a:fill></a:tcStyle></a:band1H>
+    <a:band2H><a:tcStyle><a:tcBdr/></a:tcStyle></a:band2H>
+    <a:band1V><a:tcStyle><a:tcBdr/><a:fill><a:solidFill><a:srgbClr val="C1C1C1"/></a:solidFill></a:fill></a:tcStyle></a:band1V>
+    <a:band2V><a:tcStyle><a:tcBdr/></a:tcStyle></a:band2V>
+    <a:lastCol><a:tcTxStyle b="on"/><a:tcStyle><a:tcBdr/><a:fill><a:solidFill><a:srgbClr val="D2D2D2"/></a:solidFill></a:fill></a:tcStyle></a:lastCol>
+    <a:firstCol>
+      <a:tcTxStyle b="on"/>
+      <a:tcStyle>
+        <a:tcBdr><a:left><a:ln w="12700"><a:noFill/></a:ln></a:left></a:tcBdr>
+        <a:fill><a:solidFill><a:srgbClr val="F1F1F1"/></a:solidFill></a:fill>
+      </a:tcStyle>
+    </a:firstCol>
+    <a:lastRow>
+      <a:tcTxStyle b="on"/>
+      <a:tcStyle>
+        <a:tcBdr><a:top><a:ln w="38100"><a:solidFill><a:srgbClr val="E0E0E0"/></a:solidFill></a:ln></a:top></a:tcBdr>
+        <a:fill><a:solidFill><a:srgbClr val="E1E1E1"/></a:solidFill></a:fill>
+      </a:tcStyle>
+    </a:lastRow>
+    <a:seCell><a:tcStyle><a:fill><a:solidFill><a:srgbClr val="0F0F0F"/></a:solidFill></a:fill></a:tcStyle></a:seCell>
+    <a:firstRow>
+      <a:tcTxStyle b="on"><a:fontRef idx="minor"><a:prstClr val="black"/></a:fontRef><a:schemeClr val="lt1"/></a:tcTxStyle>
+      <a:tcStyle>
+        <a:tcBdr><a:bottom><a:ln w="38100"><a:solidFill><a:schemeClr val="lt1"/></a:solidFill></a:ln></a:bottom></a:tcBdr>
+        <a:fill><a:solidFill><a:schemeClr val="accent1"/></a:solidFill></a:fill>
+      </a:tcStyle>
+    </a:firstRow>
+  </a:tblStyle>
+  <a:tblStyle styleId="{GRAD}" styleName="Gradient">
+    <a:wholeTbl>
+      <a:tcStyle>
+        <a:tcBdr><a:top><a:ln w="12700"><a:solidFill><a:srgbClr val="777777"/></a:solidFill></a:ln></a:top></a:tcBdr>
+        <a:fill><a:gradFill><a:gsLst><a:gs pos="0"><a:srgbClr val="FF0000"/></a:gs></a:gsLst></a:gradFill></a:fill>
+      </a:tcStyle>
+    </a:wholeTbl>
+  </a:tblStyle>
+</a:tblStyleLst>"#;
+
+/// `nrows × ncols` 的纯文本单元格行(无 `tcPr`),文字 `r{行}c{列}`。
+fn plain_rows(nrows: usize, ncols: usize) -> String {
+    (0..nrows)
+        .map(|r| {
+            let cells: String = (0..ncols)
+                .map(|c| format!(r#"<a:tc><a:txBody><a:p><a:r><a:t>r{r}c{c}</a:t></a:r></a:p></a:txBody></a:tc>"#))
+                .collect();
+            format!(r#"<a:tr h="100">{cells}</a:tr>"#)
+        })
+        .collect()
+}
+
+/// 一张带给定 `a:tblPr`(原样)与行 XML 的表格 slide。
+fn styled_table_slide(tbl_pr: &str, ncols: usize, rows_xml: &str) -> String {
+    let grid: String = (0..ncols).map(|_| r#"<a:gridCol w="100"/>"#).collect();
+    slide_with(
+        &format!(
+            r#"<p:graphicFrame>
+        <p:xfrm><a:off x="0" y="0"/><a:ext cx="1000" cy="1000"/></p:xfrm>
+        <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table">
+          <a:tbl>{tbl_pr}<a:tblGrid>{grid}</a:tblGrid>{rows_xml}</a:tbl>
+        </a:graphicData></a:graphic>
+      </p:graphicFrame>"#
+        ),
+        "",
+    )
+}
+
+/// 解析 + 继承链解析,返回唯一表格;`table_styles` 为 `ppt/tableStyles.xml` 内容(`None` = 部件缺失)。
+fn resolve_styled_table(
+    slide_xml: &str,
+    table_styles: Option<&str>,
+) -> ppt_core::resolved::ResolvedTable {
+    let extra: Vec<(&str, &str)> = table_styles
+        .map(|x| vec![("ppt/tableStyles.xml", x)])
+        .unwrap_or_default();
+    let deck = build_deck_extra(slide_xml, "", &layout1(), &master1(), &extra);
+    let parsed = parse_bytes(&deck).expect("parse deck");
+    let slide = resolve(&parsed)
+        .slides
+        .into_iter()
+        .next()
+        .expect("one slide");
+    match slide.shapes.into_iter().next() {
+        Some(ResolvedShape::Table(t)) => t,
+        other => panic!("expected table, got {other:?}"),
+    }
+}
+
+/// wholeTbl 填充色:accent1(4472C4)tint 20%(变换数学已由金标测试覆盖,这里只验接线)。
+fn whole_tbl_fill() -> [u8; 3] {
+    use ppt_core::color::{apply_transforms, ColorTransform};
+    apply_transforms([0x44, 0x72, 0xC4], &[ColorTransform::Tint(20_000)]).rgb
+}
+
+fn cell_fill(t: &ppt_core::resolved::ResolvedTable, r: usize, c: usize) -> Option<[u8; 3]> {
+    t.rows[r].cells[c].fill.map(|f| f.rgb)
+}
+
+fn edge_rgb(s: &Option<ppt_core::resolved::ResolvedStroke>) -> Option<[u8; 3]> {
+    s.as_ref().and_then(|s| s.color).map(|c| c.rgb)
+}
+
+fn first_run(t: &ppt_core::resolved::ResolvedTable, r: usize, c: usize) -> &ResolvedRunAlias {
+    &t.rows[r].cells[c].paragraphs[0].runs[0]
+}
+
+type ResolvedRunAlias = ppt_core::resolved::ResolvedRun;
+
+/// 纯 wholeTbl(无开关):填充 / 文字色落到每格;外沿取 left/right/top/bottom,
+/// 格间取 insideH / insideV。
+#[test]
+fn table_style_whole_tbl_applies_fill_borders_and_text() {
+    let xml = styled_table_slide(
+        r#"<a:tblPr><a:tableStyleId>{TEST-STYLE}</a:tableStyleId></a:tblPr>"#,
+        2,
+        &plain_rows(2, 2),
+    );
+    let t = resolve_styled_table(&xml, Some(TABLE_STYLES));
+    assert!(t.style_resolved, "styleId 找到即标记已解析");
+    for r in 0..2 {
+        for c in 0..2 {
+            assert_eq!(
+                cell_fill(&t, r, c),
+                Some(whole_tbl_fill()),
+                "({r},{c}) wholeTbl 填充"
+            );
+            let run = first_run(&t, r, c);
+            assert_eq!(run.color.rgb, [0x44, 0x54, 0x6A], "tx2 -> dk2 文字色");
+            assert!(!run.bold);
+        }
+    }
+    let b00 = &t.rows[0].cells[0].borders;
+    assert_eq!(edge_rgb(&b00.left), Some([0x11; 3]), "外沿左");
+    assert_eq!(edge_rgb(&b00.top), Some([0x33; 3]), "外沿上");
+    assert_eq!(edge_rgb(&b00.right), Some([0x66; 3]), "格间竖线 insideV");
+    assert_eq!(edge_rgb(&b00.bottom), Some([0x55; 3]), "格间横线 insideH");
+    assert_eq!(b00.left.as_ref().and_then(|s| s.width_emu), Some(12_700));
+    let b11 = &t.rows[1].cells[1].borders;
+    assert_eq!(edge_rgb(&b11.right), Some([0x22; 3]), "外沿右");
+    assert_eq!(edge_rgb(&b11.bottom), Some([0x44; 3]), "外沿下");
+    assert_eq!(edge_rgb(&b11.left), Some([0x66; 3]));
+    assert_eq!(edge_rgb(&b11.top), Some([0x55; 3]));
+}
+
+/// firstRow + bandRow:表头行不计入行带计数——第 1 行是 band1H,第 2 行 band2H(无填充 →
+/// 露出 wholeTbl),第 3 行又是 band1H;表头取 firstRow 填充 / 白字 / 粗体 / 下边框。
+#[test]
+fn table_style_first_row_and_band_row_zebra_skip_header() {
+    let xml = styled_table_slide(
+        r#"<a:tblPr firstRow="1" bandRow="1"><a:tableStyleId>{TEST-STYLE}</a:tableStyleId></a:tblPr>"#,
+        2,
+        &plain_rows(4, 2),
+    );
+    let t = resolve_styled_table(&xml, Some(TABLE_STYLES));
+    for c in 0..2 {
+        assert_eq!(
+            cell_fill(&t, 0, c),
+            Some([0x44, 0x72, 0xC4]),
+            "表头 accent1"
+        );
+        let run = first_run(&t, 0, c);
+        assert_eq!(run.color.rgb, [0xFF; 3], "表头 lt1 文字");
+        assert!(run.bold, "表头 b=on");
+        let b = &t.rows[0].cells[c].borders;
+        assert_eq!(edge_rgb(&b.bottom), Some([0xFF; 3]), "firstRow 下边框");
+        assert_eq!(b.bottom.as_ref().and_then(|s| s.width_emu), Some(38_100));
+        assert_eq!(
+            edge_rgb(&b.top),
+            Some([0x33; 3]),
+            "firstRow 未指定上边 → wholeTbl 外沿"
+        );
+        assert_eq!(cell_fill(&t, 1, c), Some([0xB1; 3]), "第 1 行 band1H");
+        assert_eq!(
+            cell_fill(&t, 2, c),
+            Some(whole_tbl_fill()),
+            "第 2 行 band2H 无填充"
+        );
+        assert_eq!(cell_fill(&t, 3, c), Some([0xB1; 3]), "第 3 行 band1H");
+        for r in 1..4 {
+            let run = first_run(&t, r, c);
+            assert_eq!(run.color.rgb, [0x44, 0x54, 0x6A]);
+            assert!(!run.bold, "({r},{c}) 非表头不加粗");
+        }
+    }
+    // 行带区域是单行:band1H 未给边框 → 仍是 wholeTbl 的格间横线。
+    assert_eq!(edge_rgb(&t.rows[1].cells[0].borders.top), Some([0x55; 3]));
+}
+
+/// bandCol:列带交替(band1V / band2V);未开 bandRow 时行带不生效。
+#[test]
+fn table_style_band_col_alternates_columns() {
+    let xml = styled_table_slide(
+        r#"<a:tblPr bandCol="1"><a:tableStyleId>{TEST-STYLE}</a:tableStyleId></a:tblPr>"#,
+        3,
+        &plain_rows(2, 3),
+    );
+    let t = resolve_styled_table(&xml, Some(TABLE_STYLES));
+    for r in 0..2 {
+        assert_eq!(cell_fill(&t, r, 0), Some([0xC1; 3]), "band1V");
+        assert_eq!(cell_fill(&t, r, 1), Some(whole_tbl_fill()), "band2V 无填充");
+        assert_eq!(cell_fill(&t, r, 2), Some([0xC1; 3]), "band1V");
+    }
+}
+
+/// 优先级:band < firstCol < lastRow;firstCol 的显式 noFill 左边框压制 wholeTbl 外沿;
+/// lastRow 上边框(区域外沿)覆盖 wholeTbl 的格间横线;角单元格 `seCell` 被跳过。
+#[test]
+fn table_style_first_col_last_row_priority() {
+    let xml = styled_table_slide(
+        r#"<a:tblPr firstCol="1" lastRow="1" bandRow="1"><a:tableStyleId>{TEST-STYLE}</a:tableStyleId></a:tblPr>"#,
+        2,
+        &plain_rows(3, 2),
+    );
+    let t = resolve_styled_table(&xml, Some(TABLE_STYLES));
+    assert_eq!(cell_fill(&t, 0, 0), Some([0xF1; 3]), "firstCol 胜过 band1H");
+    assert_eq!(
+        cell_fill(&t, 0, 1),
+        Some([0xB1; 3]),
+        "无 firstRow:第 0 行即 band1H"
+    );
+    assert_eq!(cell_fill(&t, 1, 0), Some([0xF1; 3]));
+    assert_eq!(cell_fill(&t, 1, 1), Some(whole_tbl_fill()), "band2H 无填充");
+    assert_eq!(
+        cell_fill(&t, 2, 0),
+        Some([0xE1; 3]),
+        "lastRow 胜过 firstCol"
+    );
+    assert_eq!(
+        cell_fill(&t, 2, 1),
+        Some([0xE1; 3]),
+        "lastRow 胜过 seCell(不支持,跳过)"
+    );
+    assert!(first_run(&t, 1, 0).bold, "firstCol b=on");
+    assert!(!first_run(&t, 1, 1).bold);
+    assert!(
+        t.rows[0].cells[0].borders.left.is_none(),
+        "firstCol 显式 noFill 左边框"
+    );
+    assert!(
+        t.rows[2].cells[0].borders.left.is_none(),
+        "lastRow 未指定左边 → 保留 firstCol 的无线"
+    );
+    let top = &t.rows[2].cells[1].borders.top;
+    assert_eq!(edge_rgb(top), Some([0xE0; 3]), "lastRow 上边框");
+    assert_eq!(top.as_ref().and_then(|s| s.width_emu), Some(38_100));
+}
+
+/// 显式 `tcPr` / run 属性永远胜出:solidFill / noFill / lnB / rPr 颜色与粗体。
+#[test]
+fn explicit_tcpr_overrides_table_style() {
+    let rows = r#"<a:tr h="100">
+        <a:tc>
+          <a:txBody><a:p><a:r><a:rPr b="0"><a:solidFill><a:srgbClr val="0000FF"/></a:solidFill></a:rPr><a:t>x</a:t></a:r></a:p></a:txBody>
+          <a:tcPr>
+            <a:lnB w="9525"><a:solidFill><a:srgbClr val="00FF00"/></a:solidFill></a:lnB>
+            <a:solidFill><a:srgbClr val="FF0000"/></a:solidFill>
+          </a:tcPr>
+        </a:tc>
+        <a:tc><a:txBody><a:p><a:r><a:t>y</a:t></a:r></a:p></a:txBody><a:tcPr><a:noFill/></a:tcPr></a:tc>
+      </a:tr>"#;
+    let xml = styled_table_slide(
+        r#"<a:tblPr firstRow="1"><a:tableStyleId>{TEST-STYLE}</a:tableStyleId></a:tblPr>"#,
+        2,
+        &format!("{rows}{}", plain_rows(1, 2)),
+    );
+    let t = resolve_styled_table(&xml, Some(TABLE_STYLES));
+    assert_eq!(
+        cell_fill(&t, 0, 0),
+        Some([0xFF, 0x00, 0x00]),
+        "显式 solidFill 胜"
+    );
+    assert_eq!(cell_fill(&t, 0, 1), None, "显式 noFill 压制样式填充");
+    let b = &t.rows[0].cells[0].borders;
+    assert_eq!(edge_rgb(&b.bottom), Some([0x00, 0xFF, 0x00]), "显式 lnB 胜");
+    assert_eq!(b.bottom.as_ref().and_then(|s| s.width_emu), Some(9_525));
+    assert_eq!(edge_rgb(&b.left), Some([0x11; 3]), "未显式的边仍取样式");
+    let run = first_run(&t, 0, 0);
+    assert!(!run.bold, "rPr b=0 胜过 firstRow b=on");
+    assert_eq!(run.color.rgb, [0x00, 0x00, 0xFF], "rPr 颜色胜过样式文字色");
+    let run = first_run(&t, 0, 1);
+    assert!(run.bold, "无显式 run 属性 → 样式粗体");
+    assert_eq!(run.color.rgb, [0xFF; 3]);
+    assert_eq!(cell_fill(&t, 1, 0), Some(whole_tbl_fill()));
+}
+
+/// styleId 找不到 / `tableStyles.xml` 缺失:退回旧行为(只用显式属性),标记未解析。
+#[test]
+fn table_style_missing_falls_back_to_explicit_only() {
+    let rows = r#"<a:tr h="100">
+        <a:tc><a:txBody><a:p><a:r><a:t>x</a:t></a:r></a:p></a:txBody>
+          <a:tcPr><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:tcPr></a:tc>
+        <a:tc><a:txBody><a:p><a:r><a:t>y</a:t></a:r></a:p></a:txBody></a:tc>
+      </a:tr>"#;
+    for (id, styles) in [("{NOPE}", Some(TABLE_STYLES)), ("{TEST-STYLE}", None)] {
+        let xml = styled_table_slide(
+            &format!(
+                r#"<a:tblPr firstRow="1" bandRow="1"><a:tableStyleId>{id}</a:tableStyleId></a:tblPr>"#
+            ),
+            2,
+            rows,
+        );
+        let t = resolve_styled_table(&xml, styles);
+        assert_eq!(t.table_style_id.as_deref(), Some(id));
+        assert!(!t.style_resolved, "{id}: 未解析");
+        assert_eq!(
+            cell_fill(&t, 0, 0),
+            Some([0xFF, 0x00, 0x00]),
+            "显式填充保留"
+        );
+        assert_eq!(cell_fill(&t, 0, 1), None, "无样式填充");
+        let b = &t.rows[0].cells[1].borders;
+        assert!(b.left.is_none() && b.right.is_none() && b.top.is_none() && b.bottom.is_none());
+        let run = first_run(&t, 0, 1);
+        assert_eq!(run.color.rgb, [0, 0, 0], "文字色回到旧链兜底");
+        assert!(!run.bold);
+    }
+}
+
+/// 不支持的填充(渐变)跳过该项,其余部分(边框)照常生效。
+#[test]
+fn table_style_unsupported_gradient_fill_is_skipped() {
+    let xml = styled_table_slide(
+        r#"<a:tblPr><a:tableStyleId>{GRAD}</a:tableStyleId></a:tblPr>"#,
+        1,
+        &plain_rows(1, 1),
+    );
+    let t = resolve_styled_table(&xml, Some(TABLE_STYLES));
+    assert!(t.style_resolved);
+    assert_eq!(cell_fill(&t, 0, 0), None, "渐变填充跳过");
+    assert_eq!(edge_rgb(&t.rows[0].cells[0].borders.top), Some([0x77; 3]));
+}
+
+/// 畸形 `tableStyles.xml`(截断 / 非 XML 垃圾)绝不 panic;垃圾输入找不到样式 → 降级。
+#[test]
+fn malformed_table_styles_never_panics() {
+    let xml = styled_table_slide(
+        r#"<a:tblPr firstRow="1"><a:tableStyleId>{TEST-STYLE}</a:tableStyleId></a:tblPr>"#,
+        2,
+        &plain_rows(2, 2),
+    );
+    let truncated = &TABLE_STYLES[..TABLE_STYLES.len() / 2];
+    let t = resolve_styled_table(&xml, Some(truncated));
+    assert_eq!(t.rows.len(), 2, "截断部件:表格照常解析");
+    let garbage = "\u{0}<<<not xml </a:tblStyle> <a:tblStyle styleId=";
+    let t = resolve_styled_table(&xml, Some(garbage));
+    assert!(!t.style_resolved, "垃圾部件:找不到样式");
+    assert_eq!(cell_fill(&t, 0, 0), None);
 }

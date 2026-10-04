@@ -281,7 +281,8 @@ fn shape_ops(
 
 /// B-7:表格 → 单元格网格。列宽按 `col_widths` 比例铺满表格矩形;行高按声明值
 /// 比例铺满(全缺省时等分);单元格填充 / 文字(用 `tcPr` 内边距 + 锚定)/ 逐边框线;
-/// `gridSpan` 横跨、`rowSpan` 纵跨(合并延续格跳过绘制)。`tableStyleId` 记一次降级。
+/// `gridSpan` 横跨、`rowSpan` 纵跨(合并延续格跳过绘制)。表格样式已在解析层合进单元格
+/// 终态;`tableStyleId` 未解析(找不到 / 部件缺失)时记一次降级。
 fn table_ops(
     ts: &mut Typesetter,
     ctx: &mut RenderCtx<'_>,
@@ -292,10 +293,10 @@ fn table_ops(
     let Some(rect) = table.rect else {
         return;
     };
-    if table.table_style_id.is_some() {
+    if table.table_style_id.is_some() && !table.style_resolved {
         ctx.warnings.push(ExportWarning::Custom {
             kind: "table-style".to_string(),
-            detail: "tableStyle 主题语义 v1 未实现;仅绘制直接填充 / 边框".to_string(),
+            detail: "tableStyleId 在 tableStyles.xml 中找不到;仅绘制直接填充 / 边框".to_string(),
         });
     }
     let r = flat.map_emu_rect(rect);
@@ -652,6 +653,7 @@ mod tests {
             rect: Some(Rect::new(0, 0, 6_000_000, 2_000_000)),
             col_widths: vec![3_000_000, 3_000_000],
             table_style_id: None,
+            style_resolved: false,
             rows: vec![ResolvedRow {
                 cells: vec![
                     mk_cell("A1", Some(ResolvedColor::opaque([0, 0, 255]))),
@@ -666,6 +668,44 @@ mod tests {
         assert!(hay.contains("0 0 1 rg"), "cell blue fill missing");
         // 单元格文字经引擎排版(BT/ET 文本块存在)。
         assert!(hay.contains("BT"), "table cell text missing");
+    }
+
+    /// `table-style` 降级告警只在 styleId 未解析(找不到 / 部件缺失)时发;已解析不告警。
+    #[test]
+    fn table_style_warning_only_when_unresolved() {
+        use ppt_core::resolved::{ResolvedCell, ResolvedCellBorders, ResolvedRow, ResolvedTable};
+        let table = |resolved: bool| {
+            ResolvedShape::Table(ResolvedTable {
+                rect: Some(Rect::new(0, 0, 6_000_000, 2_000_000)),
+                col_widths: vec![6_000_000],
+                table_style_id: Some("{X}".into()),
+                style_resolved: resolved,
+                rows: vec![ResolvedRow {
+                    cells: vec![ResolvedCell {
+                        paragraphs: vec![para("A1")],
+                        col_span: 1,
+                        row_span: 1,
+                        fill: None,
+                        merged: false,
+                        mar_l: 91_440,
+                        mar_r: 91_440,
+                        mar_t: 45_720,
+                        mar_b: 45_720,
+                        anchor: ppt_core::resolved::ResolvedAnchor::Top,
+                        borders: ResolvedCellBorders::default(),
+                    }],
+                    height: Some(2_000_000),
+                }],
+            })
+        };
+        let warned = |resolved: bool| {
+            render(&one_slide(vec![table(resolved)]))
+                .warnings
+                .iter()
+                .any(|w| matches!(w, ExportWarning::Custom { kind, .. } if kind == "table-style"))
+        };
+        assert!(warned(false), "未解析的 styleId 必须告警");
+        assert!(!warned(true), "已解析的样式不告警");
     }
 
     #[test]
@@ -689,6 +729,7 @@ mod tests {
             rect: Some(Rect::new(0, 0, 6_000_000, 2_000_000)),
             col_widths: vec![],
             table_style_id: None,
+            style_resolved: false,
             rows: vec![ResolvedRow {
                 cells: vec![
                     mk_cell("A1", Some(ResolvedColor::opaque([0, 0, 255]))),
@@ -745,6 +786,7 @@ mod tests {
             rect: Some(Rect::new(0, 0, 4_000_000, 1_500_000)),
             col_widths: vec![4_000_000],
             table_style_id: None,
+            style_resolved: false,
             rows: vec![ResolvedRow {
                 cells: vec![cell],
                 height: Some(1_500_000),
@@ -779,6 +821,7 @@ mod tests {
             rect: Some(Rect::new(0, 0, 2_540_000, 127_000)), // 200 × 10 pt
             col_widths: vec![2_540_000],
             table_style_id: None,
+            style_resolved: false,
             rows: vec![ResolvedRow {
                 cells: vec![cell],
                 height: Some(127_000), // 声明仅 10pt
@@ -821,6 +864,7 @@ mod tests {
             rect: Some(Rect::new(0, 0, 2_540_000, 254_000)),
             col_widths: vec![2_540_000],
             table_style_id: None,
+            style_resolved: false,
             rows: vec![
                 // 行 0:rowSpan=2 的长内容格;行 1:合并延续格(跳过)。两行均无声明高。
                 ResolvedRow {

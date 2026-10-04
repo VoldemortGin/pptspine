@@ -13,7 +13,7 @@ mod zip_pkg;
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use ppt_core::model::{Background, DocProperties, Presentation, Section, Shape, Slide};
+use ppt_core::model::{Background, DocProperties, Presentation, Section, Shape, Slide, TableStyle};
 use ppt_core::style::{TextStyleLevels, TxStyles};
 use ppt_core::theme::{ClrMap, Theme};
 use ppt_core::{PptError, Result};
@@ -41,6 +41,8 @@ pub struct InheritanceParts {
     pub themes: BTreeMap<String, Theme>,
     /// `presentation.xml` 的 `p:defaultTextStyle`(非占位符文本框的继承基底)。
     pub default_text_style: Option<TextStyleLevels>,
+    /// `ppt/tableStyles.xml` 的表格样式(键为 `a:tblStyle@styleId`);部件缺失 / 畸形时为空。
+    pub table_styles: BTreeMap<String, TableStyle>,
 }
 
 /// 一个已解析的 slideLayout 部件。
@@ -176,7 +178,8 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
     }
 
     // 6) 继承链部件:slide 引用的 layout -> master -> theme(按裸名去重,B-8/B-9)。
-    let inherit = collect_inheritance(&pkg, &slides, meta.default_text_style, &media_index);
+    let mut inherit = collect_inheritance(&pkg, &slides, meta.default_text_style, &media_index);
+    inherit.table_styles = collect_table_styles(&pkg, &pres_rels);
 
     // 7) 节(`sldId@id` → 幻灯片序号)与文档属性。
     let sections = resolve_sections(&meta.sections, &meta.slide_ids, &pres_rels, &part_index);
@@ -264,6 +267,22 @@ fn collect_inheritance(
         }
     }
     inherit
+}
+
+/// 表格样式部件:经 presentation rels 的 `tableStyles` 关系定位(缺失回退到惯例路径
+/// `ppt/tableStyles.xml`);部件缺失 / 畸形时返回空表(表格退回只用显式属性)。
+fn collect_table_styles(
+    pkg: &Package,
+    pres_rels: &BTreeMap<String, xml::Relationship>,
+) -> BTreeMap<String, TableStyle> {
+    let part = pres_rels
+        .values()
+        .find(|r| r.rel_type.ends_with("/tableStyles"))
+        .map(|r| xml::normalize_target(&r.target))
+        .unwrap_or_else(|| "ppt/tableStyles.xml".to_string());
+    pkg.part_str(&part)
+        .map(|x| xml::table_style::parse(&x))
+        .unwrap_or_default()
 }
 
 /// 节的 `sldId@id` 列表 → 幻灯片序号(经 `@id → r:id → 部件 → 序号`;解析不出的 id 丢弃)。

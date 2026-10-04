@@ -223,8 +223,11 @@ pub struct ResolvedTable {
     pub rect: Option<Rect>,
     pub col_widths: Vec<Emu>,
     pub rows: Vec<ResolvedRow>,
-    /// `tableStyleId`(v1 不解析样式语义;渲染侧据此记一次降级告警,PRD §1)。
+    /// `tableStyleId`(原样保留)。
     pub table_style_id: Option<String>,
+    /// `table_style_id` 是否在 `tableStyles.xml` 中找到并已合进单元格终态;
+    /// 有 id 却为 `false` 时渲染侧记一次 `table-style` 降级告警。
+    pub style_resolved: bool,
 }
 
 /// 已解析的表格行。
