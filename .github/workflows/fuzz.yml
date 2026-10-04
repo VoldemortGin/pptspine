@@ -32,7 +32,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [parse_pptx, parse_slide_xml, render_pdf]
+        target: [parse_pptx, parse_slide_xml, parse_parts, render_pdf]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly

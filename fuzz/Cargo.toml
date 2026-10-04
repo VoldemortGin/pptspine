@@ -13,6 +13,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+ppt-core = { path = "../crates/ppt-core" }
 ppt-parse = { path = "../crates/ppt-parse" }
 ppt-render = { path = "../crates/ppt-render" }
 zip = { version = "2", default-features = false, features = ["deflate"] }
@@ -34,6 +35,13 @@ bench = false
 [[bin]]
 name = "render_pdf"
 path = "fuzz_targets/render_pdf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse_parts"
+path = "fuzz_targets/parse_parts.rs"
 test = false
 doc = false
 bench = false

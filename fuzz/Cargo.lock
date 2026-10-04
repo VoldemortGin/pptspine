@@ -600,6 +600,7 @@ name = "pptspine-fuzz"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
+ "ppt-core",
  "ppt-parse",
  "ppt-render",
  "zip",

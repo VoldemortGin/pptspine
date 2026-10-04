@@ -102,15 +102,22 @@ OCRSPINE_MODELS="$(cd ../ocrspine && pwd)/models" \
 cargo run --manifest-path fuzz/Cargo.toml --bin make_seeds       # 现场生成种子到 fuzz/corpus/(已 .gitignore,不落二进制 fixture)
 cargo +nightly fuzz run parse_slide_xml -- -max_total_time=120 -rss_limit_mb=2048
 cargo +nightly fuzz run parse_pptx      -- -max_total_time=120 -rss_limit_mb=2048
+cargo +nightly fuzz run parse_parts     -- -max_total_time=120 -rss_limit_mb=2048
 cargo +nightly fuzz run render_pdf      -- -max_total_time=120 -rss_limit_mb=2048
 ```
 
 - target:`parse_pptx`(任意字节 → `parse_bytes`)、`parse_slide_xml`(字节当 `ppt/slides/slide1.xml`,
-  现场打成最小 pptx,直达 XML 层,收益最大)、`render_pdf`(`PK` 开头按 pptx,否则当 slide1.xml;解析成功再
+  现场打成最小 pptx,直达 XML 层,收益最大)、`parse_parts`(首字节选部件种类 layout / master / theme / chart /
+  tableStyles / notes / comments / diagram drawing / diagram data / presentation,其余字节当该部件 XML,其它部件取
+  最小合法内容;slide 引用全部附属部件)、`render_pdf`(`PK` 开头按 pptx,否则当 slide1.xml;解析成功再
   `resolve` + `render_pdf`;渲染器无"确定性字体"开关,`with_system_fonts` 本就只用内置 Liberation 字体)。
+- 解析成功的 target 末尾都跑 `fuzz/src/lib.rs` 的 `exercise_exports`(`to_text` / `to_markdown` 两种顺序 ×
+  含隐藏页 × 带 / 不带终态 IR,外加 `resolve` 渲染映射)。没有 nightly / cargo-fuzz 时的最小检查:
+  `cargo check --manifest-path fuzz/Cargo.toml --all-targets` + `cargo test --manifest-path fuzz/Cargo.toml --lib`
+  (含按部件截断的确定性冒烟,不是真 fuzz)。
 - 复现 crash:`cargo +nightly fuzz run <target> fuzz/artifacts/<target>/<crash-file>`;最小化:
   `cargo +nightly fuzz tmin <target> <crash-file>`;`RUST_BACKTRACE=1` 看 panic 位置。
-- 修复流程:在对应 crate 最小改动修掉,并往 `crates/ppt-parse/tests/fuzz_regressions.rs`(首次修复时新建;或所属 crate 的
+- 修复流程:在对应 crate 最小改动修掉,并往 `crates/ppt-parse/tests/fuzz_regressions.rs`(已有;或所属 crate 的
   单测)加**现场构造**的回归测试(不提交 crash 二进制)。
 - 新增 target:`fuzz/fuzz_targets/<name>.rs` + `fuzz/Cargo.toml` 加 `[[bin]]` + `fuzz.yml` 的 matrix 加名字
   + `fuzz/seed.rs` 补种子;共用的打包帮助函数放 `fuzz/src/lib.rs`。

@@ -14,7 +14,7 @@ fuzz_target!(|data: &[u8]| {
         ppt_parse::parse_bytes(&pptspine_fuzz::pack_slide_xml(data))
     };
     if let Ok(parsed) = parsed {
-        let resolved = ppt_parse::resolve(&parsed);
+        let resolved = pptspine_fuzz::exercise_exports(&parsed);
         let _ = ppt_render::render_pdf(
             &resolved,
             &parsed.media,

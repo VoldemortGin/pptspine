@@ -1,15 +1,16 @@
 //! 生成种子语料(现场构造,不落二进制 fixture;`fuzz/corpus/` 已 .gitignore)。
 //!
 //! 用法(从仓库根):`cargo run --manifest-path fuzz/Cargo.toml --bin make_seeds`
-//! 写入 `fuzz/corpus/{parse_pptx,parse_slide_xml,render_pdf}/`:
+//! 写入 `fuzz/corpus/{parse_pptx,parse_slide_xml,parse_parts,render_pdf}/`:
 //! - `parse_slide_xml`:裸 `slide1.xml`;
 //! - `parse_pptx`:完整 pptx(含 layout / master / theme / 图片 / 超链接 rels);
+//! - `parse_parts`:`[种类字节] + 该种部件的最小合法 XML`(每种一个);
 //! - `render_pdf`:同 `parse_pptx` 的 pptx 种子 + 裸 `slide1.xml`(见 target 说明)。
 
 use std::fs;
 use std::path::Path;
 
-use pptspine_fuzz::{pack_slide_xml, NS};
+use pptspine_fuzz::{minimal_part, pack_slide_xml, NS, PART_KINDS};
 
 /// `p:spTree` 内容片段,每个对应一类解析路径。
 const TREES: &[(&str, &str)] = &[
@@ -110,6 +111,15 @@ fn main() {
             xml.as_bytes(),
         );
         count += 1;
+    }
+    for kind in 0..PART_KINDS {
+        let mut seed = vec![kind];
+        seed.extend_from_slice(minimal_part(kind).as_bytes());
+        write(
+            &root.join("parse_parts"),
+            &format!("part_{kind}.bin"),
+            &seed,
+        );
     }
     println!("wrote seeds for {count} decks under {}", root.display());
 }
