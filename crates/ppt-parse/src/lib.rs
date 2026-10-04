@@ -117,6 +117,7 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
     let ordered_parts = resolve_slide_order(&meta.slide_rids, &pres_rels, &pkg, limits)?;
 
     let comment_authors = collect_comment_authors(&pkg, &pres_rels);
+    let mut comment_cache = CommentCache::new(limits);
 
     // 5) 逐张解析 slide(`slide_parts[i]` = `slides[i]` 的部件路径与 rels,供链接后处理)。
     let mut slides = Vec::with_capacity(ordered_parts.len());
@@ -154,7 +155,13 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
             background: data.background,
             hidden: data.hidden,
             show_master_sp: data.show_master_sp.unwrap_or(true),
-            comments: collect_comments(&pkg, part, rels_xml.as_deref(), &comment_authors),
+            comments: collect_comments(
+                &pkg,
+                part,
+                rels_xml.as_deref(),
+                &comment_authors,
+                &mut comment_cache,
+            ),
         });
     }
 
@@ -355,19 +362,84 @@ fn collect_comment_authors(
     map
 }
 
+/// 批注解析缓存:键为批注部件路径,值为 `(解析结果, 因上限提前停止)`。多张幻灯片共享同一部件时
+/// 只解析一次;每张幻灯片仍各拿一份拷贝,所以拷贝的条数(含回复)从全局预算
+/// [`ZipLimits::max_comments`] 里扣,缓存只省解析、不省拷贝。
+struct CommentCache {
+    parsed: BTreeMap<String, Option<(Vec<Comment>, bool)>>,
+    left: usize,
+    max: usize,
+}
+
+impl CommentCache {
+    fn new(limits: &ZipLimits) -> Self {
+        CommentCache {
+            parsed: BTreeMap::new(),
+            left: limits.max_comments,
+            max: limits.max_comments,
+        }
+    }
+}
+
+/// 从 `src` 里按预算 `budget`(批注 + 回复合计)拷贝前缀;返回拷贝结果。
+fn take_comments(src: &[Comment], budget: &mut usize) -> Vec<Comment> {
+    let mut out = Vec::new();
+    for c in src {
+        if *budget == 0 {
+            break;
+        }
+        *budget -= 1;
+        let take = c.replies.len().min(*budget);
+        *budget -= take;
+        let mut copy = c.clone();
+        copy.replies.truncate(take);
+        out.push(copy);
+    }
+    out
+}
+
 /// 一张 slide 的批注:其 rels 里所有 `comments` 关系(旧式 / 新式)指向的部件,按 rId 序拼接。
+/// 同一张 slide 内指向同一部件的多条关系只取首条(其余记 [`DiagnosticKind::DuplicateCommentRef`]);
+/// 整个演示文稿的批注总条数(含回复)受 [`ZipLimits::max_comments`] 约束,超出截断并记
+/// [`DiagnosticKind::CommentsTruncated`]。
 fn collect_comments(
     pkg: &Package,
     slide_part: &str,
     slide_rels_xml: Option<&str>,
     authors: &BTreeMap<String, xml::comments::Author>,
+    cache: &mut CommentCache,
 ) -> Vec<Comment> {
     let rels = slide_rels_xml.map(xml::parse_rels).unwrap_or_default();
-    rels.values()
-        .filter(|r| r.rel_type.ends_with("/comments"))
-        .filter_map(|r| pkg.part_str(&links::resolve_part_path(slide_part, &r.target)))
-        .flat_map(|x| xml::comments::parse_comments(&x, authors))
-        .collect()
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut out = Vec::new();
+    for r in rels.values().filter(|r| r.rel_type.ends_with("/comments")) {
+        let path = links::resolve_part_path(slide_part, &r.target);
+        if !seen.insert(path.clone()) {
+            pkg.note(DiagnosticKind::DuplicateCommentRef, &path, 1);
+            continue;
+        }
+        let max = cache.max;
+        let cached = cache
+            .parsed
+            .entry(path.clone())
+            .or_insert_with(|| {
+                pkg.part_str(&path).map(|x| {
+                    let p = xml::comments::parse_comments(&x, authors, max);
+                    (p.comments, p.truncated)
+                })
+            })
+            .as_ref();
+        let Some((comments, stopped)) = cached else {
+            continue;
+        };
+        let want = xml::comments::count_comments(comments);
+        let before = cache.left;
+        out.extend(take_comments(comments, &mut cache.left));
+        if *stopped || before < want {
+            pkg.note(DiagnosticKind::CommentsTruncated, &path, 1);
+        }
+    }
+    out
 }
 
 /// 表格样式部件:经 presentation rels 的 `tableStyles` 关系定位(缺失回退到惯例路径

@@ -26,6 +26,13 @@ pub enum DiagnosticKind {
     /// `a:custGeom` 超过参考线 / 路径 / 命令数预算而降级:渲染按包围盒近似。`part` = 所在部件,
     /// `count` = 被降级的 `custGeom` 数。
     CustomGeometryDegraded,
+    /// 同一张幻灯片的 `.rels` 里有多条 `comments` 关系指向同一批注部件,只保留首次。
+    /// `part` = 被重复引用的批注部件,`count` = 被去掉的重复引用数。
+    DuplicateCommentRef,
+    /// 批注总条数(含回复)超过 `ZipLimits::max_comments`,超出部分被截断。`part` = 被截断的
+    /// 批注部件,`count` = 发生截断的次数(每张受影响的幻灯片记一次;解析在上限处提前停止,
+    /// 被丢弃的确切条数不可知)。
+    CommentsTruncated,
 }
 
 impl DiagnosticKind {
@@ -40,6 +47,8 @@ impl DiagnosticKind {
             DiagnosticKind::SmartArtDegraded => "smartart-degraded",
             DiagnosticKind::ChartDegraded => "chart-degraded",
             DiagnosticKind::CustomGeometryDegraded => "custom-geometry-degraded",
+            DiagnosticKind::DuplicateCommentRef => "duplicate-comment-ref",
+            DiagnosticKind::CommentsTruncated => "comments-truncated",
         }
     }
 }

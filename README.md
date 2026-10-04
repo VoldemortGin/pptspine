@@ -32,7 +32,7 @@ offline, and deterministically via the sibling [`ocrspine`](../ocrspine) crate
 | Pictures: `r:embed` rel → media name; raw bytes via `Presentation.image_bytes()`; alt text `cNvPr@descr` / `@title` / `@name` (`alt_text` / `title` / `name` keys) | parsed |
 | Hyperlinks `a:hlinkClick` (run- and shape-level): external URL via rels, internal jumps (`ppaction://hlinksldjump` / `hlinkshowjump`) → target slide index (`hyperlink` key) | parsed; PDF: run-level external `http` / `https` / `mailto` links → URI link annotations |
 | Placeholders: `p:ph` type/idx on every shape dict (`placeholder` key: `{"type", "idx"}` or `None`) | parsed |
-| Parse diagnostics (`Presentation.diagnostics()`): content silently lost / degraded during parsing is reported as `{kind, part, count}` (never document text) — `xml-truncated` (part XML broken mid-way; the parsed prefix is kept), `nesting-too-deep`, `duplicate-slide-ref`, `missing-part` (relationship to an absent part), `smartart-degraded`, `chart-degraded`, `custom-geometry-degraded`; empty for a clean file | parsed |
+| Parse diagnostics (`Presentation.diagnostics()`): content silently lost / degraded during parsing is reported as `{kind, part, count}` (never document text) — `xml-truncated` (part XML broken mid-way; the parsed prefix is kept), `nesting-too-deep`, `duplicate-slide-ref`, `missing-part` (relationship to an absent part), `smartart-degraded`, `chart-degraded`, `custom-geometry-degraded`, `duplicate-comment-ref`, `comments-truncated`; empty for a clean file | parsed |
 | Hidden slides (`p:sld@show="0"` → `Slide.hidden`), sections (`p14:sectionLst` → `Presentation.sections()`), document properties (`docProps/core.xml` + `app.xml` → `Presentation.core_properties()`) | parsed |
 | Autoshapes: geometry name, fill (solid / gradient / picture / pattern / `grpFill` inherited), stroke, optional text | parsed (best-effort); PDF: picture fills clipped to the shape geometry (`tile` → stretched + `blip-fill-tiled`), pattern → flat mean color + `pattern-fill-degraded` |
 | Groups (`p:grpSp`): recursive | parsed |
@@ -64,14 +64,17 @@ recursing. Rust callers can pass custom limits via `parse_bytes_with_limits` /
 `max_entry_bytes`, `max_total_bytes`, `max_compression_ratio`, `max_name_len`,
 `max_slides` (positive integers; omitted / `None` keeps the default above; zero,
 negative, non-integer or `bool` values raise `ValueError`; a hit still raises
-`PptZipError`). Three further *expansion budgets* are counted across the whole
+`PptZipError`). Four further *expansion budgets* are counted across the whole
 deck (every frame that re-uses the same SmartArt / chart part is charged again, so
 a tiny file cannot fan one part out into gigabytes): `max_diagram_shapes`
 (shapes expanded from SmartArt drawings, default 100,000), `max_diagram_text_bytes`
 (SmartArt text bytes, default 8 MiB) and `max_chart_points` (chart data points,
-default 1,000,000). A frame that would exceed a budget is degraded to a
+default 1,000,000) and `max_comments` (comments including replies, default
+100,000). A frame that would exceed a SmartArt / chart budget is degraded to a
 placeholder box and recorded as a `smartart-degraded` / `chart-degraded`
-diagnostic instead of raising. E.g. `pptspine.open_bytes(untrusted, max_slides=200, max_total_bytes=64 * 2**20)`.
+diagnostic instead of raising; comments past `max_comments` are cut off and
+recorded as `comments-truncated`. A comments part referenced several times by
+one slide is read once (`duplicate-comment-ref`). E.g. `pptspine.open_bytes(untrusted, max_slides=200, max_total_bytes=64 * 2**20)`.
 
 ## Install
 

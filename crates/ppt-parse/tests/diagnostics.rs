@@ -376,6 +376,8 @@ fn codes_are_stable_kebab_case() {
         SmartArtDegraded,
         ChartDegraded,
         CustomGeometryDegraded,
+        DuplicateCommentRef,
+        CommentsTruncated,
     ]
     .iter()
     .map(|k| k.code())
@@ -389,7 +391,9 @@ fn codes_are_stable_kebab_case() {
             "missing-part",
             "smartart-degraded",
             "chart-degraded",
-            "custom-geometry-degraded"
+            "custom-geometry-degraded",
+            "duplicate-comment-ref",
+            "comments-truncated"
         ]
     );
 }

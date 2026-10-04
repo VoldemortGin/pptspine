@@ -6,7 +6,8 @@ use std::io::{Cursor, Write};
 
 use ppt_core::export::{presentation_markdown_with, presentation_text_with, ExportOptions};
 use ppt_core::model::Comment;
-use ppt_parse::{parse_bytes, resolve};
+use ppt_core::DiagnosticKind;
+use ppt_parse::{parse_bytes, parse_bytes_with_limits, resolve, ZipLimits};
 use zip::write::SimpleFileOptions;
 use zip::ZipWriter;
 
@@ -236,4 +237,157 @@ fn default_exports_exclude_comment_text() {
             assert!(!out.contains(secret), "{secret} leaked into export: {out}");
         }
     }
+}
+
+// --- 放大攻击:同一批注部件被重复 / 共享引用,总条数必须有界 ---
+
+/// `n_slides` 张幻灯片,每张的 rels 里有 `rels_per_slide` 条指向同一批注部件的 comments 关系。
+fn shared_deck(n_slides: usize, rels_per_slide: usize, comment_part: &str) -> Vec<u8> {
+    let mut parts: Vec<(String, String)> = Vec::new();
+    let ids: String = (1..=n_slides)
+        .map(|i| format!(r#"<p:sldId id="{}" r:id="rId{i}"/>"#, 255 + i))
+        .collect();
+    parts.push((
+        "ppt/presentation.xml".into(),
+        format!(
+            r#"<p:presentation {NS}><p:sldIdLst>{ids}</p:sldIdLst><p:sldSz cx="9144000" cy="6858000"/></p:presentation>"#
+        ),
+    ));
+    let pres_rels: Vec<(String, String, String)> = (1..=n_slides)
+        .map(|i| {
+            (
+                format!("rId{i}"),
+                format!("{REL}/slide"),
+                format!("slides/slide{i}.xml"),
+            )
+        })
+        .collect();
+    let rel_xml = |items: &[(String, String, String)]| {
+        let body: String = items
+            .iter()
+            .map(|(id, ty, t)| format!(r#"<Relationship Id="{id}" Type="{ty}" Target="{t}"/>"#))
+            .collect();
+        format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{body}</Relationships>"#
+        )
+    };
+    parts.push((
+        "ppt/_rels/presentation.xml.rels".into(),
+        rel_xml(&pres_rels),
+    ));
+    let slide_rels: Vec<(String, String, String)> = (0..rels_per_slide)
+        .map(|i| {
+            (
+                format!("rId{i}"),
+                format!("{REL}/comments"),
+                "../comments/comment1.xml".to_string(),
+            )
+        })
+        .collect();
+    for i in 1..=n_slides {
+        parts.push((
+            format!("ppt/slides/slide{i}.xml"),
+            format!(r#"<p:sld {NS}><p:cSld><p:spTree/></p:cSld></p:sld>"#),
+        ));
+        parts.push((
+            format!("ppt/slides/_rels/slide{i}.xml.rels"),
+            rel_xml(&slide_rels),
+        ));
+    }
+    parts.push(("ppt/comments/comment1.xml".into(), comment_part.to_string()));
+    let mut buf = Cursor::new(Vec::new());
+    {
+        let mut zip = ZipWriter::new(&mut buf);
+        for (name, body) in &parts {
+            zip.start_file(name.as_str(), SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(body.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+    buf.into_inner()
+}
+
+fn diag(p: &ppt_parse::ParsedPptx, kind: DiagnosticKind) -> Vec<(String, usize)> {
+    p.presentation
+        .diagnostics
+        .iter()
+        .filter(|d| d.kind == kind)
+        .map(|d| (d.part.clone(), d.count))
+        .collect()
+}
+
+#[test]
+fn same_part_referenced_by_50_rels_is_read_once_per_slide() {
+    let p = parse_bytes(&shared_deck(1, 50, LEGACY)).unwrap();
+    assert_eq!(p.presentation.slides[0].comments.len(), 3);
+    assert_eq!(
+        diag(&p, DiagnosticKind::DuplicateCommentRef),
+        [("ppt/comments/comment1.xml".to_string(), 49)]
+    );
+}
+
+#[test]
+fn part_shared_across_slides_is_cached_and_each_slide_still_gets_it() {
+    let p = parse_bytes(&shared_deck(3, 1, LEGACY)).unwrap();
+    for s in &p.presentation.slides {
+        assert_eq!(s.comments.len(), 3);
+        assert_eq!(s.comments, p.presentation.slides[0].comments);
+    }
+    assert!(diag(&p, DiagnosticKind::DuplicateCommentRef).is_empty());
+    assert!(diag(&p, DiagnosticKind::CommentsTruncated).is_empty());
+}
+
+#[test]
+fn total_comment_budget_truncates_across_slides_and_records_diagnostic() {
+    // 3 张幻灯片 × 3 条 = 9;预算 7 => 3 + 3 + 1。
+    let limits = ZipLimits {
+        max_comments: 7,
+        ..ZipLimits::default()
+    };
+    let p = parse_bytes_with_limits(&shared_deck(3, 1, LEGACY), &limits).unwrap();
+    let counts: Vec<usize> = p
+        .presentation
+        .slides
+        .iter()
+        .map(|s| s.comments.len())
+        .collect();
+    assert_eq!(counts, [3, 3, 1]);
+    assert_eq!(
+        diag(&p, DiagnosticKind::CommentsTruncated),
+        [("ppt/comments/comment1.xml".to_string(), 1)]
+    );
+}
+
+#[test]
+fn comment_budget_stops_parsing_a_huge_part_and_counts_replies() {
+    // 单个部件 1 000 条,预算 10 => 只保留 10 条;回复也计数(1 条批注 + 2 条回复,预算 2)。
+    let many = format!(
+        r#"<p:cmLst xmlns:p="urn:p">{}</p:cmLst>"#,
+        r#"<p:cm authorId="0"><p:text>x</p:text></p:cm>"#.repeat(1_000)
+    );
+    let limits = ZipLimits {
+        max_comments: 10,
+        ..ZipLimits::default()
+    };
+    let p = parse_bytes_with_limits(&shared_deck(1, 1, &many), &limits).unwrap();
+    assert_eq!(p.presentation.slides[0].comments.len(), 10);
+    assert_eq!(diag(&p, DiagnosticKind::CommentsTruncated).len(), 1);
+
+    let threaded = format!(
+        r#"<p188:cmLst xmlns:p188="{P188}"><p188:cm><p188:replyLst><p188:reply/><p188:reply/></p188:replyLst></p188:cm></p188:cmLst>"#
+    );
+    let limits = ZipLimits {
+        max_comments: 2,
+        ..ZipLimits::default()
+    };
+    let p = parse_bytes_with_limits(&shared_deck(1, 1, &threaded), &limits).unwrap();
+    let c = &p.presentation.slides[0].comments;
+    assert_eq!((c.len(), c[0].replies.len()), (1, 1));
+    assert_eq!(diag(&p, DiagnosticKind::CommentsTruncated).len(), 1);
+}
+
+#[test]
+fn defaults_for_comment_budget() {
+    assert_eq!(ZipLimits::default().max_comments, 100_000);
 }

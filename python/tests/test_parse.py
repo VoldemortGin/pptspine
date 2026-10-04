@@ -233,6 +233,7 @@ _LIMIT_KWARGS = (
     "max_diagram_shapes",
     "max_diagram_text_bytes",
     "max_chart_points",
+    "max_comments",
 )
 
 

@@ -851,6 +851,7 @@ fn zip_limits(
     max_diagram_shapes: Option<&Bound<'_, PyAny>>,
     max_diagram_text_bytes: Option<&Bound<'_, PyAny>>,
     max_chart_points: Option<&Bound<'_, PyAny>>,
+    max_comments: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<ZipLimits> {
     let mut l = ZipLimits::default();
     let too_big = |name: &str| PyValueError::new_err(format!("{name} is too large"));
@@ -882,6 +883,9 @@ fn zip_limits(
     if let Some(n) = limit_arg("max_chart_points", max_chart_points)? {
         l.max_chart_points = usize::try_from(n).map_err(|_| too_big("max_chart_points"))?;
     }
+    if let Some(n) = limit_arg("max_comments", max_comments)? {
+        l.max_comments = usize::try_from(n).map_err(|_| too_big("max_comments"))?;
+    }
     Ok(l)
 }
 
@@ -891,7 +895,7 @@ fn zip_limits(
 #[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (path, *, max_entries=None, max_entry_bytes=None, max_total_bytes=None,
                     max_compression_ratio=None, max_name_len=None, max_slides=None, max_diagram_shapes=None,
-                    max_diagram_text_bytes=None, max_chart_points=None))]
+                    max_diagram_text_bytes=None, max_chart_points=None, max_comments=None))]
 fn open(
     py: Python<'_>,
     path: PathBuf,
@@ -904,6 +908,7 @@ fn open(
     max_diagram_shapes: Option<Bound<'_, PyAny>>,
     max_diagram_text_bytes: Option<Bound<'_, PyAny>>,
     max_chart_points: Option<Bound<'_, PyAny>>,
+    max_comments: Option<Bound<'_, PyAny>>,
 ) -> PyResult<PyPresentation> {
     let limits = zip_limits(
         max_entries.as_ref(),
@@ -915,6 +920,7 @@ fn open(
         max_diagram_shapes.as_ref(),
         max_diagram_text_bytes.as_ref(),
         max_chart_points.as_ref(),
+        max_comments.as_ref(),
     )?;
     let parsed = py
         .detach(|| parse_path_with_limits(&path, &limits))
@@ -927,7 +933,7 @@ fn open(
 #[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (data, *, max_entries=None, max_entry_bytes=None, max_total_bytes=None,
                     max_compression_ratio=None, max_name_len=None, max_slides=None, max_diagram_shapes=None,
-                    max_diagram_text_bytes=None, max_chart_points=None))]
+                    max_diagram_text_bytes=None, max_chart_points=None, max_comments=None))]
 fn open_bytes(
     py: Python<'_>,
     data: &[u8],
@@ -940,6 +946,7 @@ fn open_bytes(
     max_diagram_shapes: Option<Bound<'_, PyAny>>,
     max_diagram_text_bytes: Option<Bound<'_, PyAny>>,
     max_chart_points: Option<Bound<'_, PyAny>>,
+    max_comments: Option<Bound<'_, PyAny>>,
 ) -> PyResult<PyPresentation> {
     let limits = zip_limits(
         max_entries.as_ref(),
@@ -951,6 +958,7 @@ fn open_bytes(
         max_diagram_shapes.as_ref(),
         max_diagram_text_bytes.as_ref(),
         max_chart_points.as_ref(),
+        max_comments.as_ref(),
     )?;
     let owned = data.to_vec();
     let parsed = py

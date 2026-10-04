@@ -57,6 +57,13 @@ pub struct ZipLimits {
     /// 约 40 B(值 + 类别字符串)估算,封在约 40 MB。超出后该 frame 的图表降级为占位框并记
     /// `chart-degraded` 诊断。
     pub max_chart_points: usize,
+    /// 整个演示文稿里批注总条数上限(含回复;跨幻灯片累计,多张幻灯片共享同一批注部件时每张各
+    /// 记一份)。
+    ///
+    /// 默认 100 000:现实中评审密集的千页文稿也只有数千条批注,10 万留足 10 倍以上余量;每条
+    /// (作者 / 时间 / 正文字符串)约 0.2–0.5 KB,封在数十 MB。超出后截断并记
+    /// `comments-truncated` 诊断;批注部件解析本身也在此上限处提前停止。
+    pub max_comments: usize,
 }
 
 /// 压缩比检查的起判门槛:解压量不超过 1 MiB 的条目不做压缩比判定(避免误伤小文件)。
@@ -74,6 +81,7 @@ impl Default for ZipLimits {
             max_diagram_shapes: 100_000,
             max_diagram_text_bytes: 8 * 1024 * 1024,
             max_chart_points: 1_000_000,
+            max_comments: 100_000,
         }
     }
 }
