@@ -5,6 +5,7 @@
 
 use std::io::{Cursor, Write};
 
+use ppt_core::export::{presentation_markdown_with, presentation_text_with, ExportOptions};
 use ppt_core::geom::Rect;
 use ppt_core::resolved::{ResolvedPresentation, ResolvedShape};
 use ppt_parse::{parse_bytes, resolve};
@@ -159,10 +160,11 @@ fn deck(pres_attrs: &str, slides: &[SlideDef]) -> ResolvedDeck {
     }
     let parsed = parse_bytes(&buf.into_inner()).expect("parse");
     let resolved = resolve(&parsed);
-    ResolvedDeck { resolved }
+    ResolvedDeck { parsed, resolved }
 }
 
 struct ResolvedDeck {
+    parsed: ppt_parse::ParsedPptx,
     resolved: ResolvedPresentation,
 }
 
@@ -304,4 +306,58 @@ fn template_footer_placeholders_are_not_drawn_without_a_slide_instance() {
     // 版式 / 母版占位符(含 TEMPLATE-* 提示文字)既不在继承图形里,slide 自身也没有形状。
     assert!(d.resolved.slides[0].inherited_shapes.is_empty());
     assert!(d.resolved.slides[0].shapes.is_empty());
+}
+
+/// 文本类导出与 PDF 共用 `resolve.rs` 的字段求值:`slidenum` 输出真实页码(不是缓存文本),
+/// `datetime*` 仍是缓存文本。标题(Markdown 标题行)与普通段落两条路径都覆盖。
+#[test]
+fn text_exports_use_the_evaluated_slide_number_and_keep_cached_dates() {
+    let body = r#"<p:sp><p:spPr/><p:txBody><a:bodyPr/><a:p><a:r><a:t>Page </a:t></a:r><a:fld id="{F}" type="slidenum"><a:t>7</a:t></a:fld><a:r><a:t> on </a:t></a:r><a:fld id="{D}" type="datetime1"><a:t>1/2/2020</a:t></a:fld></a:p></p:txBody></p:sp>"#;
+    let title = ph_sp(
+        "title",
+        20,
+        None,
+        r#"<a:p><a:r><a:t>Slide </a:t></a:r><a:fld id="{F}" type="slidenum"><a:t>TITLE-STALE</a:t></a:fld></a:p>"#,
+        "",
+    );
+    let sp_tree = format!("{title}{body}");
+    let slides = [
+        SlideDef {
+            sp_tree: sp_tree.clone(),
+            hidden: false,
+        },
+        SlideDef {
+            sp_tree,
+            hidden: false,
+        },
+    ];
+    let d = deck(r#"firstSlideNum="5""#, &slides);
+    let opts = ExportOptions::default();
+
+    let text = presentation_text_with(&d.parsed.presentation, Some(&d.resolved), &opts);
+    assert!(text.contains("Page 5 on 1/2/2020"), "{text}");
+    assert!(text.contains("Page 6 on 1/2/2020"), "{text}");
+    assert!(
+        text.contains("Slide 5") && text.contains("Slide 6"),
+        "{text}"
+    );
+    assert!(
+        !text.contains("STALE") && !text.contains("Page 7"),
+        "{text}"
+    );
+
+    let md = presentation_markdown_with(&d.parsed.presentation, Some(&d.resolved), &opts);
+    assert!(
+        md.contains("### Slide 5") && md.contains("### Slide 6"),
+        "{md}"
+    );
+    assert!(
+        md.contains("Page 5 on 1/2/2020") && md.contains("Page 6 on 1/2/2020"),
+        "{md}"
+    );
+    assert!(!md.contains("STALE") && !md.contains("Page 7"), "{md}");
+
+    // 没有终态 IR 时只能给缓存文本(求值在 resolve 里,导出不复制公式)。
+    let raw = presentation_text_with(&d.parsed.presentation, None, &opts);
+    assert!(raw.contains("Page 7"), "{raw}");
 }

@@ -468,10 +468,12 @@ pub(crate) fn picture_ops(
 
 /// SmartArt 降级告警的 `Custom` 种类标签。
 const SMARTART_DEGRADED_KIND: &str = "smartart-degraded";
+/// 无预览图 OLE 对象画占位框的降级告警种类。
+const OLE_DEGRADED_KIND: &str = "ole-degraded";
 
 /// 图表:有缓存数据且类型受支持时画矢量图表([`crate::chart`]);否则(含图表部件缺失)
 /// 记 `chart-degraded` 告警并画浅灰占位框。SmartArt(无 drawing 部件才会走到这里)记
-/// `smartart-degraded` 并画占位框;OLE:浅灰占位框(PRD §1 v1 降级)。
+/// `smartart-degraded` 并画占位框;无预览图的 OLE:浅灰占位框 + `ole-degraded`(PRD §1 v1 降级)。
 pub(crate) fn graphic_placeholder_ops(
     ts: &mut Typesetter,
     ctx: &mut RenderCtx<'_>,
@@ -500,6 +502,12 @@ pub(crate) fn graphic_placeholder_ops(
                 kind: SMARTART_DEGRADED_KIND.to_string(),
                 detail: "SmartArt 无可用 drawing 部件;画占位框(data 部件文字仅进文本导出)"
                     .to_string(),
+            });
+        }
+        None if gp.kind.as_deref().is_some_and(|k| k.ends_with("/ole")) => {
+            ctx.warnings.push(ExportWarning::Custom {
+                kind: OLE_DEGRADED_KIND.to_string(),
+                detail: "OLE 对象无预览图;画占位框".to_string(),
             });
         }
         None => {}

@@ -1995,6 +1995,24 @@ mod tests {
         }
     }
 
+    /// 无预览图的 OLE 占位(有预览图的在解析层已成图片)画占位框并记 `ole-degraded`(渲染侧每个
+    /// 占位一条);别的占位(未知种类)不误报。
+    #[test]
+    fn ole_placeholder_keeps_box_and_warns() {
+        let uri = "http://schemas.openxmlformats.org/presentationml/2006/ole";
+        let out = render(&one_slide(vec![chart_shape(None, uri)]));
+        assert!(has_placeholder_box(&out.pdf));
+        let n = out
+            .warnings
+            .iter()
+            .filter(|w| matches!(w, ExportWarning::Custom { kind, .. } if kind == "ole-degraded"))
+            .count();
+        assert_eq!(n, 1, "{:?}", out.warnings);
+        assert_eq!(chart_degraded(&out), 0, "OLE 不发图表告警");
+        let other = render(&one_slide(vec![chart_shape(None, "urn:unknown")]));
+        assert!(!has_custom_warning(&other, "ole-degraded"));
+    }
+
     /// 复合饼(`ofPieChart`)不再按普通饼画:占位框 + `chart-degraded`。
     #[test]
     fn of_pie_chart_keeps_placeholder_and_warns() {

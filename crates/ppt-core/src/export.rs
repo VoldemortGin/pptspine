@@ -10,7 +10,10 @@ mod markdown;
 pub mod reading_order;
 mod view;
 
-use crate::model::{Cell, Chart, ChartKind, Paragraph, Presentation, Slide, Table, TextFrame};
+use crate::model::{
+    Cell, Chart, ChartKind, Paragraph, Presentation, RunKind, Slide, Table, TextFrame, TextRun,
+};
+use crate::resolved::{ResolvedParagraph, ResolvedRun};
 
 pub use markdown::presentation_markdown_with;
 pub use view::{presentation_text_with, slide_text_with, ExportOptions, TextOrder};
@@ -33,16 +36,36 @@ pub fn presentation_markdown(pres: &Presentation) -> String {
 
 // ---- 纯文本辅助 ----------------------------------------------------------
 
-fn frame_text(tf: &TextFrame) -> String {
+/// 文本体纯文本。`resolved` 为与 `tf.paragraphs` 一一对应的终态段落(有则字段 run 取其求值结果)。
+fn frame_text(tf: &TextFrame, resolved: Option<&[ResolvedParagraph]>) -> String {
     tf.paragraphs
         .iter()
-        .map(paragraph_text)
+        .enumerate()
+        .map(|(i, p)| paragraph_text_with(p, resolved.map(|r| &r[i])))
         .collect::<Vec<_>>()
         .join("\n")
 }
 
 fn paragraph_text(p: &Paragraph) -> String {
-    p.runs.iter().map(|r| r.text.as_str()).collect()
+    paragraph_text_with(p, None)
+}
+
+/// 段落纯文本;字段 run(`a:fld`)有终态 run 时取其文字——`slidenum` 的页码求值只在
+/// `resolve.rs` 一处(文本导出与 PDF 共用),`datetime*` 在那里保持缓存文本。无终态 IR 时退回缓存文本。
+fn paragraph_text_with(p: &Paragraph, resolved: Option<&ResolvedParagraph>) -> String {
+    p.runs
+        .iter()
+        .enumerate()
+        .map(|(i, r)| run_text(r, resolved.and_then(|rp| rp.runs.get(i))))
+        .collect()
+}
+
+/// 一个 run 的导出文字:字段 run 且有终态 run → 终态文字,否则原文。
+fn run_text<'a>(run: &'a TextRun, resolved: Option<&'a ResolvedRun>) -> &'a str {
+    match (&run.kind, resolved) {
+        (RunKind::Field { .. }, Some(rr)) => &rr.text,
+        _ => &run.text,
+    }
 }
 
 fn cell_text(c: &Cell) -> String {

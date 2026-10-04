@@ -17,7 +17,10 @@ use crate::style::Bullet;
 
 use super::reading_order::FlatShape;
 use super::view::{exported_slides, ordered_shapes, placeholder_kind, ExportOptions};
-use super::{chart_label, chart_table, escape_pipe, notes_text, paragraph_text, table_markdown};
+use super::{
+    chart_label, chart_table, escape_pipe, notes_text, paragraph_text_with, run_text,
+    table_markdown,
+};
 
 /// 整份演示文稿的语义 Markdown。`resolved` 提供继承链信息(占位符几何 / 项目符号);
 /// 可为 `None`(退回直接格式)。
@@ -44,20 +47,21 @@ fn slide_markdown(
     // 标题:首个有文字的 title / ctrTitle 占位符;没有则回退到首个非空文本框的首段。
     let title_at = shapes.iter().position(|f| {
         matches!(placeholder_kind(f.shape), Some("title" | "ctrTitle"))
-            && text_frame(f.shape).is_some_and(|tf| !heading_text(&tf.paragraphs).is_empty())
+            && text_frame(f.shape).is_some_and(|tf| !heading_text(f, tf).is_empty())
     });
     let mut skip_first_para_of: Option<usize> = None;
     let title = match title_at {
-        Some(i) => text_frame(shapes[i].shape).map(|tf| heading_text(&tf.paragraphs)),
+        Some(i) => text_frame(shapes[i].shape).map(|tf| heading_text(&shapes[i], tf)),
         // 回退策略(历史行为):该框首个非空段落作标题,其余段落照常输出。
         None => shapes.iter().enumerate().find_map(|(i, f)| {
             let tf = text_frame(f.shape)?;
-            let p = tf
-                .paragraphs
-                .iter()
-                .find(|p| !paragraph_text(p).trim().is_empty())?;
+            let resolved = resolved_paragraphs(f, tf.paragraphs.len());
+            let text = tf.paragraphs.iter().enumerate().find_map(|(j, p)| {
+                let t = paragraph_text_with(p, resolved.map(|r| &r[j]));
+                (!t.trim().is_empty()).then_some(t)
+            })?;
             skip_first_para_of = Some(i);
-            Some(one_line(&paragraph_text(p)))
+            Some(one_line(&text))
         }),
     };
     if let Some(t) = title {
@@ -99,7 +103,10 @@ fn text_frame(shape: &Shape) -> Option<&TextFrame> {
 }
 
 /// 解析后的段落(与原始段落一一对应时才可用)。
-fn resolved_paragraphs<'a>(f: &FlatShape<'a>, raw_len: usize) -> Option<&'a [ResolvedParagraph]> {
+pub(super) fn resolved_paragraphs<'a>(
+    f: &FlatShape<'a>,
+    raw_len: usize,
+) -> Option<&'a [ResolvedParagraph]> {
     let paras = match f.resolved? {
         ResolvedShape::TextBox(t) => t.paragraphs.as_slice(),
         ResolvedShape::Auto(a) => a.text.as_ref()?.paragraphs.as_slice(),
@@ -198,7 +205,7 @@ fn frame_blocks(f: &FlatShape, tf: &TextFrame, skip_first_para: bool, out: &mut 
     let mut skipped = !skip_first_para;
     let mut list_block: Option<String> = None;
     for (i, p) in tf.paragraphs.iter().enumerate() {
-        let text = paragraph_markdown(p, shape_link);
+        let text = paragraph_markdown(p, resolved.map(|r| &r[i]), shape_link);
         if text.trim().is_empty() {
             continue;
         }
@@ -245,7 +252,11 @@ fn frame_blocks(f: &FlatShape, tf: &TextFrame, skip_first_para: bool, out: &mut 
 
 /// 段落 → Markdown 行内文本:外链 run 折成 `[text](url)`(相邻同链 run 合并);
 /// 形状级外链作为无自身链接 run 的兜底;内部跳转按纯文本。
-fn paragraph_markdown(p: &Paragraph, shape_link: Option<&Hyperlink>) -> String {
+fn paragraph_markdown(
+    p: &Paragraph,
+    resolved: Option<&ResolvedParagraph>,
+    shape_link: Option<&Hyperlink>,
+) -> String {
     let mut out = String::new();
     let mut pending: Option<(&str, String)> = None; // (url, 累积文字)
     let flush = |pending: &mut Option<(&str, String)>, out: &mut String| {
@@ -257,7 +268,8 @@ fn paragraph_markdown(p: &Paragraph, shape_link: Option<&Hyperlink>) -> String {
             }
         }
     };
-    for run in &p.runs {
+    for (ri, run) in p.runs.iter().enumerate() {
+        let text = run_text(run, resolved.and_then(|rp| rp.runs.get(ri)));
         let url = run
             .hyperlink
             .as_ref()
@@ -271,11 +283,11 @@ fn paragraph_markdown(p: &Paragraph, shape_link: Option<&Hyperlink>) -> String {
                 pending
                     .get_or_insert_with(|| (u, String::new()))
                     .1
-                    .push_str(&run.text);
+                    .push_str(text);
             }
             None => {
                 flush(&mut pending, &mut out);
-                out.push_str(&run.text);
+                out.push_str(text);
             }
         }
     }
@@ -298,11 +310,13 @@ fn picture_markdown(p: &Picture) -> String {
     }
 }
 
-/// 标题文字:各非空段落拼成一行(段内换行 / 段落间以空格连接)。
-fn heading_text(paras: &[Paragraph]) -> String {
-    paras
+/// 标题文字:各非空段落拼成一行(段内换行 / 段落间以空格连接);字段取终态求值结果。
+fn heading_text(f: &FlatShape, tf: &TextFrame) -> String {
+    let resolved = resolved_paragraphs(f, tf.paragraphs.len());
+    tf.paragraphs
         .iter()
-        .map(|p| one_line(&paragraph_text(p)))
+        .enumerate()
+        .map(|(i, p)| one_line(&paragraph_text_with(p, resolved.map(|r| &r[i]))))
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join(" ")

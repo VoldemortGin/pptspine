@@ -125,3 +125,21 @@ def test_footer_text_from_slide_at_layout_position() -> None:
     assert [w[4] for w in words] == ["Quarterly", "review"]
     assert FTR_X / EMU <= words[0][0] < FTR_X / EMU + 20
     assert not any("TEMPLATE" in w[4] for w in words)
+
+
+def test_text_exports_show_the_same_page_numbers_as_the_pdf() -> None:
+    """``to_text`` / ``to_markdown`` / ``Slide.text()`` 与 PDF 共用字段求值:真实页码,不是缓存的 ``‹#›``。"""
+    body = _ph("body", 1, (500_000, 500_000), _text("Body ") + _fld("slidenum", "STALE"))
+    dt = _ph("dt", 10, None, _fld("datetime1", "1/2/2020"))
+    slides = [_slide(body + _num() + dt), _slide(body + _num() + dt)]
+    deck = build_pptx(slides, _template(), pres_attrs=' firstSlideNum="5"')
+    pres = pptspine.open_bytes(deck)
+    for out in (pres.to_text(), pres.to_markdown()):
+        assert "‹#›" not in out and "STALE" not in out, out
+        assert "1/2/2020" in out, out
+        assert out.index("5") < out.index("6")
+    assert pres.slides()[1].text.splitlines().count("6") == 2  # 正文字段 + sldNum 占位符
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        pdf = pdfspine.open(stream=pres.to_pdf(), filetype="pdf")
+    assert "6" in [w[4] for w in pdf[1].get_text("words")]

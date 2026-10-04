@@ -5,6 +5,7 @@ use crate::geom::Emu;
 use crate::model::{Chart, Presentation, Shape, Slide};
 use crate::resolved::{ResolvedPresentation, ResolvedSlide};
 
+use super::markdown::resolved_paragraphs;
 use super::reading_order::{flatten, reading_order, FlatShape};
 use super::{chart_label, chart_table, frame_text, notes_text, table_text};
 
@@ -101,15 +102,19 @@ pub fn slide_text_with(
 ) -> String {
     ordered_shapes(slide, resolved, slide_size, order)
         .iter()
-        .filter_map(|f| shape_text(f.shape))
+        .filter_map(shape_text)
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-fn shape_text(shape: &Shape) -> Option<String> {
-    let s = match shape {
-        Shape::TextBox(tf) => frame_text(tf),
-        Shape::Auto(a) => a.text.as_deref().map(frame_text).unwrap_or_default(),
+fn shape_text(f: &FlatShape) -> Option<String> {
+    let s = match f.shape {
+        Shape::TextBox(tf) => frame_text(tf, resolved_paragraphs(f, tf.paragraphs.len())),
+        Shape::Auto(a) => a
+            .text
+            .as_deref()
+            .map(|tf| frame_text(tf, resolved_paragraphs(f, tf.paragraphs.len())))
+            .unwrap_or_default(),
         Shape::Table(t) => table_text(t),
         Shape::Placeholder(p) => match &p.chart {
             Some(c) => chart_text(c),
