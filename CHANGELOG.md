@@ -40,6 +40,8 @@ still change.
   accepts `pdfspine>=0.8,<0.12`. No behavior change; the 18 SSIM
   self-reference pages are unchanged.
 
+- The `test` extra now accepts `pdfspine>=0.8,<0.13` (validated against pdfspine 0.12.0: 100 pytest passed / 1 skipped, SSIM 18/18). Test-time Python constraint only; the `pdf-typeset` git rev in `Cargo.toml` is unchanged.
+
 ### Fixed
 
 - Expanded-form leaf elements (`<a:off x=".." y=".."></a:off>` instead of self-closing) made `parse_xfrm` return at the first child end tag, desynchronizing the parent `spPr` / `grpSpPr` walk: everything after `a:xfrm` (fill, outline, geometry) was lost. `parse_xfrm` now counts depth. A self-closing `<a:p/>` inside a `txBody` was dropped while `<a:p></a:p>` yielded an empty paragraph; both now yield one empty paragraph. A self-closed vs expanded comparison over the other leaf readers (ln / prstDash / headEnd / tailEnd, gradFill, nv / style, bodyPr / lstStyle / pPr / rPr, tcPr edges, gridCol, blipFill, chOff / chExt, bg / clrMapOvr) found no further differences.
