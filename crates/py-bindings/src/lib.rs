@@ -38,7 +38,7 @@ use ppt_render::{render_pdf, ExportResult, ExportWarning, RenderOptions};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyFileNotFoundError, PyIndexError, PyOSError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyBytes, PyDict, PyList, PyString};
+use pyo3::types::{PyBool, PyBytes, PyDict, PyInt, PyList, PyString};
 
 /// 包版本(镜像 Rust workspace 版本)。
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -988,10 +988,19 @@ fn limit_arg(name: &str, v: Option<&Bound<'_, PyAny>>) -> PyResult<Option<u64>> 
     if v.is_instance_of::<PyBool>() {
         return Err(bad());
     }
-    match v.extract::<i64>() {
-        Ok(n) if n > 0 => Ok(Some(n.unsigned_abs())),
-        _ => Err(bad()),
+    if let Ok(n) = v.extract::<u64>() {
+        return if n > 0 { Ok(Some(n)) } else { Err(bad()) };
     }
+    // 正整数但超出 64 位(如 `2**70`):如实报"太大",而不是"不是正整数"。
+    let big_positive =
+        v.extract::<i128>().is_ok_and(|n| n > 0) || (v.is_instance_of::<PyInt>() && v.gt(0)?);
+    if big_positive {
+        return Err(PyValueError::new_err(format!(
+            "{name} is too large (maximum {})",
+            u64::MAX
+        )));
+    }
+    Err(bad())
 }
 
 /// 一个正整数关键字参数(`None` = 沿用缺省;规则同 [`limit_arg`]),折成 `usize`。
@@ -1086,8 +1095,19 @@ fn zip_limits(
     Ok(l)
 }
 
-/// 从磁盘路径解析一个 `.pptx`。解析在释放 GIL 下进行。可选关键字参数收紧 / 放宽 zip 解压
-/// 限额(缺省同不传;非法值 `ValueError`,超限抛 `PptZipError`)。
+/// 从磁盘路径解析一个 `.pptx`。解析在释放 GIL 下进行。仅关键字参数都是正整数,`None` = 缺省
+/// (同不传);非法值(零 / 负数 / 非整数 / `bool`)抛 `ValueError`,超出 64 位抛 `ValueError`("too large")。
+///
+/// zip 解压限额(超限抛 `PptZipError`):`max_entries`(条目数,10 000)、`max_entry_bytes`(单条目,
+/// 256 MiB)、`max_total_bytes`(总解压量,1 GiB)、`max_compression_ratio`(10 000)、`max_name_len`
+/// (1 024)、`max_slides`(去重后的幻灯片数,5 000)。
+///
+/// 展开 / 解析期预算(超出不抛错:截断或降级并记诊断,见 `diagnostics()` / `parse_report()` /
+/// `truncated`):`max_diagram_shapes`(SmartArt 展开形状,100 000)、`max_diagram_text_bytes`
+/// (SmartArt 文字,8 MiB)、`max_chart_points`(按 frame 计的图表数据点,2 000 000)、`max_comments`
+/// (批注含回复,100 000)、`max_part_shapes` / `max_total_shapes`(单部件 / 全文形状,20 000 /
+/// 1 000 000)、`max_part_items` / `max_total_items`(单部件 / 全文文本与表格节点,200 000 /
+/// 8 000 000)、`max_model_bytes`(全文模型字节,2 GiB——内存上界)。全文预算耗尽时按页公平截断。
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (path, *, max_entries=None, max_entry_bytes=None, max_total_bytes=None,
@@ -1136,7 +1156,11 @@ fn open(
     Ok(PyPresentation::new(parsed))
 }
 
-/// 从内存字节解析一个 `.pptx`。解析在释放 GIL 下进行;限额关键字参数同 [`open`]。
+/// 从内存字节解析一个 `.pptx`。解析在释放 GIL 下进行;限额关键字参数同 `open`:zip 解压限额
+/// `max_entries` / `max_entry_bytes` / `max_total_bytes` / `max_compression_ratio` / `max_name_len` /
+/// `max_slides`,展开 / 解析期预算 `max_diagram_shapes` / `max_diagram_text_bytes` /
+/// `max_chart_points` / `max_comments` / `max_part_shapes` / `max_total_shapes` / `max_part_items` /
+/// `max_total_items` / `max_model_bytes`(缺省值与语义见 `open`)。
 #[pyfunction]
 #[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (data, *, max_entries=None, max_entry_bytes=None, max_total_bytes=None,

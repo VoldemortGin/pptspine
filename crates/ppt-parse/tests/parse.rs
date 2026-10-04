@@ -747,6 +747,52 @@ fn math_nary_and_subsup_keep_operator_and_structure() {
     );
 }
 
+/// 自闭合 `<m:e/>` 也是一个(空)槽位;没有任何槽位的空结构输出空串(不凭空造出 `()` / `∫`)。
+#[test]
+fn math_self_closing_slots_and_empty_structures() {
+    assert_eq!(math_text(&mw("d", "<m:e/><m:e/>")), "(|)");
+    assert_eq!(
+        math_text(&format!("{}{}", mr("f"), mw("d", "<m:e/>"))),
+        "f()"
+    );
+    assert_eq!(math_text(&format!("{}{}", mr("f"), mw("d", ""))), "f");
+    assert_eq!(math_text(&format!("{}{}", mr("g"), mw("nary", ""))), "g");
+    assert_eq!(
+        math_text(&format!(
+            "{}{}",
+            mr("g"),
+            mw("nary", r#"<m:naryPr><m:chr m:val="∑"/></m:naryPr>"#)
+        )),
+        "g"
+    );
+}
+
+/// `m:naryPr > m:subHide` / `m:supHide`(开关,`m:val` 缺省为开):被隐藏的上下限不输出。
+#[test]
+fn math_nary_hidden_limits_are_not_output() {
+    let nary = |pr: &str| {
+        mw(
+            "nary",
+            &format!(
+                "<m:naryPr>{pr}</m:naryPr>{}{}{}",
+                mw("sub", &mr("HIDDEN")),
+                mw("sup", &mr("n")),
+                mw("e", &mr("f"))
+            ),
+        )
+    };
+    assert_eq!(math_text(&nary(r#"<m:subHide m:val="1"/>"#)), "∫^n f");
+    assert_eq!(math_text(&nary("<m:supHide/>")), "∫_HIDDEN f");
+    assert_eq!(
+        math_text(&nary(r#"<m:subHide m:val="0"/>"#)),
+        "∫_HIDDEN^n f"
+    );
+    assert_eq!(
+        math_text(&nary(r#"<m:subHide m:val="on"/><m:supHide m:val="true"/>"#)),
+        "∫ f"
+    );
+}
+
 #[test]
 fn math_prescript_limits_func_bar_acc() {
     assert_eq!(

@@ -1734,8 +1734,11 @@ fn parse_run_container<R: std::io::BufRead>(
 // - `m:f` -> `分子/分母`;`m:sSup` -> `底^上`;`m:sSub` -> `底_下`;`m:sSubSup` -> `底_下^上`;
 //   `m:sPre` -> `_下^上 底`(前置上下标,空格隔开底);
 // - `m:rad` -> `sqrt(式)` / `root(次数,式)`(自带括号,内部不再加);
-// - `m:d` -> `begChr + 各 m:e(sepChr 连接) + endChr`(`m:dPr` 属性缺省 `(` `)` `|`,显式空串 = 该侧无);
-// - `m:nary` -> `运算符[_下限][^上限] 被积式`(`m:naryPr > m:chr`,缺省 `∫`);
+// - `m:d` -> `begChr + 各 m:e(sepChr 连接) + endChr`(`m:dPr` 属性缺省 `(` `)` `|`,显式空串 = 该侧无;
+//   自闭合 `<m:e/>` 同样是一个空槽位);
+// - `m:nary` -> `运算符[_下限][^上限] 被积式`(`m:naryPr > m:chr`,缺省 `∫`;`m:subHide` / `m:supHide`
+//   打开时对应的限不输出);
+// - 没有任何槽位的空结构(`<m:d/>`、只有属性的 `m:nary`)输出空串;
 // - `m:limLow` -> `底_(极限)`,`m:limUpp` -> `底^(极限)`;`m:func` -> `sin x` / `sin(x+1)`;
 // - `m:bar` / `m:acc` -> 被修饰式 + 修饰符(`¯` / `m:chr`,缺省 U+0302);
 // - `m:m` -> `[a, b; c, d]`;`m:eqArr` -> 各行 `; ` 连接;
@@ -1784,13 +1787,15 @@ enum MathSlot {
 }
 
 /// 结构属性(`m:dPr` / `m:naryPr` / `m:accPr` 里的 `m:*Chr@m:val`):`None` = 属性缺失(取缺省),
-/// `Some("")` = 显式空串(该侧无字符)。
+/// `Some("")` = 显式空串(该侧无字符)。`sub_hide` / `sup_hide` 是 `m:naryPr` 的隐藏上下限开关。
 #[derive(Default)]
 struct MathProps {
     chr: Option<String>,
     beg: Option<String>,
     end: Option<String>,
     sep: Option<String>,
+    sub_hide: bool,
+    sup_hide: bool,
 }
 
 /// 公式遍历栈上的一帧:容器 / 结构 / 槽位各自攒一份文字。其余嵌套元素不开帧,只在帧内记
@@ -1878,6 +1883,16 @@ fn math_slot_of(kind: MathStruct, name: &[u8]) -> Option<MathSlot> {
 
 /// 属性元素(`m:chr` / `m:begChr` / `m:endChr` / `m:sepChr`)记入结构属性。
 fn math_note_prop(props: &mut MathProps, name: &[u8], e: &BytesStart) {
+    // OMML 开关(ST_OnOff):`m:val` 缺省为开。
+    let on = || attr_of(e, b"val").is_none_or(ooxml_bool);
+    if name == b"subHide" {
+        props.sub_hide = on();
+        return;
+    }
+    if name == b"supHide" {
+        props.sup_hide = on();
+        return;
+    }
     let slot = match name {
         b"chr" => &mut props.chr,
         b"begChr" => &mut props.beg,
@@ -1945,7 +1960,10 @@ fn math_wrap(text: &str) -> String {
 /// 它们自带字符)。
 fn math_linearize(kind: MathStruct, slots: &[(MathSlot, String)], props: &MathProps) -> String {
     use MathStruct as S;
-    if !matches!(kind, S::Delim | S::Nary) && slots.iter().all(|(_, t)| t.is_empty()) {
+    // 定界符 / 大运算符自带字符,有槽位(哪怕是空槽位)就照常输出;一个槽位都没有的空结构输出空串。
+    if slots.is_empty()
+        || (!matches!(kind, S::Delim | S::Nary) && slots.iter().all(|(_, t)| t.is_empty()))
+    {
         return String::new();
     }
     let slot = |want: MathSlot| {
@@ -1995,7 +2013,9 @@ fn math_linearize(kind: MathStruct, slots: &[(MathSlot, String)], props: &MathPr
         }
         S::Nary => {
             let mut out = props.chr.as_deref().unwrap_or("∫").to_string();
-            let (sub, sup) = (wrapped(MathSlot::Sub), wrapped(MathSlot::Sup));
+            let hide = |hidden: bool, s: String| if hidden { String::new() } else { s };
+            let sub = hide(props.sub_hide, wrapped(MathSlot::Sub));
+            let sup = hide(props.sup_hide, wrapped(MathSlot::Sup));
             if !sub.is_empty() {
                 out.push('_');
                 out.push_str(&sub);
@@ -2081,7 +2101,14 @@ fn parse_math<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<TextRun> {
                 if top.kind.is_some() && top.other_depth == 1 {
                     math_note_prop(&mut top.props, name, e);
                 }
-                if is_start {
+                if !is_start {
+                    // 自闭合的槽位(`<m:e/>`)也是一个槽位,只是内容为空。
+                    if top.other_depth == 0 {
+                        if let Some(slot) = top.kind.and_then(|k| math_slot_of(k, name)) {
+                            top.slots.push((slot, String::new()));
+                        }
+                    }
+                } else {
                     match name {
                         b"oMathPara" | b"oMath" if at_root && top.other_depth == 0 => {
                             if name == b"oMath" && !top.text.is_empty() {

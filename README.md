@@ -63,31 +63,45 @@ recursing. Rust callers can pass custom limits via `parse_bytes_with_limits` /
 `pptspine.open(path, ...)` / `pptspine.open_bytes(data, ...)` — `max_entries`,
 `max_entry_bytes`, `max_total_bytes`, `max_compression_ratio`, `max_name_len`,
 `max_slides` (positive integers; omitted / `None` keeps the default above; zero,
-negative, non-integer or `bool` values raise `ValueError`; a hit still raises
-`PptZipError`). Four further *expansion budgets* are counted across the whole
-deck (every frame that re-uses the same SmartArt / chart part is charged again, so
-a tiny file cannot fan one part out into gigabytes): `max_diagram_shapes`
-(shapes expanded from SmartArt drawings, default 100,000), `max_diagram_text_bytes`
-(SmartArt text bytes, default 8 MiB) and `max_chart_points` (chart data points,
-default 1,000,000) and `max_comments` (comments including replies, default
-100,000). A frame that would exceed a SmartArt / chart budget is degraded to a
-placeholder box and recorded as a `smartart-degraded` / `chart-degraded`
-diagnostic instead of raising; comments past `max_comments` are cut off and
-recorded as `comments-truncated`. A comments part referenced several times by
-one slide is read once (`duplicate-comment-ref`).
+negative, non-integer or `bool` values raise `ValueError`, integers beyond 64 bits
+raise `ValueError("... is too large")`; a hit still raises `PptZipError`).
 
-Four more *parse-time* budgets bound what a short XML can inflate into the model
-(an empty `<a:p/>` is 7 bytes, its model object hundreds): `max_part_shapes` /
-`max_total_shapes` (shape elements parsed per part / across all slides, layouts,
-masters and SmartArt drawings, each part counted once; defaults 20,000 /
-200,000 — roughly 200 MB of shapes at worst) and `max_part_items` /
-`max_total_items` (text and table nodes: paragraphs, runs, table rows / cells /
-grid columns, gradient stops, colour transforms, theme styles; defaults 200,000 /
-1,000,000 — roughly 400 MB at worst). Past a budget the part stops growing (what
-was already parsed is kept, the rest is only skipped) and a `shapes-truncated` /
-`content-truncated` diagnostic records how many were dropped. They are
-independent of `max_diagram_shapes`, which counts the *copies* made per SmartArt
-frame; both apply. E.g. `pptspine.open_bytes(untrusted, max_slides=200, max_total_bytes=64 * 2**20)`.
+Memory is bounded by **bytes**, not just counts: `max_model_bytes` (default
+2 GiB) caps the whole parsed model — every non-shared node is charged its struct
+size and every string its actual bytes as it is produced, across slides,
+layouts, masters, themes, table styles, notes, comments, charts and SmartArt;
+copies made per frame / per slide are charged per copy. Values referenced many
+times are **shared** instead of cloned (comment authors, hyperlink targets, a
+chart part used by many frames), and single values are capped (attributes
+64 KiB, text nodes 1 MiB, labels such as comment authors / chart categories
+4 KiB, URLs 16 KiB, formula delimiter characters 2 chars; `value-truncated`).
+The largest legitimate benchmark deck (500 pages × a 50 × 20 table) measures
+0.76 GB of model bytes (about 1.5 GB process RSS), so the default leaves ~2.8×
+headroom; lower it for untrusted input. The count budgets are a second gate
+that legitimate decks do not reach (defaults ≥ 4× the measured needs of the
+benchmark set in `crates/ppt-parse/tests/legit_benchmarks.rs`):
+`max_diagram_shapes` (shapes expanded from SmartArt drawings, 100,000),
+`max_diagram_text_bytes` (SmartArt text, 8 MiB), `max_chart_points` (chart data
+points counted per frame, 2,000,000), `max_comments` (comments including
+replies, 100,000), `max_part_shapes` / `max_total_shapes` (shape elements per
+part / per deck, 20,000 / 1,000,000) and `max_part_items` / `max_total_items`
+(paragraphs, runs, table rows / cells / grid columns, gradient stops, colour
+transforms, theme styles; 200,000 / 8,000,000). Past a budget parsing stops
+early — what was already parsed is kept — and is recorded as
+`shapes-truncated` / `content-truncated` / `comments-truncated` /
+`smartart-degraded` / `chart-degraded`, never as an exception. Deck-wide
+truncation is **fair**: layouts and masters are parsed first and every
+remaining slide keeps a floor, so an exhausted deck loses each page's tail, not
+its second half. Counts are the actual amount lost (descendants of a skipped
+row / cell / group included), and `Presentation.truncated` /
+`Presentation.parse_report()` (`report: ParseReport` in Rust) tell a caller at a
+glance that the output is incomplete and which parts were cut, independent of
+the 10,000-entry diagnostic cap. Exports are bounded too: `to_text` /
+`to_markdown(max_output_bytes=...)` (default 64 MiB) stop and append a
+`[pptspine: output truncated at N bytes]` line with a Python warning, and
+`to_pdf(max_page_ops=..., max_total_ops=...)` (100,000 / 10,000,000 op weight)
+stop drawing a page's remaining shapes with a `render-budget` warning.
+E.g. `pptspine.open_bytes(untrusted, max_slides=200, max_total_bytes=64 * 2**20)`.
 
 ## Install
 

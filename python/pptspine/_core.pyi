@@ -142,13 +142,20 @@ def open(
     max_total_items: int | None = None,
     max_model_bytes: int | None = None,
 ) -> Presentation:
-    """解析 ``.pptx``。可选关键字参数调整 zip 解压限额(正整数,``None`` = 缺省:条目数 10000、
-    单条目 256 MiB、总解压 1 GiB、压缩比 10000、条目名 1024 字节、幻灯片数 5000);非法值
-    抛 ``ValueError``,超限抛 ``PptZipError``。另有三项"展开预算"(整个文档跨 frame 累计):
-    ``max_diagram_shapes``(SmartArt 展开形状总数,缺省 100000)、``max_diagram_text_bytes``
-    (SmartArt 文字总字节,缺省 8 MiB)、``max_chart_points``(图表数据点总数,缺省 1000000);
-    超出时对应 frame 降级为占位框并记 ``smartart-degraded`` / ``chart-degraded`` 诊断,不抛错。
-    ``max_comments``(批注总条数含回复,缺省 100000)超出时截断并记 ``comments-truncated`` 诊断。"""
+    """解析 ``.pptx``。仅关键字参数都是正整数(``None`` = 缺省);零 / 负数 / 非整数 / ``bool``
+    抛 ``ValueError``,超出 64 位抛 ``ValueError``("too large")。
+
+    zip 解压限额(超限抛 ``PptZipError``):``max_entries``(10000)、``max_entry_bytes``(256 MiB)、
+    ``max_total_bytes``(1 GiB)、``max_compression_ratio``(10000)、``max_name_len``(1024)、
+    ``max_slides``(去重后的幻灯片数,5000)。
+
+    展开 / 解析期预算(超出不抛错:截断或降级并记诊断,见 ``diagnostics()`` / ``parse_report()`` /
+    ``truncated``):``max_diagram_shapes``(SmartArt 展开形状,100000)、``max_diagram_text_bytes``
+    (SmartArt 文字,8 MiB)、``max_chart_points``(按 frame 计的图表数据点,2000000)、
+    ``max_comments``(批注含回复,100000)、``max_part_shapes`` / ``max_total_shapes``(单部件 / 全文
+    形状,20000 / 1000000)、``max_part_items`` / ``max_total_items``(单部件 / 全文文本与表格节点,
+    200000 / 8000000)、``max_model_bytes``(全文模型字节,2 GiB——内存上界)。全文预算耗尽时按页
+    公平截断(每页的长尾被截,而不是后半本消失)。"""
 
 def open_bytes(
     data: bytes,

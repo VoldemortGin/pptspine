@@ -112,3 +112,17 @@ def test_truncated_flag_and_parse_report():
     assert r["truncated_parts"] == [f"ppt/slides/slide{i}.xml" for i in (1, 2, 3)]
     # 每页 50 段 × (段 + run) = 100 个节点,保留 10 个;被跳过段落里的 run 也计入。
     assert r["dropped_items"] == 3 * 90
+
+
+def test_limit_kwargs_report_accurately_and_are_documented():
+    data = build_pptx([SlideSpec(_text_box("<a:p><a:r><a:t>x</a:t></a:r></a:p>"))])
+    with pytest.raises(ValueError, match="too large"):
+        pptspine.open_bytes(data, max_entries=2**70)
+    with pytest.raises(ValueError, match="positive integer"):
+        pptspine.open_bytes(data, max_entries=-(2**70))
+    for name in (
+        "max_slides", "max_comments", "max_part_shapes", "max_total_shapes",
+        "max_part_items", "max_total_items", "max_model_bytes",
+    ):
+        assert name in pptspine.open.__doc__, name
+        assert name in pptspine.open_bytes.__doc__, name

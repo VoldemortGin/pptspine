@@ -21,11 +21,41 @@ Spine 家族成员之一:**纯 Rust 的 PowerPoint(.pptx / OOXML)结构化解析
   - **解压限额(`ppt_parse::ZipLimits`)。** 读 zip 包不信任头字段声明大小(不按它预分配,
     `take(limit + 1)` 截断读取),超限返回 `PptError::LimitExceeded { kind: LimitKind, limit, actual }`
     (Python 侧为 `PptZipError`,信息含限额种类)。默认:条目数 10 000、单条目 256 MiB、总解压量
-    1 GiB、压缩比 10 000(仅对解压量 > 1 MiB 的条目判定)、条目名 1024 字节、幻灯片数 5 000(`p:sldIdLst` 去重后;重复引用同一 slide 只保留首次;同一图表 / SmartArt drawing / 批注部件只**解析**一次,但每个 frame / 每张 slide 仍各拿一份拷贝——缓存只省解析、不省内存,所以另有跨 frame 累计的**展开预算**:SmartArt 展开形状 100 000 / 文字 8 MiB(单个 drawing 部件 ≤ 10 000 形状)、图表数据点 1 000 000、批注含回复 100 000,超出后 frame 降级为占位框 / 批注截断并记 `smartart-degraded` / `chart-degraded` / `comments-truncated` 诊断;同一 slide 内重复的批注关系只取一次,记 `duplicate-comment-ref`;诊断 `part` 只准是包内真实部件路径,不同条目 ≤ 10 000,超出并入每种 kind 一条 `part=""` 的汇总);绝对路径 / 盘符形式(`C:`)/ 含 `..`
-    的条目名直接拒绝(`PptError::Zip`)。`parse_bytes` / `parse_path` 用默认值,
-    `parse_*_with_limits` 可自定(Python:`open` / `open_bytes` 的仅关键字参数 `max_entries` / `max_entry_bytes` / `max_total_bytes` / `max_compression_ratio` / `max_name_len` / `max_slides` / `max_diagram_shapes` / `max_diagram_text_bytes` / `max_chart_points` / `max_comments` / `max_part_shapes` / `max_total_shapes` / `max_part_items` / `max_total_items`,非法值 `ValueError`)。**解析时预算**:单部件 / 全文档形状元素数 20 000 / 200 000(每部件只记一次,含 layout / master / SmartArt drawing;与按 frame 克隆次数计的 `max_diagram_shapes` 互相独立),文本 / 表格节点数(段落 / run / 行 / 单元格 / 网格列 / 渐变停靠点 / 颜色变换 / 主题样式)200 000 / 1 000 000;超出后提前停止该部件(已解析的保留、其余只扫描跳过),记 `shapes-truncated` / `content-truncated` 诊断(count = 被丢弃数);节点预算用线程局部计数(`xml/slide.rs` 的 `take_item`),形状预算在 `Ctx`。组合 / `mc:AlternateContent` 嵌套超过 64 层的子树整体跳过
-    (防递归下降爆栈)。`mc:AlternateContent` 取文档顺序第一个解析出内容的 `mc:Choice`,全空才取 `mc:Fallback`
-    (形状树与段落层同策略,绝不同取;递归判定 `has_substance`:只含无预览图 OLE 占位框、或没有任何实质后代的组合的分支算弱内容,让位给有实质内容的分支);`a14:m` 公式线性化为 `RunKind::Math` run(括号只看槽位线性化结果:非原子才加括号;`m:d` / `m:nary` / `m:sSubSup` / `m:sPre` / `m:limLow|Upp` / `m:func` / `m:bar|acc` / `m:m` / `m:eqArr` 各有确定形式,见 `xml/slide.rs` 公式段注释;与 docspine 各自独立实现)。
+    1 GiB、压缩比 10 000(仅对解压量 > 1 MiB 的条目判定)、条目名 1024 字节、幻灯片数 5 000(`p:sldIdLst` 边读边去重,
+    收集到 `max_slides + 1` 个不同部件就停;重复引用记 `duplicate-slide-ref`);绝对路径 / 盘符形式(`C:`)/ 含 `..`
+    的条目名直接拒绝(`PptError::Zip`)。`parse_bytes` / `parse_path` 用默认值,`parse_*_with_limits` 可自定(Python:
+    `open` / `open_bytes` 的仅关键字参数,非法值 `ValueError`,超出 64 位报 "too large")。
+  - **内存按字节记账(`ZipLimits::max_model_bytes`,缺省 2 GiB)。** 每产生一个非共享节点按结构体大小扣、每个字符串按
+    实际字节扣(`xml/budget.rs` 线程局部状态;`attr_string` / `read_text` 统一记账),所有部件(slide / layout / master /
+    主题 / 表格样式 / 备注 / 批注 / 图表 / SmartArt data 与 drawing)都经 `Package::budgeted`(同一套预算、同一套
+    诊断);逐 frame / 逐 slide 的克隆(SmartArt 展开、批注拷贝)每份都扣。被多处引用的值**共享**而不是克隆:批注
+    作者 / 缩写、超链接目标是 `Arc<str>`,图表是 `Arc<Chart>`(只在首次解析时扣),终态 IR 的图表与链接同样共享;
+    py-bindings 每次转换按指针缓存,同一共享值只建一个 Python `str`。单值上限:属性 64 KiB、文本节点 1 MiB、
+    标签(批注作者 / 图表类别 / 系列 / 标题)4 KiB、URL 16 KiB、OMML 定界符 / 运算符 2 个字符,超长截断记
+    `value-truncated`。估算口径见 `ppt_core::model_bytes`(`estimated_model_bytes` ≤ 预算是测试性质)。合法基准
+    (`tests/legit_benchmarks.rs`)实测最大 0.76 GB 记账(RSS 约 1.5 GB)。
+  - **个数预算是第二道闸**(缺省 ≥ 基准实测需求 4 倍,合法大文稿零截断零诊断):SmartArt 展开形状 100 000 / 文字
+    8 MiB(单 drawing ≤ 10 000 形状)、图表数据点(按 frame)2 000 000、批注含回复 100 000(批注部件按**剩余**额度
+    解析,额度为 0 直接跳过)、单部件 / 全文形状 20 000 / 1 000 000、单部件 / 全文节点 200 000 / 8 000 000;
+    终态 IR 的母版 / 版式继承形状实例全文 ≤ `MAX_INHERITED_SHAPES`(400 000)。超出后提前停止(已解析的保留),
+    记 `shapes-truncated` / `content-truncated` / `comments-truncated` / `smartart-degraded` / `chart-degraded`;
+    `count` = 实际丢失量(被跳过的行 / 单元格 / 段落 / 组合的后代都计,`skip_dropped`)。**截断公平**:先解析
+    layout / master / theme / 表格样式,再逐页解析(每页的图表 / SmartArt / 备注 / 批注紧随其后),解析任何部件前先为
+    剩余幻灯片每页预留保底 `min(节点 2 000 / 形状 100 / 字节 2 MiB, 剩余 / 页数)`——耗尽时"每页长尾被截"。
+    `Presentation.report`(`ParseReport`;Python `truncated` / `parse_report()`)给出被截断部件全集(不受诊断
+    10 000 条上限影响)、丢弃计数与用量。诊断 `part` 只准是包内真实部件路径,不同条目 ≤ 10 000,超出并入每种
+    kind 一条 `part=""` 的汇总。
+  - **导出 / 渲染有界。** `ExportOptions::max_output_bytes`(缺省 64 MiB,写满即停、带截断标记行)、
+    `RenderOptions::max_page_ops` / `max_total_ops`(缺省 100 000 / 10 000 000 op 权重,表格 / 组合按单元格 /
+    子形状粒度停下,`render-budget` 告警)。阅读顺序 XY-cut 的切分步数预算 `4·n·⌈log₂(n+1)⌉ + 20 000`,超出退回
+    (top, left) 行排序(正常版式结果不变,有固化语料摘要)。
+  - 组合 / `mc:AlternateContent` 嵌套超过 64 层的子树整体跳过(防递归下降爆栈)。`mc:AlternateContent` 按**信息量**
+    选分支(`info_score`:可见文字字符数 + 有媒体图片 / 表格 / 图表 / SmartArt / 有几何形状各 1;空文本框、无媒体
+    图片、无几何形状、裸 OLE 占位框、空组合为 0):第一个 > 0 的 Choice → 否则 > 0 的 Fallback → 都为 0 取叶子
+    多的、相同取 Choice;落选分支的预算与诊断计数退还(段落层:第一个有文字的 Choice,否则 Fallback)。`a14:m` 公式
+    线性化为 `RunKind::Math` run(括号只看槽位线性化结果:非原子才加括号;`m:d` / `m:nary` / `m:sSubSup` / `m:sPre` /
+    `m:limLow|Upp` / `m:func` / `m:bar|acc` / `m:m` / `m:eqArr` 各有确定形式,自闭合 `<m:e/>` 是空槽位,空结构输出
+    空串,`m:subHide` / `m:supHide` 隐藏上下限,见 `xml/slide.rs` 公式段注释;与 docspine 各自独立实现)。
 - **缝的元模式(家族统一)。** 唯一外部能力(OCR)经 Protocol seam 接入:`OcrEngine`(来自
   `ocrspine`)是协议,`PaddleOcr` 是确定性默认实现。core 只依赖协议,**绝不**直接 import 任何
   推理 SDK。
@@ -50,6 +80,7 @@ crates/
     src/diagnostics.rs Diagnostic / DiagnosticKind(#[non_exhaustive]):解析诊断(种类 + 部件路径 + 计数,绝不含正文),挂在 Presentation.diagnostics
     src/custgeom.rs a:custGeom 纯数据模型(CustGeom/Guide/CustPath/PathCmd)+ 预算常量(参考线 1024 / path 256 / 命令 20 000)
     src/geom.rs    Emu(i64,914400/inch) + to_points + Rect/Point
+    src/model_bytes.rs 模型字节估算(Estimator:结构体大小 + 字符串字节,共享 Arc 只计一次)
     src/model.rs   Presentation/Slide/Shape/TextFrame/Paragraph/TextRun/Table/Row/Cell/Picture/AutoShape/Color
                    + Chart/ChartKind/ChartSeries(挂在 GraphicPlaceholder.chart)
     src/export/    reading_order.rs(XY-cut 视觉阅读顺序,展平组合几何) view.rs(导出选项 + 每页有序形状视图 + 纯文本)
@@ -60,7 +91,8 @@ crates/
     src/links.rs   超链接后处理:rels 回填外链 url,页内跳转折成目标幻灯片序号
     src/charts.rs  图表后处理:占位的 c:chart@r:id 经 slide rels 读 ppt/charts/chartN.xml 回填 chart
     src/diagrams.rs SmartArt 后处理:dgm:relIds@r:dm → data 部件 → drawing 部件(优先,包成 frame 变换的组合)/ 退回 data 文字
-    src/xml/       quick-xml walker:presentation.rs(尺寸+顺序) slide.rs(spTree -> Shape)
+    src/xml/       quick-xml walker:budget.rs(解析期线程局部预算:节点 / 模型字节 + 单值上限)
+                   presentation.rs(尺寸+顺序) slide.rs(spTree -> Shape)
                    comments.rs(批注部件 + 作者部件:旧式 p:cmLst / 新式 p188:cmLst 含回复 -> Comment;审阅元数据,不进导出)
                    diagram.rs(SmartArt data 部件:内容点文字 + dataModelExt 的 drawing 关系 id)
                    doc_props.rs(docProps/core.xml + app.xml -> DocProperties)
