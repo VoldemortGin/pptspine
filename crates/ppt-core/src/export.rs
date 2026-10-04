@@ -415,6 +415,7 @@ mod tests {
             slide_size: (0, 0),
             sections: Vec::new(),
             properties: Default::default(),
+            first_slide_num: 1,
         };
 
         let text = presentation_text(&pres);

@@ -207,6 +207,7 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
             slide_size: meta.slide_size,
             sections,
             properties,
+            first_slide_num: meta.first_slide_num.unwrap_or(1),
         },
         media,
         inherit,

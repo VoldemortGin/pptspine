@@ -8,7 +8,7 @@ use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 
 use super::text_style::parse_list_style;
-use super::{attr_string, local_name};
+use super::{attr_of, attr_string, local_name};
 
 /// `presentation.xml` 的解析结果。
 #[derive(Debug, Clone, Default)]
@@ -23,6 +23,8 @@ pub struct PresentationMeta {
     pub slide_ids: Vec<(u32, String)>,
     /// 节(`p14:section`):`(name, [sldId@id])`,按文档顺序。
     pub sections: Vec<(String, Vec<u32>)>,
+    /// `p:presentation@firstSlideNum`(缺失 / 非法为 `None`,调用方按缺省 1)。
+    pub first_slide_num: Option<i32>,
 }
 
 /// 解析 `presentation.xml`。容错:遇错即返回已得部分。
@@ -50,6 +52,10 @@ pub fn parse(xml: &str) -> PresentationMeta {
             Ok(Event::Empty(e)) | Ok(Event::Start(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
                 match name.as_slice() {
+                    b"presentation" => {
+                        meta.first_slide_num =
+                            attr_of(&e, b"firstSlideNum").and_then(|v| v.trim().parse().ok());
+                    }
                     b"sldSz" => {
                         let mut cx: Emu = 0;
                         let mut cy: Emu = 0;

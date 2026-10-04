@@ -394,6 +394,7 @@ mod tests {
             slide_size: (9_144_000, 6_858_000),
             sections: Vec::new(),
             properties: Default::default(),
+            first_slide_num: 1,
         }
     }
 

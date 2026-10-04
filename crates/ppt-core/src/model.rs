@@ -19,6 +19,8 @@ pub struct Presentation {
     pub sections: Vec<Section>,
     /// 文档属性(`docProps/core.xml` + `docProps/app.xml`);缺失字段为 `None`。
     pub properties: DocProperties,
+    /// 首张幻灯片的显示页码(`p:presentation@firstSlideNum`,缺省 1)。
+    pub first_slide_num: i32,
 }
 
 /// 一个节(`p14:section`):名字 + 所含幻灯片的零基序号(按节内顺序)。

@@ -22,8 +22,8 @@ use ppt_core::color::{apply_transforms, ColorSpec, ResolvedColor};
 use ppt_core::geom::Rect;
 use ppt_core::model::{
     AutoShape, Autofit, Background, BodyProps, Cell, Connector, Fill, GraphicPlaceholder,
-    Paragraph, Presentation, Shape, Slide, Stroke, Table, TableFlags, TablePartStyle, TableStyle,
-    TextFrame, TextRun,
+    Paragraph, Presentation, RunKind, Shape, Slide, Stroke, Table, TableFlags, TablePartStyle,
+    TableStyle, TextFrame, TextRun,
 };
 use ppt_core::model::{LineEnd, LineEndKind};
 use ppt_core::resolved::{
@@ -56,7 +56,7 @@ pub fn resolve_parts(
         slides: presentation
             .slides
             .iter()
-            .map(|s| resolve_slide(s, inherit))
+            .map(|s| resolve_slide(s, inherit, presentation.first_slide_num))
             .collect(),
     }
 }
@@ -70,9 +70,11 @@ struct Ctx<'a> {
     tx_styles: Option<&'a TxStyles>,
     default_text_style: Option<&'a TextStyleLevels>,
     table_styles: &'a BTreeMap<String, TableStyle>,
+    /// 当前 slide 的显示页码(`a:fld type="slidenum"` 的求值结果)。
+    slide_number: i64,
 }
 
-fn resolve_slide(slide: &Slide, inherit: &InheritanceParts) -> ResolvedSlide {
+fn resolve_slide(slide: &Slide, inherit: &InheritanceParts, first_slide_num: i32) -> ResolvedSlide {
     let layout = slide
         .layout_name
         .as_deref()
@@ -98,6 +100,9 @@ fn resolve_slide(slide: &Slide, inherit: &InheritanceParts) -> ResolvedSlide {
         tx_styles: master.and_then(|m| m.tx_styles.as_ref()),
         default_text_style: inherit.default_text_style.as_ref(),
         table_styles: &inherit.table_styles,
+        // 显示页码 = 放映序号 + firstSlideNum − 1。隐藏页(`show="0"`)照常占号:PowerPoint 的
+        // 页码按幻灯片在文稿里的位置算,导出 / 放映跳过隐藏页后其余页码不重排。
+        slide_number: i64::from(first_slide_num) + slide.index as i64,
     };
     // B-10:背景继承链 slide → layout → master(第一个存在的赢,不逐字段合并)。
     let background = slide
@@ -377,8 +382,16 @@ fn resolve_run(
                 .map(|c| resolve_color(ctx, c, None))
         })
         .unwrap_or(ResolvedColor::opaque([0, 0, 0]));
+    // `slidenum` 字段按页码求值(缓存文本常是模板提示 `‹#›` 或重排前的旧号);其余字段
+    // (`datetime*` 等)沿用文件里缓存的文本——渲染必须确定,绝不取系统当前时间。
+    let text = match &run.kind {
+        RunKind::Field {
+            field_type: Some(t),
+        } if t.eq_ignore_ascii_case("slidenum") => ctx.slide_number.to_string(),
+        _ => run.text.clone(),
+    };
     ResolvedRun {
-        text: run.text.clone(),
+        text,
         kind: run.kind.clone(),
         font,
         ea_font,
