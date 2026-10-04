@@ -19,6 +19,7 @@ from ._core import (
 # ``ocr_image`` 是顶层 Python 包装:委托给 ``_core.ocr_image`` 前先把引擎指向
 # wheel 内自带的 PP-OCRv5 权重(见 ``__init__.py`` 的 ``_ensure_ocr_models_env``)。
 def ocr_image(data: bytes) -> list[dict[str, Any]]: ...
+def reconstruct_image_table(data: bytes) -> list[dict[str, Any]]: ...
 
 __version__: str
 
@@ -28,6 +29,7 @@ __all__ = [
     "open",
     "open_bytes",
     "ocr_image",
+    "reconstruct_image_table",
     "PptError",
     "PptZipError",
     "PptXmlError",

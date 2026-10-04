@@ -49,3 +49,26 @@ def test_ocr_image_bad_bytes_raises():
     # 非图片字节 -> 类型化 PptOcrError(PptError 子类),绝不 panic。
     with pytest.raises(pptspine.PptError):
         pptspine.ocr_image(b"not an image at all")
+
+
+def test_reconstruct_image_table_returns_grid(ocr_sample_bytes):
+    """图像表格重建端到端:OCR 框 -> 行列网格。样本不是严格表格,故只断言形状契约稳定
+    (几何内核本身由 ppt-ocr 的 Rust 单测用合成词框覆盖)。"""
+    tables = pptspine.reconstruct_image_table(ocr_sample_bytes)
+    assert isinstance(tables, list)
+    assert tables, "the sample has several words, so one table is expected"
+    for t in tables:
+        assert set(t) >= {"bbox", "row_count", "col_count", "cols", "rows", "cells"}
+        assert len(t["cols"]) == t["col_count"] + 1
+        assert len(t["rows"]) == t["row_count"] + 1
+        assert t["cells"], "cells with words only; at least one expected"
+        for c in t["cells"]:
+            assert set(c) >= {"row", "col", "row_span", "col_span", "bbox", "text", "confidence"}
+            assert c["row_span"] >= 1 and c["col_span"] >= 1
+            assert 0 <= c["row"] < t["row_count"] and 0 <= c["col"] < t["col_count"]
+    assert pptspine.reconstruct_image_table(ocr_sample_bytes) == tables, "deterministic"
+
+
+def test_reconstruct_image_table_bad_bytes_raises():
+    with pytest.raises(pptspine.PptOcrError):
+        pptspine.reconstruct_image_table(b"not an image at all")

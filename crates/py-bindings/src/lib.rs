@@ -29,7 +29,7 @@ use ppt_core::model::{
 use ppt_core::resolved::ResolvedPresentation;
 use ppt_core::style::{Caps, PlaceholderRef};
 use ppt_core::PptError;
-use ppt_ocr::{OcrItem, PptOcr};
+use ppt_ocr::{reconstruct_table_from_image, ImageTableOptions, OcrItem, PptOcr};
 use ppt_parse::{parse_bytes, parse_path, resolve_parts, InheritanceParts};
 use ppt_render::{render_pdf, ExportResult, ExportWarning, RenderOptions};
 use pyo3::create_exception;
@@ -878,6 +878,43 @@ fn ocr_image<'py>(py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyList>> 
     Ok(list)
 }
 
+/// 把一张**图片里的表格**(扫描件 / 截图)从 OCR 文字框重建成网格,返回 `list[dict]`,每张
+/// 表含 `bbox` / `row_count` / `col_count` / `cols` / `rows` / `cells`(每格 `row` / `col` /
+/// `row_span` / `col_span` / `bbox` / `text` / `confidence`)。形状与 docspine 的
+/// `reconstruct_image_table` 一致;OCR 在释放 GIL 下进行。
+#[pyfunction]
+fn reconstruct_image_table<'py>(py: Python<'py>, data: &[u8]) -> PyResult<Bound<'py, PyList>> {
+    let owned = data.to_vec();
+    let opts = ImageTableOptions::default();
+    let result = py
+        .detach(|| reconstruct_table_from_image(&owned, &opts))
+        .map_err(map_err)?;
+    let list = PyList::empty(py);
+    for t in &result.tables {
+        let td = PyDict::new(py);
+        td.set_item("bbox", t.bbox)?;
+        td.set_item("row_count", t.row_count)?;
+        td.set_item("col_count", t.col_count)?;
+        td.set_item("cols", t.cols.clone())?;
+        td.set_item("rows", t.rows.clone())?;
+        let cells = PyList::empty(py);
+        for c in &t.cells {
+            let cd = PyDict::new(py);
+            cd.set_item("row", c.row)?;
+            cd.set_item("col", c.col)?;
+            cd.set_item("row_span", c.row_span)?;
+            cd.set_item("col_span", c.col_span)?;
+            cd.set_item("bbox", c.bbox)?;
+            cd.set_item("text", &c.text)?;
+            cd.set_item("confidence", c.confidence)?;
+            cells.append(cd)?;
+        }
+        td.set_item("cells", cells)?;
+        list.append(td)?;
+    }
+    Ok(list)
+}
+
 /// 包版本。
 #[pyfunction]
 fn version() -> &'static str {
@@ -894,6 +931,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(open, m)?)?;
     m.add_function(wrap_pyfunction!(open_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(ocr_image, m)?)?;
+    m.add_function(wrap_pyfunction!(reconstruct_image_table, m)?)?;
 
     m.add_class::<PyPresentation>()?;
     m.add_class::<PySlide>()?;

@@ -6,13 +6,20 @@
 //! 本 crate 只把字节喂进去、把结果 [`OcrWord`] 映射成本地的 [`OcrItem`],并把
 //! [`ocrspine::OcrError`] 折成 [`PptError::Ocr`]。
 //!
-//! 本轮**逐图 OCR 真正可用**;基于 OCR 框做表格行列几何重建是后续工作,见
-//! [`reconstruct_table_from_image`](fn@reconstruct_table_from_image) 的 stub。
+//! 逐图 OCR 可用;基于 OCR 框的表格行列几何重建见 [`table`]
+//! ([`reconstruct_table_from_image`] / 纯几何内核 [`reconstruct_from_words`])。
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use ocrspine::{OcrEngine, OcrError, OcrImage, OcrWord, PaddleOcr};
 use ppt_core::{PptError, Result};
+
+mod table;
+
+pub use table::{
+    reconstruct_from_words, reconstruct_table_from_image, ImageTable, ImageTableCell,
+    ImageTableOptions, ImageTableResult,
+};
 
 /// 一条 OCR 结果:文字 + 轴对齐外框 + 置信度。坐标原点在图片左上角,y 向下。
 #[derive(Debug, Clone, PartialEq)]
@@ -116,17 +123,12 @@ impl PptOcr {
     }
 }
 
-/// **[STUB / 延后]** 从一张图片重建表格(行列几何 + 单元格文字)。
-///
-/// 把 OCR 出来的文字框聚类成行/列、推断网格、回填单元格,是一块独立的几何重建工作,
-/// 留作后续。当前一律返回 [`PptError::Unsupported`]。逐图 OCR([`ocr_image_bytes`] /
-/// [`PptOcr::ocr`])已端到端可用,本函数不影响它。
-pub fn reconstruct_table_from_image(_bytes: &[u8]) -> Result<()> {
-    Err(PptError::Unsupported(
-        "reconstruct_table_from_image: image-table geometry reconstruction is deferred; \
-         per-image OCR via ocr_image_bytes / PptOcr::ocr works today"
-            .into(),
-    ))
+/// 内部:OCR 一张图片字节,直接拿到 ocrspine 的 [`OcrWord`](保留像素 bbox + 置信度),
+/// 供表格几何重建用。
+pub(crate) fn ocr_words(bytes: &[u8]) -> Result<Vec<OcrWord>> {
+    let image = decode_image(bytes)?;
+    let engine = new_engine()?;
+    recognize_guarded(&engine, &image)
 }
 
 #[cfg(test)]

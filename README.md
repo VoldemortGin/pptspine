@@ -45,7 +45,7 @@ offline, and deterministically via the sibling [`ocrspine`](../ocrspine) crate
 | PDF export: `to_pdf()` / `save_pdf()` — one page per visible slide (hidden slides skipped unless `include_hidden=True`, matching PowerPoint); placeholder/theme inheritance, shape transforms (rot/flip/adj/dash/`srcRect`), line ends (`headEnd`/`tailEnd`: triangle/stealth/diamond/oval/arrow), group affine, tables (incl. `tableStyles.xml` fills / borders / text color+bold, header / banded rows & columns), slide backgrounds, slideMaster/slideLayout graphics (non-placeholder logos, bars, rules; `showMasterSp`), slide-number fields (`slidenum` = position + `firstSlideNum` − 1, hidden slides keep their number; `datetime*` fields keep the cached text; `to_text` / `to_markdown` print the same evaluated page number) in the footer / slide-number / date placeholders the slide instantiates, body-anchor/autofit, superscript/subscript with the document's own baseline offset, character spacing (expanded and condensed), `cap=all` (`cap=small` approximated as all caps + warning) | working |
 | `custGeom` freeform shapes | parsed + drawn: guide formulas (`avLst` / `gdLst`) evaluated, `a:path` commands incl. Bezier / `arcTo`, per-path `fill` / `stroke`; over budget (1024 guides / 256 paths / 20 000 commands → `custom-geometry-degraded` diagnostic) or an unevaluable formula degrades to the bounding-box rect (connector: straight line) + `custom-geometry-approximated` warning |
 | Image OCR (embedded pictures → words + boxes) | working (`ocr_image`) |
-| Image-table geometry reconstruction from OCR boxes | **deferred** (stub) |
+| Image-table geometry reconstruction from OCR boxes (`reconstruct_image_table`) | working (ported from docspine; geometric row / column clustering, merged-cell spans) |
 
 Parsing is tolerant: unknown elements are skipped, missing attributes become
 `None`, and malformed input yields a typed `PptError` rather than a panic.
@@ -125,6 +125,11 @@ print(pres.diagnostics())      # [] for a clean file; else [{"kind": "xml-trunca
 items = pptspine.ocr_image(open("scan.png", "rb").read())
 print(" ".join(i["text"] for i in items))
 
+# A table photographed / screenshotted as an image → row / column grid (pixel coordinates):
+tables = pptspine.reconstruct_image_table(open("table.png", "rb").read())
+for t in tables:               # [] when fewer than two words are recognised
+    print(t["row_count"], t["col_count"], [(c["row"], c["col"], c["text"]) for c in t["cells"]])
+
 # End-to-end: pull an embedded image's bytes and OCR them, offline:
 for shape in pres.slides()[0].shapes():
     if shape["kind"] == "picture" and shape["media"]:
@@ -184,7 +189,4 @@ shrink it with `cargo +nightly fuzz tmin <target> <crash-file>`. To add a target
 
 ## Deferred / follow-up
 
-- Image-table geometry reconstruction from OCR boxes
-  (`ppt_ocr::reconstruct_table_from_image`, currently a typed `Unsupported`
-  stub).
 - Richer color models (gradients), hyperlinks, charts.

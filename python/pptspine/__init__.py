@@ -29,6 +29,7 @@ from ._core import (
     open_bytes,
 )
 from ._core import ocr_image as _core_ocr_image
+from ._core import reconstruct_image_table as _core_reconstruct_image_table
 
 # --- OCR 模型解析:把 Rust PaddleOCR 引擎指向模型权重 ---------------------------
 
@@ -91,6 +92,19 @@ def ocr_image(data: bytes) -> list[dict[str, object]]:
     return _core_ocr_image(data)
 
 
+def reconstruct_image_table(data: bytes) -> list[dict[str, object]]:
+    """把一张图片里的表格(扫描件 / 截图)从 OCR 词框几何重建成网格,返回 ``list[dict]``。
+
+    每张表含 ``bbox`` / ``row_count`` / ``col_count`` / ``cols`` / ``rows`` / ``cells``
+    (每格 ``row`` / ``col`` / ``row_span`` / ``col_span`` / ``bbox`` / ``text`` /
+    ``confidence``,坐标为图片像素);词少于两个时返回空列表。与 docspine 同名同形状。
+    委托 Rust 前先指向 wheel 内自带的 PP-OCRv5 权重(见 :func:`_ensure_ocr_models_env`);
+    非图片字节抛 :class:`PptOcrError`。
+    """
+    _ensure_ocr_models_env()
+    return _core_reconstruct_image_table(data)
+
+
 try:
     __version__ = _pkg_version("pptspine")
 except PackageNotFoundError:  # 源码树里未安装时回退到扩展自带版本。
@@ -102,6 +116,7 @@ __all__ = [
     "open",
     "open_bytes",
     "ocr_image",
+    "reconstruct_image_table",
     "PptError",
     "PptZipError",
     "PptXmlError",
