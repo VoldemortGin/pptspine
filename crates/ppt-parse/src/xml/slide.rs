@@ -354,7 +354,7 @@ fn dispatch_shape<R: std::io::BufRead>(
             }
         }
         b"graphicFrame" => {
-            if let Some(s) = parse_graphic_frame(reader) {
+            if let Some(s) = parse_graphic_frame(reader, ctx) {
                 out.push(s);
             }
         }
@@ -441,12 +441,20 @@ fn parse_grp_sppr<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<XfrmDat
 /// 按文档顺序把每个 `mc:Choice` 交给形状解析试一遍,第一个**产出非空形状**的被选中;
 /// Choice 里常是本仓不认识的新版元素(`p14:` / `a14:` …),解析为空是预期的,此时回落
 /// `mc:Fallback`。流式 reader 无法回退,故各分支顺序解析、选中后其余丢弃——Choice 与
-/// Fallback 内容绝不同时输出。已消费起始标签。
+/// Fallback 内容绝不同时输出。
+///
+/// OLE 例外:PowerPoint 常把整个 graphicFrame 包进来,Choice 里的 `p:oleObj` 只有 `p:embed`
+/// (解析为无预览图的 OLE 占位框,非空但无实质内容),带 `p:pic` 预览图的在 Fallback。
+/// 只含这种"裸 OLE 占位框"的分支算**弱**内容:有实质内容的分支优先,两边都只有弱内容时
+/// 仍取第一个非空分支(保住占位框)。已消费起始标签。
 fn parse_alternate_content<R: std::io::BufRead>(
     reader: &mut Reader<R>,
     ctx: &Ctx,
     out: &mut Vec<Shape>,
 ) {
+    // 裸 OLE 占位框:没有预览图可画的 OLE graphicFrame。
+    let is_bare_ole = |s: &Shape| matches!(s, Shape::Placeholder(p) if p.kind.as_deref().is_some_and(|k| k.ends_with("/ole")));
+    let strong = |v: &Vec<Shape>| v.iter().any(|s| !is_bare_ole(s));
     let mut chosen: Option<Vec<Shape>> = None;
     let mut fallback: Option<Vec<Shape>> = None;
     let mut buf = Vec::new();
@@ -462,7 +470,8 @@ fn parse_alternate_content<R: std::io::BufRead>(
                             chosen = Some(shapes);
                         }
                     }
-                    b"Fallback" if chosen.is_none() && fallback.is_none() => {
+                    // 已有实质内容的 Choice 时不再解析 Fallback。
+                    b"Fallback" if fallback.is_none() && !chosen.as_ref().is_some_and(strong) => {
                         let mut shapes = Vec::new();
                         parse_shapes_into(reader, ctx, &mut shapes);
                         fallback = Some(shapes);
@@ -477,7 +486,13 @@ fn parse_alternate_content<R: std::io::BufRead>(
         }
         buf.clear();
     }
-    out.extend(chosen.or(fallback).unwrap_or_default());
+    let picked = match (chosen, fallback) {
+        (Some(c), _) if strong(&c) => c,
+        (_, Some(f)) if strong(&f) => f,
+        (Some(c), _) => c,
+        (None, f) => f.unwrap_or_default(),
+    };
+    out.extend(picked);
 }
 
 /// 解析一个 `p:sp`(文本框或自选图形)。已消费 `<p:sp>` 起始标签。
@@ -1659,13 +1674,17 @@ fn parse_run_like<R: std::io::BufRead>(reader: &mut Reader<R>, kind: RunKind) ->
 
 /// 解析 `p:graphicFrame`:其内 `a:graphic` > `a:graphicData` > `a:tbl` -> 表格;
 /// 非表格内容(图表 / SmartArt / OLE 等)降级为 [`Shape::Placeholder`],至少保住外框
-/// 矩形与 `graphicData@uri`(渲染侧据此画占位框 + 告警)。已消费起始标签。
-fn parse_graphic_frame<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Shape> {
+/// 矩形与 `graphicData@uri`(渲染侧据此画占位框 + 告警)。OLE 对象
+/// (`p:oleObj`,常被 `mc:AlternateContent` 包在 graphicData 内)若带 `p:pic` 预览图,
+/// 则按图片进入模型(位置取 frame 的 xfrm;文档顺序第一张预览图胜出,Choice 里通常只有
+/// `p:embed`、预览图在 Fallback)。已消费起始标签。
+fn parse_graphic_frame<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Option<Shape> {
     let mut rect: Option<Rect> = None;
     let mut table: Option<Table> = None;
     let mut uri: Option<String> = None;
     let mut chart_rel_id: Option<String> = None;
     let mut diagram_rel_id: Option<String> = None;
+    let mut ole_pic: Option<Shape> = None;
     // graphic / graphicData 是要"穿透"的容器:降入时计深,End 时消深,直到
     // `</p:graphicFrame>` 本身(depth 归零)才结束。此前不计深、见 End 就 break,
     // 会把 `</a:graphic>`/`</p:graphicFrame>` 留给上层容器误吞,静默丢掉 frame
@@ -1684,6 +1703,10 @@ fn parse_graphic_frame<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Sh
                     }
                     // graphic / graphicData 只是容器:不要 skip,继续往里走。
                     b"graphic" => depth += 1,
+                    // OLE:AlternateContent / Choice / Fallback / oleObj 同为透传容器,
+                    // 预览图 `p:pic` 经图片解析进入 `ole_pic`(首张胜出,绝不同取)。
+                    b"AlternateContent" | b"Choice" | b"Fallback" | b"oleObj" => depth += 1,
+                    b"pic" if ole_pic.is_none() => ole_pic = parse_pic(reader, ctx),
                     b"graphicData" => {
                         uri = attr_of(&e, b"uri").or(uri);
                         depth += 1;
@@ -1716,6 +1739,10 @@ fn parse_graphic_frame<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<Sh
             _ => {}
         }
         buf.clear();
+    }
+    if let (None, Some(Shape::Picture(mut pic))) = (&table, ole_pic) {
+        pic.rect = rect.or(pic.rect);
+        return Some(Shape::Picture(pic));
     }
     match table {
         Some(mut t) => {
