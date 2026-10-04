@@ -17,10 +17,11 @@ pub enum DiagnosticKind {
     /// 关系(`.rels`)指向包内不存在的部件。`part` = 持有该关系的源部件,`count` = 悬空关系数
     /// (外部链接不算)。
     MissingPart,
-    /// SmartArt 没有可用的 drawing 部件(缺失 / 畸形 / 为空)而降级:渲染为占位框,
-    /// 仅 data 部件文字保留。`part` = data 部件,`count` = 受影响的 frame 数。
+    /// SmartArt 没有可用的 drawing 部件(缺失 / 畸形 / 为空)或超出展开预算而降级:渲染为占位框,
+    /// 仅 data 部件文字保留。`part` = data 部件(data 部件不存在 / 关系找不到时为持有该关系的
+    /// 源 slide 部件),`count` = 受影响的 frame 数。
     SmartArtDegraded,
-    /// 图表部件存在但解析不出可用数据(XML 不良构或无系列)而降级。`part` = 图表部件,
+    /// 图表部件存在但解析不出可用数据(XML 不良构或无系列)或超出数据点预算而降级。`part` = 图表部件,
     /// `count` = 受影响的 frame 数。
     ChartDegraded,
     /// `a:custGeom` 超过参考线 / 路径 / 命令数预算而降级:渲染按包围盒近似。`part` = 所在部件,
@@ -53,11 +54,13 @@ impl DiagnosticKind {
     }
 }
 
-/// 一条解析诊断。同一 `(kind, part)` 只出现一次,重复发生累加进 `count`。
+/// 一条解析诊断。同一 `(kind, part)` 只出现一次,重复发生累加进 `count`。不同条目总数有上限
+/// (10 000):超出后新条目并入每种 kind 一条的汇总条目,其 `part` 为空串。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
     pub kind: DiagnosticKind,
-    /// 所在部件路径(包内路径,如 `ppt/slides/slide1.xml`)。
+    /// 所在部件路径(**包内真实存在**的部件,如 `ppt/slides/slide1.xml`;绝不是文件里写的任意
+    /// 目标串)。空串 = 汇总条目(条数超限后的合并,或没有可用的真实部件路径)。
     pub part: String,
     /// 计数,语义见各 [`DiagnosticKind`] 变体。
     pub count: usize,

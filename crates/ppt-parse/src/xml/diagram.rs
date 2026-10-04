@@ -18,11 +18,14 @@ pub struct DiagramData {
     pub texts: Vec<String>,
     /// `dgm:extLst > a:ext > dsp:dataModelExt@relId`:drawing 部件在**幻灯片** rels 里的 id。
     pub drawing_rel_id: Option<String>,
+    /// 解析 `dgm:t` 文字时因嵌套超限被跳过的子树数(诊断用)。
+    pub nesting_skipped: usize,
 }
 
 /// 解析一份 data 部件 XML。
 pub fn parse_data(xml: &str) -> DiagramData {
     let mut out = DiagramData::default();
+    super::slide::reset_nest_skipped();
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(false);
     let mut buf = Vec::new();
@@ -58,6 +61,7 @@ pub fn parse_data(xml: &str) -> DiagramData {
         }
         buf.clear();
     }
+    out.nesting_skipped = super::slide::take_nest_skipped();
     out
 }
 

@@ -142,10 +142,19 @@ pub struct Package {
     diag: RefCell<DiagState>,
 }
 
+/// 不同 `(kind, part)` 诊断条目数上限:超出后新的条目并入"每种 kind 一条、`part` 为空串"的
+/// 汇总条目(`count` 照常累加,只丢 `part`)。合法文档的 `part` 都是包内真实部件(至多
+/// `max_entries` 个,默认 10 000),取同一量级,既不误伤大文档又封住条数。
+const MAX_DIAGNOSTICS: usize = 10_000;
+/// 诊断 `part` 的最大字节长度;更长的(只可能来自调高了 `max_name_len` 的畸形包)并入汇总条目。
+const MAX_PART_LEN: usize = 1024;
+
 /// 诊断收集状态:已有诊断(按 `(kind, part)` 合并计数,保持首次出现顺序)+ 各"只做一次"检查的去重集。
 #[derive(Default)]
 struct DiagState {
     list: Vec<Diagnostic>,
+    /// `(kind, part)` → `list` 下标(有序映射,合并是对数查找而非线性扫描)。
+    index: BTreeMap<(DiagnosticKind, String), usize>,
     /// 已做过良构扫描的部件。
     scanned: BTreeSet<String>,
     /// 良构扫描判定为被截断 / 损坏的部件。
@@ -260,25 +269,46 @@ impl Package {
     }
 
     /// 记一条解析诊断;同一 `(kind, part)` 累加 `count`。只传种类 / 部件路径 / 计数,绝不传正文。
+    ///
+    /// `part` 只允许是**包内真实存在**的部件路径(且不超过 [`MAX_PART_LEN`]);其它任何字符串
+    /// (如关系里写的指向不存在部件的 `Target`)一律记为空串,绝不把文件作者写的任意文本带进
+    /// 诊断——调用方应传持有该关系的源部件。不同条目超过 [`MAX_DIAGNOSTICS`] 后,新条目并入
+    /// 每种 kind 一条的汇总条目(`part` 为空串),`count` 仍然累加。
     pub fn note(&self, kind: DiagnosticKind, part: &str, count: usize) {
+        let part = if part.len() <= MAX_PART_LEN && self.parts.contains_key(part) {
+            part
+        } else {
+            ""
+        };
         let mut st = self.diag.borrow_mut();
-        match st
-            .list
-            .iter_mut()
-            .find(|d| d.kind == kind && d.part == part)
-        {
-            Some(d) => d.count += count,
-            None => st.list.push(Diagnostic {
-                kind,
-                part: part.to_string(),
-                count,
-            }),
+        let mut key = (kind, part.to_string());
+        if !st.index.contains_key(&key) && !part.is_empty() && st.list.len() >= MAX_DIAGNOSTICS {
+            key.1.clear();
+        }
+        match st.index.get(&key).copied() {
+            Some(i) => st.list[i].count = st.list[i].count.saturating_add(count),
+            None => {
+                let i = st.list.len();
+                st.list.push(Diagnostic {
+                    kind,
+                    part: key.1.clone(),
+                    count,
+                });
+                st.index.insert(key, i);
+            }
         }
     }
 
     /// 取走已收集的全部诊断(按首次出现顺序)。
     pub fn take_diagnostics(&self) -> Vec<Diagnostic> {
-        std::mem::take(&mut self.diag.borrow_mut().list)
+        let mut st = self.diag.borrow_mut();
+        st.index.clear();
+        std::mem::take(&mut st.list)
+    }
+
+    /// 包内是否存在该部件(不触发良构扫描)。
+    pub fn has_part(&self, name: &str) -> bool {
+        self.parts.contains_key(name)
     }
 
     /// 该部件是否已被良构扫描判定为损坏 / 截断(须已经 [`Self::part_str`] 读取过)。
@@ -483,4 +513,76 @@ fn rels_path_for(part: &str) -> String {
 fn basename(path: &str) -> String {
     let p = path.rsplit('/').next().unwrap_or(path);
     p.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use super::*;
+
+    /// 含 `n` 个真实 slide 部件(各一字节)的包。
+    fn package_with_slides(n: usize) -> Package {
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut buf);
+            for i in 0..n {
+                zip.start_file(
+                    format!("ppt/slides/slide{i}.xml"),
+                    zip::write::SimpleFileOptions::default(),
+                )
+                .unwrap();
+                zip.write_all(b"x").unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        let limits = ZipLimits {
+            max_entries: n + 1,
+            ..ZipLimits::default()
+        };
+        Package::open_bytes_with_limits(&buf.into_inner(), &limits).unwrap()
+    }
+
+    #[test]
+    fn distinct_diagnostics_are_capped_and_overflow_merges_into_a_summary_per_kind() {
+        let n = MAX_DIAGNOSTICS + 50;
+        let pkg = package_with_slides(n);
+        for i in 0..n {
+            pkg.note(
+                DiagnosticKind::MissingPart,
+                &format!("ppt/slides/slide{i}.xml"),
+                2,
+            );
+            pkg.note(
+                DiagnosticKind::ChartDegraded,
+                &format!("ppt/slides/slide{i}.xml"),
+                1,
+            );
+        }
+        let d = pkg.take_diagnostics();
+        // 上限内的条目照常保留;超出的并入每种 kind 一条、part 为空的汇总条目。
+        assert_eq!(
+            d.len(),
+            MAX_DIAGNOSTICS + 2,
+            "封顶条目 + 两种 kind 各一条汇总"
+        );
+        let sum = |k: DiagnosticKind| -> usize {
+            d.iter().filter(|x| x.kind == k).map(|x| x.count).sum()
+        };
+        assert_eq!(sum(DiagnosticKind::MissingPart), 2 * n, "总 count 正确");
+        assert_eq!(d.iter().filter(|x| x.part.is_empty()).count(), 2);
+        assert_eq!(sum(DiagnosticKind::ChartDegraded), n);
+    }
+
+    #[test]
+    fn non_package_part_strings_never_reach_diagnostics() {
+        let pkg = package_with_slides(1);
+        pkg.note(DiagnosticKind::MissingPart, "ppt/slides/slide0.xml", 1);
+        pkg.note(DiagnosticKind::MissingPart, "ppt/diagrams/ATTACKER.xml", 1);
+        pkg.note(DiagnosticKind::MissingPart, &"a".repeat(5000), 1);
+        let d = pkg.take_diagnostics();
+        let parts: Vec<&str> = d.iter().map(|x| x.part.as_str()).collect();
+        assert_eq!(parts, ["ppt/slides/slide0.xml", ""]);
+        assert_eq!(d[1].count, 2);
+    }
 }

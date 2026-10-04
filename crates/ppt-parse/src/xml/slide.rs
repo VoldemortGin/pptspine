@@ -313,6 +313,17 @@ thread_local! {
     static CUSTGEOM_DEGRADED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// 清零嵌套超限计数(`parse_part` 之外复用 [`parse_txbody`] 的解析入口——批注 / SmartArt data——
+/// 在解析前调用,与 [`take_nest_skipped`] 配对,免得计数被下一次 `parse_part` 开头清零而丢失)。
+pub(super) fn reset_nest_skipped() {
+    NEST_SKIPPED.with(|c| c.set(0));
+}
+
+/// 取走(并清零)当前嵌套超限计数。
+pub(super) fn take_nest_skipped() -> usize {
+    NEST_SKIPPED.with(std::cell::Cell::take)
+}
+
 /// 记一棵因嵌套过深被跳过的子树。
 fn note_nest_skipped() {
     NEST_SKIPPED.with(|c| c.set(c.get() + 1));

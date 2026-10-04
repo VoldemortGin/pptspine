@@ -136,7 +136,7 @@ fn fill_diagram(
     cache: &mut DiagramCache,
 ) -> Option<GroupShape> {
     // 没有可用 drawing 即降级(占位框 + data 文字):记一条 `SmartArtDegraded`(`part` = data 部件;
-    // 关系都找不到时退回源 slide 部件)。
+    // 关系都找不到 / data 部件不存在时退回源 slide 部件)。
     let Some(rel) = gp.diagram_rel_id.as_deref().and_then(|id| rels.get(id)) else {
         pkg.note(DiagnosticKind::SmartArtDegraded, part, 1);
         return None;
@@ -145,10 +145,24 @@ fn fill_diagram(
     let data = cache
         .data
         .entry(data_path.clone())
-        .or_insert_with(|| pkg.part_str(&data_path).map(|x| parse_data(&x)))
+        .or_insert_with(|| {
+            pkg.part_str(&data_path).map(|x| {
+                let d = parse_data(&x);
+                // data 部件里的嵌套超限(文字段落层)只在这里能看到,每个部件只记一次。
+                if d.nesting_skipped > 0 {
+                    pkg.note(
+                        DiagnosticKind::NestingTooDeep,
+                        &data_path,
+                        d.nesting_skipped,
+                    );
+                }
+                d
+            })
+        })
         .as_ref();
     let Some(data) = data else {
-        pkg.note(DiagnosticKind::SmartArtDegraded, &data_path, 1);
+        // data 部件不存在:`part` 记持有该关系的源 slide 部件,不带文件里写的目标串。
+        pkg.note(DiagnosticKind::SmartArtDegraded, part, 1);
         return None;
     };
 

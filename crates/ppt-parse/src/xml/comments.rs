@@ -58,6 +58,8 @@ pub struct ParsedComments {
     pub comments: Vec<Comment>,
     /// 因 `max` 上限提前停止(部件里还有没读的批注 / 回复)。
     pub truncated: bool,
+    /// 解析正文时因嵌套超限被跳过的子树数(诊断用)。
+    pub nesting_skipped: usize,
 }
 
 /// 批注 / 回复的剩余条数预算;耗尽后再遇到条目就记 `truncated`。
@@ -87,6 +89,7 @@ pub fn count_comments(cs: &[Comment]) -> usize {
 /// 之后立即停止(防一个部件里的海量批注先被全量读进内存)。
 pub fn parse_comments(xml: &str, authors: &BTreeMap<String, Author>, max: usize) -> ParsedComments {
     let mut out = Vec::new();
+    super::slide::reset_nest_skipped();
     let mut budget = Budget {
         left: max,
         truncated: false,
@@ -121,6 +124,7 @@ pub fn parse_comments(xml: &str, authors: &BTreeMap<String, Author>, max: usize)
     ParsedComments {
         comments: out,
         truncated: budget.truncated,
+        nesting_skipped: super::slide::take_nest_skipped(),
     }
 }
 

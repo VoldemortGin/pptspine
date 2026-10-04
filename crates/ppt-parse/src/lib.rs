@@ -415,7 +415,10 @@ fn collect_comments(
     for r in rels.values().filter(|r| r.rel_type.ends_with("/comments")) {
         let path = links::resolve_part_path(slide_part, &r.target);
         if !seen.insert(path.clone()) {
-            pkg.note(DiagnosticKind::DuplicateCommentRef, &path, 1);
+            // 只对真实存在的部件记(指向缺失部件的重复引用已由 `missing-part` 覆盖)。
+            if pkg.has_part(&path) {
+                pkg.note(DiagnosticKind::DuplicateCommentRef, &path, 1);
+            }
             continue;
         }
         let max = cache.max;
@@ -425,6 +428,10 @@ fn collect_comments(
             .or_insert_with(|| {
                 pkg.part_str(&path).map(|x| {
                     let p = xml::comments::parse_comments(&x, authors, max);
+                    // 批注正文里的嵌套超限只在这里能看到,每个部件只记一次。
+                    if p.nesting_skipped > 0 {
+                        pkg.note(DiagnosticKind::NestingTooDeep, &path, p.nesting_skipped);
+                    }
                     (p.comments, p.truncated)
                 })
             })

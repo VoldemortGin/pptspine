@@ -423,3 +423,105 @@ fn over_budget_custgeom_is_reported_with_part_and_count_only() {
     let p = parse(&deck(&slide_xml(ok), &[]));
     assert!(kinds(&p, DiagnosticKind::CustomGeometryDegraded).is_empty());
 }
+
+// --- 诊断条数 / part 字段有界,且不泄露文件作者写的任意 Target 串 ---
+
+const DGM: &str = "http://schemas.openxmlformats.org/drawingml/2006/diagram";
+
+/// N 个 SmartArt frame,各指向一个不同名的不存在 data 部件。
+fn missing_smartart_deck(n: usize, prefix: &str) -> Vec<u8> {
+    let frames: String = (0..n)
+        .map(|i| {
+            graphic_frame(
+                DGM,
+                &format!(r#"<dgm:relIds xmlns:dgm="{DGM}" r:dm="rId{i}"/>"#),
+            )
+        })
+        .collect();
+    let slide_rels: Vec<(String, String)> = (0..n)
+        .map(|i| (format!("rId{i}"), format!("../diagrams/{prefix}{i}.xml")))
+        .collect();
+    let refs: Vec<(&str, &str, &str)> = slide_rels
+        .iter()
+        .map(|(id, t)| (id.as_str(), "diagramData", t.as_str()))
+        .collect();
+    deck(&slide_xml(&frames), &refs)
+}
+
+#[test]
+fn many_distinct_missing_targets_do_not_multiply_diagnostics() {
+    let n = 10_000;
+    let p = parse(&missing_smartart_deck(n, "ATTACKER-CHOSEN-"));
+    let diags = &p.presentation.diagnostics;
+    assert!(diags.len() <= 4, "条数必须与目标数无关:{}", diags.len());
+    let total = |k: DiagnosticKind| -> usize {
+        diags.iter().filter(|d| d.kind == k).map(|d| d.count).sum()
+    };
+    assert_eq!(total(DiagnosticKind::SmartArtDegraded), n, "总计数不丢");
+    assert_eq!(total(DiagnosticKind::MissingPart), n);
+    // 指向不存在部件的引用,part 记持有该关系的源部件,而不是文件里写的目标串。
+    assert!(
+        diags.iter().all(|d| d.part == SLIDE),
+        "{:?}",
+        diags.iter().map(|d| &d.part).collect::<Vec<_>>()
+    );
+    assert!(!format!("{diags:?}").contains("ATTACKER"));
+}
+
+#[test]
+fn nesting_overflow_inside_comments_and_smartart_data_is_reported() {
+    let nest = |depth: usize| {
+        let mut inner = "<m:r><m:t>DEEPTEXT</m:t></m:r>".to_string();
+        for _ in 0..depth {
+            inner = format!(
+                "<m:sSup><m:e>{inner}</m:e><m:sup><m:r><m:t>2</m:t></m:r></m:sup></m:sSup>"
+            );
+        }
+        format!(
+            r#"<a14:m xmlns:a14="http://schemas.microsoft.com/office/drawing/2010/main" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:oMathPara><m:oMath>{inner}</m:oMath></m:oMathPara></a14:m>"#
+        )
+    };
+    let comments = format!(
+        r#"<p188:cmLst xmlns:p188="urn:p188" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><p188:cm><p188:txBody><a:bodyPr/><a:p>{}</a:p></p188:txBody></p188:cm></p188:cmLst>"#,
+        nest(70)
+    );
+    let data = format!(
+        r#"<dgm:dataModel xmlns:dgm="{DGM}" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><dgm:ptLst><dgm:pt modelId="1"><dgm:t><a:bodyPr/><a:p>{}</a:p></dgm:t></dgm:pt></dgm:ptLst></dgm:dataModel>"#,
+        nest(70)
+    );
+    let frame = graphic_frame(
+        DGM,
+        &format!(r#"<dgm:relIds xmlns:dgm="{DGM}" r:dm="rId2"/>"#),
+    );
+    let bytes = zip(&[
+        ("ppt/presentation.xml", presentation(&["rId1"])),
+        (
+            "ppt/_rels/presentation.xml.rels",
+            rels(&[("rId1", "slide", "slides/slide1.xml")]),
+        ),
+        (SLIDE, slide_xml(&frame)),
+        (
+            "ppt/slides/_rels/slide1.xml.rels",
+            rels(&[
+                ("rId2", "diagramData", "../diagrams/data1.xml"),
+                ("rId3", "comments", "../comments/comment1.xml"),
+            ]),
+        ),
+        ("ppt/diagrams/data1.xml", data),
+        ("ppt/comments/comment1.xml", comments),
+    ]);
+    let p = parse(&bytes);
+    let mut d: Vec<(String, usize)> = kinds(&p, DiagnosticKind::NestingTooDeep)
+        .iter()
+        .map(|d| (d.part.clone(), d.count))
+        .collect();
+    d.sort();
+    let parts: Vec<&str> = d.iter().map(|(p, _)| p.as_str()).collect();
+    assert_eq!(
+        parts,
+        ["ppt/comments/comment1.xml", "ppt/diagrams/data1.xml"],
+        "{:?}",
+        p.presentation.diagnostics
+    );
+    assert!(d.iter().all(|(_, c)| *c >= 1));
+}
