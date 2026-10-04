@@ -14,6 +14,7 @@
 //! 锚定,B-7)+ 幻灯片背景含 layout/master 继承(B-10,继承在 `ppt-parse::resolve`
 //! 终态化)。
 
+mod chart;
 mod shapes;
 mod text;
 mod transform;
@@ -68,6 +69,7 @@ pub fn render_pdf(
         warnings: Vec::new(),
         vertical_warned: false,
         small_caps_warned: false,
+        accents: ppt_core::resolved::DEFAULT_ACCENTS,
     };
     let pages: Vec<PageOps> = pres
         .slides
@@ -96,6 +98,8 @@ struct RenderCtx<'a> {
     vertical_warned: bool,
     /// 小型大写(`cap=small`)降级告警的一次性开关(整篇只发一条)。
     small_caps_warned: bool,
+    /// 当前 slide 的主题 accent1..6(图表系列配色)。
+    accents: [[u8; 3]; 6],
 }
 
 impl RenderCtx<'_> {
@@ -128,6 +132,7 @@ fn slide_ops(
     height: f64,
 ) -> Vec<Op> {
     let mut ops = Vec::new();
+    ctx.accents = slide.accents;
     // B-10:整页背景(`ResolvedSlide.background` 已含 slide → layout → master 继承)。
     if let Some(bg) = &slide.background {
         background_ops(ts, ctx, bg, width, height, &mut ops);
@@ -273,7 +278,7 @@ fn shape_ops(
                 }
             }
         },
-        ResolvedShape::Placeholder(gp) => shapes::graphic_placeholder_ops(gp, flat, ops),
+        ResolvedShape::Placeholder(gp) => shapes::graphic_placeholder_ops(ts, ctx, gp, flat, ops),
         // B-7:绝对单元格网格 + 填充 + 文字 + 逐边框线。
         ResolvedShape::Table(t) => table_ops(ts, ctx, t, flat, ops),
     }
@@ -578,6 +583,7 @@ mod tests {
             background: None,
             inherited_shapes: vec![],
             shapes,
+            accents: ppt_core::resolved::DEFAULT_ACCENTS,
         }])
     }
 
@@ -626,6 +632,7 @@ mod tests {
             ))),
             inherited_shapes: vec![],
             shapes: vec![],
+            accents: ppt_core::resolved::DEFAULT_ACCENTS,
         };
         let out = render(&pres(vec![slide]));
         let hay = String::from_utf8_lossy(&out.pdf);
@@ -978,12 +985,14 @@ mod tests {
                 background: None,
                 inherited_shapes: vec![],
                 shapes: vec![],
+                accents: ppt_core::resolved::DEFAULT_ACCENTS,
             },
             ResolvedSlide {
                 index: 1,
                 background: None,
                 inherited_shapes: vec![],
                 shapes: vec![],
+                accents: ppt_core::resolved::DEFAULT_ACCENTS,
             },
         ]);
         let out = render(&p);
@@ -1570,5 +1579,126 @@ mod tests {
         let rotated = render(&group(90 * 60_000));
         assert!(String::from_utf8_lossy(&rotated.pdf).contains(" cm"));
         assert_ne!(plain.pdf, rotated.pdf);
+    }
+
+    // ---- 图表矢量渲染 ---------------------------------------------------------
+
+    /// 一个带图表缓存数据的占位(`kind` 为 chart uri)。
+    fn chart_shape(chart: Option<ppt_core::model::Chart>, uri: &str) -> ResolvedShape {
+        ResolvedShape::Placeholder(ppt_core::model::GraphicPlaceholder {
+            rect: Some(Rect::new(914_400, 914_400, 6_400_800, 4_572_000)),
+            kind: Some(uri.to_string()),
+            chart_rel_id: Some("rId2".into()),
+            chart,
+        })
+    }
+
+    const CHART_URI: &str = "http://schemas.openxmlformats.org/drawingml/2006/chart";
+
+    fn sample_chart(kind: ppt_core::model::ChartKind) -> ppt_core::model::Chart {
+        use ppt_core::model::{Chart, ChartSeries};
+        let s = |name: &str, v: [f64; 3]| ChartSeries {
+            name: Some(name.into()),
+            values: v.iter().map(|x| Some(*x)).collect(),
+            format_code: None,
+        };
+        Chart {
+            kind,
+            title: Some("Sales".into()),
+            categories: vec!["Q1".into(), "Q2".into(), "Q3".into()],
+            series: vec![
+                s("North", [10.0, 20.0, 30.0]),
+                s("South", [5.0, 15.0, 25.0]),
+            ],
+            bar_dir: Some("col".into()),
+            grouping: Some("clustered".into()),
+            three_d: false,
+            combo: false,
+            warnings: Vec::new(),
+        }
+    }
+
+    /// 占位框灰底(`PLACEHOLDER_FILL` 0.85 灰)是否出现在内容流里。
+    fn has_placeholder_box(pdf: &[u8]) -> bool {
+        String::from_utf8_lossy(pdf).contains("0.85 0.85 0.85 rg")
+    }
+
+    fn chart_degraded(out: &ExportResult) -> usize {
+        out.warnings
+            .iter()
+            .filter(|w| matches!(w, ExportWarning::Custom { kind, .. } if kind == "chart-degraded"))
+            .count()
+    }
+
+    /// 柱形 / 折线 / 饼图不再画占位框、不告警,而是用主题 accent 配色画出矢量图 + 文字。
+    #[test]
+    fn supported_charts_render_vectors_instead_of_placeholder() {
+        use ppt_core::model::ChartKind;
+        for kind in [ChartKind::Bar, ChartKind::Line, ChartKind::Pie] {
+            let mut slide = one_slide(vec![chart_shape(
+                Some(sample_chart(kind.clone())),
+                CHART_URI,
+            )]);
+            // 自定义 accent1 为纯红,验证配色取自 slide 主题而非写死。
+            slide.slides[0].accents[0] = [255, 0, 0];
+            let out = render(&slide);
+            let hay = String::from_utf8_lossy(&out.pdf);
+            assert!(!has_placeholder_box(&out.pdf), "{kind:?}: 不应再画占位框");
+            assert_eq!(chart_degraded(&out), 0, "{kind:?}: {:?}", out.warnings);
+            assert!(hay.contains("1 0 0 rg"), "{kind:?}: 系列 1 用 accent1 填充");
+            assert!(hay.contains("BT"), "{kind:?}: 标题 / 标签 / 图例文字");
+            // 饼图扇形 = 三次贝塞尔弧(`c`);柱形全是矩形 / 直线,无曲线。
+            match kind {
+                ChartKind::Pie => assert!(hay.contains(" c\n"), "饼图扇形用贝塞尔弧"),
+                ChartKind::Bar => assert!(!hay.contains(" c\n"), "柱形无曲线"),
+                _ => {}
+            }
+        }
+    }
+
+    /// 不支持的类型(面积)、3D、组合、无数据、图表部件缺失 → 仍画占位框并记 `chart-degraded`;
+    /// 非图表占位(SmartArt)保持旧行为:占位框、不告警。
+    #[test]
+    fn unsupported_charts_keep_placeholder_and_warn() {
+        use ppt_core::model::ChartKind;
+        let mut three_d = sample_chart(ChartKind::Bar);
+        three_d.three_d = true;
+        let mut combo = sample_chart(ChartKind::Bar);
+        combo.combo = true;
+        let mut empty = sample_chart(ChartKind::Line);
+        empty.series.clear();
+        for (what, shape) in [
+            (
+                "area",
+                chart_shape(Some(sample_chart(ChartKind::Area)), CHART_URI),
+            ),
+            ("3d", chart_shape(Some(three_d), CHART_URI)),
+            ("combo", chart_shape(Some(combo), CHART_URI)),
+            ("empty", chart_shape(Some(empty), CHART_URI)),
+            ("missing part", chart_shape(None, CHART_URI)),
+        ] {
+            let out = render(&one_slide(vec![shape]));
+            assert!(has_placeholder_box(&out.pdf), "{what}: 占位框");
+            assert_eq!(chart_degraded(&out), 1, "{what}: {:?}", out.warnings);
+        }
+        let smart_art = chart_shape(
+            None,
+            "http://schemas.openxmlformats.org/drawingml/2006/diagram",
+        );
+        let out = render(&one_slide(vec![smart_art]));
+        assert!(has_placeholder_box(&out.pdf));
+        assert_eq!(chart_degraded(&out), 0, "SmartArt 不发图表告警");
+    }
+
+    /// 同输入两次渲染字节一致(无随机 / 时间 / 哈希序依赖)。
+    #[test]
+    fn chart_render_is_deterministic() {
+        use ppt_core::model::ChartKind;
+        let deck = one_slide(vec![
+            chart_shape(Some(sample_chart(ChartKind::Bar)), CHART_URI),
+            chart_shape(Some(sample_chart(ChartKind::Line)), CHART_URI),
+            chart_shape(Some(sample_chart(ChartKind::Pie)), CHART_URI),
+        ]);
+        assert_eq!(render(&deck).pdf, render(&deck).pdf);
     }
 }

@@ -59,12 +59,14 @@ crates/
     src/xml/       quick-xml walker:presentation.rs(尺寸+顺序) slide.rs(spTree -> Shape)
                    doc_props.rs(docProps/core.xml + app.xml -> DocProperties)
                    chart.rs(c:chartSpace 缓存 -> Chart:种类/标题/类别/系列,稀疏 pt 补空,不读外部工作簿)
+                   table_style.rs(ppt/tableStyles.xml -> styleId -> TableStyle:九部件填充/边框/文字色)
   ppt-ocr/     图片 OCR 桥:把 ocrspine 套到嵌入图片上。本轮薄但可用。#![forbid(unsafe_code)]
     src/lib.rs     ocr_image_bytes / PptOcr{engine} + reconstruct_table_from_image(stub)
   ppt-render/  终态 IR -> PDF:逐 slide 一页,经共享 pdf-typeset 引擎(pdfspine Phase A)。#![forbid(unsafe_code)]
     src/lib.rs       render_pdf(pres,media,opts)->ExportResult:逐 slide 装配 / 背景 / 表格网格 / font_map 应用
     src/text.rs      ResolvedTextFrame 段落/run -> TS-5 绝对定位文本框(锚定/内边距/换行/项目符号/行距)
     src/shapes.rs    自选图形 / 连接线 / 图片 / 图表占位 -> 引擎 op
+    src/chart.rs     图表矢量渲染:纯函数几何(柱/条/折线/饼 + 刻度/图例/标签)-> 引擎 op;不支持降级占位框
     src/shapes/line_ends.rs 线端装饰 headEnd/tailEnd(triangle/stealth/diamond/oval/arrow)
     src/transform.rs 组合仿射(chOff/chExt 重映射,B-5)
   py-bindings/ PyO3 _core 扩展。唯一用 unsafe(经 PyO3)的 crate。#![deny(unsafe_op_in_unsafe_fn)]

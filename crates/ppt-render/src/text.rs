@@ -31,7 +31,7 @@ const BULLET_GUTTER_PT: f64 = 6.0;
 /// 继承链全缺 `marL` 时带符号段落的兜底左缩进(228600 EMU = 0.25 in)。
 const BULLET_FALLBACK_MARL_PT: f64 = 18.0;
 /// 继承链全无字体名时的兜底拉丁字体(Office 缺省主题 minor latin)。
-const DEFAULT_LATIN: &str = "Calibri";
+pub(crate) const DEFAULT_LATIN: &str = "Calibri";
 /// 上/下标(`baseline` ≠ 0)的字形缩放。OOXML 只给基线偏移、不给缩放比例(PowerPoint
 /// 渲染时自行缩小);沿用 docspine 上下标的 0.65(介于 LibreOffice 缺省 58% 与 Office
 /// 观感 ≈2/3 之间)。名义字号不变,仍作行高支柱。

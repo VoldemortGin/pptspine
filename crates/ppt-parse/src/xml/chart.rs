@@ -66,6 +66,10 @@ pub fn parse(xml: &str) -> Chart {
         title: None,
         categories: Vec::new(),
         series: Vec::new(),
+        bar_dir: None,
+        grouping: None,
+        three_d: false,
+        combo: false,
         warnings: Vec::new(),
     };
     let mut buf = Vec::new();
@@ -89,7 +93,7 @@ pub fn parse(xml: &str) -> Chart {
 fn parse_chart_el<R: std::io::BufRead>(reader: &mut Reader<R>, chart: &mut Chart, st: &mut State) {
     let mut title: Option<Option<String>> = None; // Some(None) = 有 c:title 但无 c:tx(自动标题)
     let mut auto_deleted = false;
-    let mut kinds: Vec<ChartKind> = Vec::new();
+    let mut kinds: Vec<(ChartKind, PlotInfo)> = Vec::new();
     let mut raw: Vec<(ChartKind, RawSeries)> = Vec::new();
     let mut buf = Vec::new();
     loop {
@@ -117,8 +121,12 @@ fn parse_chart_el<R: std::io::BufRead>(reader: &mut Reader<R>, chart: &mut Chart
         buf.clear();
     }
 
-    if let Some(k) = kinds.into_iter().next() {
+    chart.combo = kinds.len() > 1;
+    if let Some((k, info)) = kinds.into_iter().next() {
         chart.kind = k;
+        chart.bar_dir = info.bar_dir;
+        chart.grouping = info.grouping;
+        chart.three_d = info.three_d;
     }
     for (kind, rs) in raw {
         let label = rs.name.clone().unwrap_or_else(|| "(unnamed)".to_string());
@@ -273,10 +281,25 @@ fn parse_rich<R: std::io::BufRead>(reader: &mut Reader<R>) -> String {
         .join(" ")
 }
 
-/// `c:plotArea`:每个 `c:*Chart` 图类型元素记一个种类,收集其 `c:ser`。已消费起始标签。
+/// 一个图类型元素的布局细节(`c:barDir` / `c:grouping` / 是否 3D 变体)。
+#[derive(Debug, Default)]
+struct PlotInfo {
+    bar_dir: Option<String>,
+    grouping: Option<String>,
+    three_d: bool,
+}
+
+/// 图类型元素本地名是否为 3D 变体(如 `bar3DChart`)。
+fn is_3d(name: &str) -> bool {
+    name.strip_suffix("Chart")
+        .is_some_and(|b| b.ends_with("3D"))
+}
+
+/// `c:plotArea`:每个 `c:*Chart` 图类型元素记一个种类(+ 布局细节),收集其 `c:ser`。
+/// 已消费起始标签。
 fn parse_plot_area<R: std::io::BufRead>(
     reader: &mut Reader<R>,
-    kinds: &mut Vec<ChartKind>,
+    kinds: &mut Vec<(ChartKind, PlotInfo)>,
     raw: &mut Vec<(ChartKind, RawSeries)>,
     st: &mut State,
 ) {
@@ -285,10 +308,12 @@ fn parse_plot_area<R: std::io::BufRead>(
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
-                match ChartKind::from_element(&String::from_utf8_lossy(&name)) {
+                let el = String::from_utf8_lossy(&name).into_owned();
+                match ChartKind::from_element(&el) {
                     Some(kind) => {
-                        kinds.push(kind.clone());
-                        parse_plot(reader, &kind, raw, st);
+                        let mut info = parse_plot(reader, &kind, raw, st);
+                        info.three_d = is_3d(&el);
+                        kinds.push((kind, info));
                     }
                     None => skip_element(reader, &name),
                 }
@@ -296,7 +321,11 @@ fn parse_plot_area<R: std::io::BufRead>(
             Ok(Event::Empty(e)) => {
                 let name = String::from_utf8_lossy(local_name(e.name().as_ref())).into_owned();
                 if let Some(kind) = ChartKind::from_element(&name) {
-                    kinds.push(kind);
+                    let info = PlotInfo {
+                        three_d: is_3d(&name),
+                        ..PlotInfo::default()
+                    };
+                    kinds.push((kind, info));
                 }
             }
             Ok(Event::End(_)) | Ok(Event::Eof) | Err(_) => break,
@@ -306,13 +335,15 @@ fn parse_plot_area<R: std::io::BufRead>(
     }
 }
 
-/// 一个图类型元素(如 `c:barChart`):收集其 `c:ser`。已消费起始标签。
+/// 一个图类型元素(如 `c:barChart`):收集其 `c:ser`,返回 `c:barDir` / `c:grouping`。
+/// 已消费起始标签。
 fn parse_plot<R: std::io::BufRead>(
     reader: &mut Reader<R>,
     kind: &ChartKind,
     raw: &mut Vec<(ChartKind, RawSeries)>,
     st: &mut State,
-) {
+) -> PlotInfo {
+    let mut info = PlotInfo::default();
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
@@ -329,11 +360,17 @@ fn parse_plot<R: std::io::BufRead>(
                     skip_element(reader, &name);
                 }
             }
+            Ok(Event::Empty(e)) => match local_name(e.name().as_ref()) {
+                b"barDir" => info.bar_dir = attr_of(&e, b"val"),
+                b"grouping" => info.grouping = attr_of(&e, b"val"),
+                _ => {}
+            },
             Ok(Event::End(_)) | Ok(Event::Eof) | Err(_) => break,
             _ => {}
         }
         buf.clear();
     }
+    info
 }
 
 /// `c:ser`:系列名 `c:tx`、类别 `c:cat` / `c:xVal`、值 `c:val` / `c:yVal`。已消费起始标签。
@@ -671,6 +708,48 @@ mod tests {
         assert_eq!(c.kind, ChartKind::Other("fooChart".into()));
         assert_eq!(c.title.as_deref(), Some("Only"));
         assert_eq!(c.series[0].values, vec![Some(7.0)]);
+    }
+
+    /// 主图类型的布局细节:`c:barDir` / `c:grouping`、3D 变体、组合图(多个图类型元素)。
+    #[test]
+    fn plot_layout_details_bar_dir_grouping_3d_and_combo() {
+        let ser = r#"<c:ser><c:val><c:numLit><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val></c:ser>"#;
+        let c = parse(&space(
+            &format!(
+                r#"<c:barChart><c:barDir val="bar"/><c:grouping val="stacked"/>{ser}</c:barChart>"#
+            ),
+            "",
+        ));
+        assert_eq!(c.bar_dir.as_deref(), Some("bar"));
+        assert_eq!(c.grouping.as_deref(), Some("stacked"));
+        assert!(!c.three_d && !c.combo);
+
+        let c = parse(&space(
+            &format!(r#"<c:bar3DChart><c:barDir val="col"/>{ser}</c:bar3DChart>"#),
+            "",
+        ));
+        assert_eq!(c.kind, ChartKind::Bar);
+        assert_eq!(c.bar_dir.as_deref(), Some("col"));
+        assert_eq!(c.grouping, None);
+        assert!(c.three_d);
+
+        // 组合图:主类型取首个,细节也取首个;第二个图类型的 grouping 不覆盖。
+        let c = parse(&space(
+            &format!(
+                r#"<c:barChart><c:barDir val="col"/><c:grouping val="clustered"/>{ser}</c:barChart>
+                   <c:lineChart><c:grouping val="standard"/>{ser}</c:lineChart>"#
+            ),
+            "",
+        ));
+        assert!(c.combo);
+        assert_eq!(c.grouping.as_deref(), Some("clustered"));
+        assert_eq!(c.series.len(), 2);
+
+        let c = parse(&space(&format!(r#"<c:pieChart>{ser}</c:pieChart>"#), ""));
+        assert_eq!(
+            (c.bar_dir, c.grouping, c.three_d, c.combo),
+            (None, None, false, false)
+        );
     }
 
     #[test]

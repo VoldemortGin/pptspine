@@ -17,6 +17,16 @@ pub const DEFAULT_INSET_LR_EMU: Emu = 91_440;
 /// OOXML `bodyPr` / `tcPr` 缺省上下内边距(45720 EMU = 0.05" = 3.6 pt)。
 pub const DEFAULT_INSET_TB_EMU: Emu = 45_720;
 
+/// Office 缺省主题(2013+)的 accent1..6;slide 无主题时图表系列配色的兜底。
+pub const DEFAULT_ACCENTS: [[u8; 3]; 6] = [
+    [0x44, 0x72, 0xC4],
+    [0xED, 0x7D, 0x31],
+    [0xA5, 0xA5, 0xA5],
+    [0xFF, 0xC0, 0x00],
+    [0x5B, 0x9B, 0xD5],
+    [0x70, 0xAD, 0x47],
+];
+
 /// 一份继承链已解析的演示文稿。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedPresentation {
@@ -37,6 +47,9 @@ pub struct ResolvedSlide {
     pub inherited_shapes: Vec<ResolvedShape>,
     /// slide 自身的形状。
     pub shapes: Vec<ResolvedShape>,
+    /// 主题 accent1..6 终端 RGB(经 clrMap;无主题时为 [`DEFAULT_ACCENTS`]),
+    /// 图表系列配色按序循环。
+    pub accents: [[u8; 3]; 6],
 }
 
 /// 已解析的幻灯片背景(B-10)。

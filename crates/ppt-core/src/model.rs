@@ -616,6 +616,15 @@ pub struct Chart {
     pub categories: Vec<String>,
     /// 系列,按文档顺序。
     pub series: Vec<ChartSeries>,
+    /// 主图类型的 `c:barDir@val`(`"col"` 纵向柱形 / `"bar"` 横向条形);非柱形图或缺失为 `None`。
+    pub bar_dir: Option<String>,
+    /// 主图类型的 `c:grouping@val`(`clustered` / `stacked` / `percentStacked` / `standard`);
+    /// 缺失为 `None`。
+    pub grouping: Option<String>,
+    /// 主图类型是 3D 变体(如 `bar3DChart`;`kind` 已并入同名 2D 种类)。
+    pub three_d: bool,
+    /// `c:plotArea` 含多个图类型元素(组合图)。
+    pub combo: bool,
     /// 抽取降级告警(缺缓存、点数截断等)。
     pub warnings: Vec<String>,
 }

@@ -1710,3 +1710,31 @@ fn malformed_table_styles_never_panics() {
     assert!(!t.style_resolved, "垃圾部件:找不到样式");
     assert_eq!(cell_fill(&t, 0, 0), None);
 }
+
+// ---- 图表配色(主题 accent1..6)------------------------------------------------
+
+/// `ResolvedSlide.accents`:主题 accent1..6 经 clrMap 重映射后的终端色(图表系列配色用)。
+#[test]
+fn slide_accents_follow_theme_through_clr_map() {
+    let slide = resolve_default();
+    assert_eq!(
+        slide.accents,
+        [
+            [0x44, 0x72, 0xC4],
+            [0xED, 0x7D, 0x31],
+            [0xA5, 0xA5, 0xA5],
+            [0xFF, 0xC0, 0x00],
+            [0x5B, 0x9B, 0xD5],
+            [0x70, 0xAD, 0x47],
+        ]
+    );
+    let master = master1().replace(r#"accent1="accent1""#, r#"accent1="accent6""#);
+    assert_ne!(master, master1(), "fixture 应含 accent1 映射");
+    let slide = resolve_slide_parts(&slide_default(), &layout1(), &master);
+    assert_eq!(
+        slide.accents[0],
+        [0x70, 0xAD, 0x47],
+        "clrMap accent1 → accent6"
+    );
+    assert_eq!(slide.accents[1], [0xED, 0x7D, 0x31]);
+}

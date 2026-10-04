@@ -380,13 +380,35 @@ pub(crate) fn picture_ops(
     with_shape_transform(pic.xfrm, r, base, ops);
 }
 
-/// 图表 / SmartArt / OLE:浅灰占位框(PRD §1 v1 降级;专属告警种类待引擎侧扩充)。
-pub(crate) fn graphic_placeholder_ops(gp: &GraphicPlaceholder, flat: Flatten, ops: &mut Vec<Op>) {
+/// 图表:有缓存数据且类型受支持时画矢量图表([`crate::chart`]);否则(含图表部件缺失)
+/// 记 `chart-degraded` 告警并画浅灰占位框。SmartArt / OLE:浅灰占位框(PRD §1 v1 降级)。
+pub(crate) fn graphic_placeholder_ops(
+    ts: &mut Typesetter,
+    ctx: &mut RenderCtx<'_>,
+    gp: &GraphicPlaceholder,
+    flat: Flatten,
+    ops: &mut Vec<Op>,
+) {
     let Some(rect) = gp.rect else {
         return;
     };
+    let frame = flat.map_emu_rect(rect);
+    match &gp.chart {
+        Some(chart) => {
+            if crate::chart::chart_ops(ts, ctx, chart, frame, ops) {
+                return;
+            }
+        }
+        None if gp.kind.as_deref().is_some_and(|k| k.ends_with("/chart")) => {
+            ctx.warnings.push(ExportWarning::Custom {
+                kind: crate::chart::CHART_DEGRADED_KIND.to_string(),
+                detail: "图表部件缺失或无法读取;画占位框".to_string(),
+            });
+        }
+        None => {}
+    }
     ops.push(Op::Path {
-        segs: rect_segs(flat.map_emu_rect(rect)),
+        segs: rect_segs(frame),
         fill: Some(Fill::new(PLACEHOLDER_FILL)),
         stroke: Some(Stroke::new(PLACEHOLDER_STROKE, DEFAULT_STROKE_PT)),
     });

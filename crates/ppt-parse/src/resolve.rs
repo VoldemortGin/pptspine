@@ -29,8 +29,8 @@ use ppt_core::resolved::{
     ResolvedAnchor, ResolvedAutoShape, ResolvedBackground, ResolvedBodyProps, ResolvedBullet,
     ResolvedCell, ResolvedCellBorders, ResolvedConnector, ResolvedFill, ResolvedGroup,
     ResolvedParagraph, ResolvedPresentation, ResolvedRow, ResolvedRun, ResolvedShape,
-    ResolvedSlide, ResolvedStroke, ResolvedTable, ResolvedTextFrame, DEFAULT_FONT_SIZE_PT,
-    DEFAULT_INSET_LR_EMU, DEFAULT_INSET_TB_EMU,
+    ResolvedSlide, ResolvedStroke, ResolvedTable, ResolvedTextFrame, DEFAULT_ACCENTS,
+    DEFAULT_FONT_SIZE_PT, DEFAULT_INSET_LR_EMU, DEFAULT_INSET_TB_EMU,
 };
 use ppt_core::style::{
     Bullet, FontRef, PlaceholderRef, RunStyle, ShapeStyle, TextLevelStyle, TextStyleLevels,
@@ -108,6 +108,7 @@ fn resolve_slide(slide: &Slide, inherit: &InheritanceParts) -> ResolvedSlide {
         index: slide.index,
         background: resolve_background(background, &ctx),
         inherited_shapes: resolve_inherited(slide, layout, &ctx),
+        accents: theme_accents(&ctx),
         shapes: slide
             .shapes
             .iter()
@@ -763,6 +764,20 @@ fn resolve_stroke(
 }
 
 // ---- 颜色 / 字体 -----------------------------------------------------------
+
+/// 主题 accent1..6 终端 RGB(经 clrMap);无主题时取 Office 缺省调色板。
+fn theme_accents(ctx: &Ctx) -> [[u8; 3]; 6] {
+    if ctx.theme.is_none() {
+        return DEFAULT_ACCENTS;
+    }
+    std::array::from_fn(|i| {
+        let spec = ColorSpec::Scheme {
+            name: format!("accent{}", i + 1),
+            transforms: Vec::new(),
+        };
+        resolve_color(ctx, &spec, None).rgb
+    })
+}
 
 /// 解析一个颜色 spec;`ph_clr` 是 `phClr`(样式引用占位色)的替换基色。
 fn resolve_color(ctx: &Ctx, spec: &ColorSpec, ph_clr: Option<[u8; 3]>) -> ResolvedColor {

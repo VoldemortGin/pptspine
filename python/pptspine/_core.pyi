@@ -21,6 +21,10 @@ class ChartDict(TypedDict):
     title: str | None
     categories: list[str]
     series: list[ChartSeriesDict]
+    bar_dir: str | None
+    grouping: str | None
+    three_d: bool
+    combo: bool
     warnings: list[str]
 
 class PptError(Exception):

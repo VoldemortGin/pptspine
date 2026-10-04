@@ -375,7 +375,8 @@ fn placeholder_dict<'py>(py: Python<'py>, p: &GraphicPlaceholder) -> PyResult<Bo
     Ok(d)
 }
 
-/// 图表缓存数据 [`Chart`] -> dict(`kind` / `title` / `categories` / `series` / `warnings`)。
+/// 图表缓存数据 [`Chart`] -> dict(`kind` / `title` / `categories` / `series` / `bar_dir` /
+/// `grouping` / `three_d` / `combo` / `warnings`)。
 fn chart_dict<'py>(py: Python<'py>, c: &Chart) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     d.set_item("kind", c.kind.name())?;
@@ -390,6 +391,10 @@ fn chart_dict<'py>(py: Python<'py>, c: &Chart) -> PyResult<Bound<'py, PyDict>> {
         series.append(sd)?;
     }
     d.set_item("series", series)?;
+    d.set_item("bar_dir", c.bar_dir.as_deref())?;
+    d.set_item("grouping", c.grouping.as_deref())?;
+    d.set_item("three_d", c.three_d)?;
+    d.set_item("combo", c.combo)?;
     d.set_item("warnings", &c.warnings)?;
     Ok(d)
 }
