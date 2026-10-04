@@ -219,3 +219,60 @@ def test_run_spacing_baseline_and_caps_in_run_dict(
     caps = runs(caps_pptx_bytes)
     assert [r["cap"] for r in caps] == ["all", "small", None]
     assert caps[0]["text"] == "All caps ", "抽取文本保留原文大小写"
+
+
+# --- zip 解压限额的关键字参数(open / open_bytes)-----------------------------------
+
+_LIMIT_KWARGS = (
+    "max_entries",
+    "max_entry_bytes",
+    "max_total_bytes",
+    "max_compression_ratio",
+    "max_name_len",
+    "max_slides",
+)
+
+
+def test_tightened_max_slides_raises_zip_error(two_slide_pptx_bytes):
+    # 两页的包:缺省(5000)正常,收紧到 1 抛 PptZipError(与既有限额错误同类型,信息含限额种类)。
+    assert pptspine.open_bytes(two_slide_pptx_bytes).slide_count == 2
+    with pytest.raises(pptspine.PptZipError, match="slide"):
+        pptspine.open_bytes(two_slide_pptx_bytes, max_slides=1)
+
+
+def test_relaxed_limits_still_parse_and_defaults_are_unchanged(two_slide_pptx_bytes):
+    # 放宽(显式给大值)与缺省结果一致;全部关键字取 None 等同不传。
+    base = pptspine.open_bytes(two_slide_pptx_bytes)
+    relaxed = pptspine.open_bytes(
+        two_slide_pptx_bytes, max_slides=10_000, max_entries=50_000, max_total_bytes=2**33
+    )
+    nones = pptspine.open_bytes(two_slide_pptx_bytes, **{k: None for k in _LIMIT_KWARGS})
+    assert base.slide_count == relaxed.slide_count == nones.slide_count == 2
+    assert base.slides()[0].text == relaxed.slides()[0].text == nones.slides()[0].text
+
+
+def test_each_limit_can_be_tightened_to_trigger(minimal_pptx_bytes):
+    # 合成包很小;把每一项压到 1(或更小的合法值)都应触发限额,而不是被忽略。
+    for kw in ("max_entries", "max_entry_bytes", "max_total_bytes", "max_name_len"):
+        with pytest.raises(pptspine.PptZipError):
+            pptspine.open_bytes(minimal_pptx_bytes, **{kw: 1})
+
+
+def test_open_path_accepts_limits_too(minimal_pptx_path):
+    assert pptspine.open(minimal_pptx_path, max_slides=1).slide_count == 1
+    with pytest.raises(pptspine.PptZipError):
+        pptspine.open(minimal_pptx_path, max_entries=1)
+
+
+@pytest.mark.parametrize("bad", [0, -1, -(2**40), 1.5, "10", True, [1], 2**70])
+def test_invalid_limit_values_raise_value_error(minimal_pptx_bytes, minimal_pptx_path, bad):
+    for kw in _LIMIT_KWARGS:
+        with pytest.raises(ValueError, match=kw):
+            pptspine.open_bytes(minimal_pptx_bytes, **{kw: bad})
+    with pytest.raises(ValueError, match="max_slides"):
+        pptspine.open(minimal_pptx_path, max_slides=bad)
+
+
+def test_limit_kwargs_are_keyword_only(minimal_pptx_bytes):
+    with pytest.raises(TypeError):
+        pptspine.open_bytes(minimal_pptx_bytes, 1)  # type: ignore[misc]

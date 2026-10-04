@@ -23,7 +23,7 @@ Spine 家族成员之一:**纯 Rust 的 PowerPoint(.pptx / OOXML)结构化解析
     (Python 侧为 `PptZipError`,信息含限额种类)。默认:条目数 10 000、单条目 256 MiB、总解压量
     1 GiB、压缩比 10 000(仅对解压量 > 1 MiB 的条目判定)、条目名 1024 字节、幻灯片数 5 000(`p:sldIdLst` 去重后;重复引用同一 slide 只保留首次,同一图表 / SmartArt drawing 部件只解析一次);绝对路径 / 盘符形式(`C:`)/ 含 `..`
     的条目名直接拒绝(`PptError::Zip`)。`parse_bytes` / `parse_path` 用默认值,
-    `parse_*_with_limits` 可自定。组合 / `mc:AlternateContent` 嵌套超过 64 层的子树整体跳过
+    `parse_*_with_limits` 可自定(Python:`open` / `open_bytes` 的仅关键字参数 `max_entries` / `max_entry_bytes` / `max_total_bytes` / `max_compression_ratio` / `max_name_len` / `max_slides`,非法值 `ValueError`)。组合 / `mc:AlternateContent` 嵌套超过 64 层的子树整体跳过
     (防递归下降爆栈)。`mc:AlternateContent` 取文档顺序第一个解析出内容的 `mc:Choice`,全空才取 `mc:Fallback`
     (形状树与段落层同策略,绝不同取;只含无预览图 OLE 占位框的分支算弱内容,让位给带 `p:oleObj > p:pic` 预览图的分支);`a14:m` 公式线性化为 `RunKind::Math` run(规则与 docspine 对齐)。
 - **缝的元模式(家族统一)。** 唯一外部能力(OCR)经 Protocol seam 接入:`OcrEngine`(来自

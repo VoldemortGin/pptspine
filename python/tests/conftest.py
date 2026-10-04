@@ -135,6 +135,38 @@ def minimal_pptx_bytes() -> bytes:
     return _build_minimal_pptx()
 
 
+@pytest.fixture(scope="session")
+def two_slide_pptx_bytes() -> bytes:
+    """两张 slide 的合成 ``.pptx``(解压限额测试:收紧 ``max_slides`` 到 1 应当超限)。"""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr(
+            "[Content_Types].xml",
+            _CONTENT_TYPES.replace(
+                "</Types>",
+                '<Override PartName="/ppt/slides/slide2.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/></Types>',
+            ),
+        )
+        z.writestr("_rels/.rels", _ROOT_RELS)
+        z.writestr(
+            "ppt/presentation.xml",
+            _PRESENTATION.replace(
+                '<p:sldId id="256" r:id="rId1"/>',
+                '<p:sldId id="256" r:id="rId1"/><p:sldId id="257" r:id="rId2"/>',
+            ),
+        )
+        z.writestr(
+            "ppt/_rels/presentation.xml.rels",
+            _PRESENTATION_RELS.replace(
+                "</Relationships>",
+                '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide2.xml"/></Relationships>',
+            ),
+        )
+        z.writestr("ppt/slides/slide1.xml", _SLIDE1)
+        z.writestr("ppt/slides/slide2.xml", _SLIDE1)
+    return buf.getvalue()
+
+
 @pytest.fixture
 def minimal_pptx_path(minimal_pptx_bytes: bytes, tmp_path) -> str:
     """把合成的 ``.pptx`` 落到临时文件,返回其路径(测 ``open(path)`` 路径)。"""

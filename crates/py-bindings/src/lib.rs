@@ -30,12 +30,14 @@ use ppt_core::resolved::ResolvedPresentation;
 use ppt_core::style::{Caps, PlaceholderRef};
 use ppt_core::PptError;
 use ppt_ocr::{reconstruct_table_from_image, ImageTableOptions, OcrItem, PptOcr};
-use ppt_parse::{parse_bytes, parse_path, resolve_parts, InheritanceParts};
+use ppt_parse::{
+    parse_bytes_with_limits, parse_path_with_limits, resolve_parts, InheritanceParts, ZipLimits,
+};
 use ppt_render::{render_pdf, ExportResult, ExportWarning, RenderOptions};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyFileNotFoundError, PyIndexError, PyOSError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList};
+use pyo3::types::{PyBool, PyBytes, PyDict, PyList};
 
 /// 包版本(镜像 Rust workspace 版本)。
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -820,18 +822,112 @@ impl PySlide {
 
 // --- 模块级函数 -----------------------------------------------------------
 
-/// 从磁盘路径解析一个 `.pptx`。解析在释放 GIL 下进行。
+/// 解压限额的一个关键字参数:`None` = 沿用缺省;必须是正整数(`bool` / 浮点 / 非数字 / 零 / 负数
+/// 一律 `ValueError`)。
+fn limit_arg(name: &str, v: Option<&Bound<'_, PyAny>>) -> PyResult<Option<u64>> {
+    let Some(v) = v else {
+        return Ok(None);
+    };
+    let bad = || PyValueError::new_err(format!("{name} must be a positive integer"));
+    // `bool` 是 `int` 子类,`True` 不该被当成 1。
+    if v.is_instance_of::<PyBool>() {
+        return Err(bad());
+    }
+    match v.extract::<i64>() {
+        Ok(n) if n > 0 => Ok(Some(n.unsigned_abs())),
+        _ => Err(bad()),
+    }
+}
+
+/// 把可选关键字参数叠加到缺省 [`ZipLimits`] 上(缺省值与不传完全相同)。
+fn zip_limits(
+    max_entries: Option<&Bound<'_, PyAny>>,
+    max_entry_bytes: Option<&Bound<'_, PyAny>>,
+    max_total_bytes: Option<&Bound<'_, PyAny>>,
+    max_compression_ratio: Option<&Bound<'_, PyAny>>,
+    max_name_len: Option<&Bound<'_, PyAny>>,
+    max_slides: Option<&Bound<'_, PyAny>>,
+) -> PyResult<ZipLimits> {
+    let mut l = ZipLimits::default();
+    let too_big = |name: &str| PyValueError::new_err(format!("{name} is too large"));
+    if let Some(n) = limit_arg("max_entries", max_entries)? {
+        l.max_entries = usize::try_from(n).map_err(|_| too_big("max_entries"))?;
+    }
+    if let Some(n) = limit_arg("max_entry_bytes", max_entry_bytes)? {
+        l.max_entry_bytes = n;
+    }
+    if let Some(n) = limit_arg("max_total_bytes", max_total_bytes)? {
+        l.max_total_bytes = n;
+    }
+    if let Some(n) = limit_arg("max_compression_ratio", max_compression_ratio)? {
+        l.max_compression_ratio = u32::try_from(n).map_err(|_| too_big("max_compression_ratio"))?;
+    }
+    if let Some(n) = limit_arg("max_name_len", max_name_len)? {
+        l.max_name_len = usize::try_from(n).map_err(|_| too_big("max_name_len"))?;
+    }
+    if let Some(n) = limit_arg("max_slides", max_slides)? {
+        l.max_slides = usize::try_from(n).map_err(|_| too_big("max_slides"))?;
+    }
+    Ok(l)
+}
+
+/// 从磁盘路径解析一个 `.pptx`。解析在释放 GIL 下进行。可选关键字参数收紧 / 放宽 zip 解压
+/// 限额(缺省同不传;非法值 `ValueError`,超限抛 `PptZipError`)。
 #[pyfunction]
-fn open(py: Python<'_>, path: PathBuf) -> PyResult<PyPresentation> {
-    let parsed = py.detach(|| parse_path(&path)).map_err(map_err)?;
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (path, *, max_entries=None, max_entry_bytes=None, max_total_bytes=None,
+                    max_compression_ratio=None, max_name_len=None, max_slides=None))]
+fn open(
+    py: Python<'_>,
+    path: PathBuf,
+    max_entries: Option<Bound<'_, PyAny>>,
+    max_entry_bytes: Option<Bound<'_, PyAny>>,
+    max_total_bytes: Option<Bound<'_, PyAny>>,
+    max_compression_ratio: Option<Bound<'_, PyAny>>,
+    max_name_len: Option<Bound<'_, PyAny>>,
+    max_slides: Option<Bound<'_, PyAny>>,
+) -> PyResult<PyPresentation> {
+    let limits = zip_limits(
+        max_entries.as_ref(),
+        max_entry_bytes.as_ref(),
+        max_total_bytes.as_ref(),
+        max_compression_ratio.as_ref(),
+        max_name_len.as_ref(),
+        max_slides.as_ref(),
+    )?;
+    let parsed = py
+        .detach(|| parse_path_with_limits(&path, &limits))
+        .map_err(map_err)?;
     Ok(PyPresentation::new(parsed))
 }
 
-/// 从内存字节解析一个 `.pptx`。解析在释放 GIL 下进行。
+/// 从内存字节解析一个 `.pptx`。解析在释放 GIL 下进行;限额关键字参数同 [`open`]。
 #[pyfunction]
-fn open_bytes(py: Python<'_>, data: &[u8]) -> PyResult<PyPresentation> {
+#[allow(clippy::too_many_arguments)]
+#[pyo3(signature = (data, *, max_entries=None, max_entry_bytes=None, max_total_bytes=None,
+                    max_compression_ratio=None, max_name_len=None, max_slides=None))]
+fn open_bytes(
+    py: Python<'_>,
+    data: &[u8],
+    max_entries: Option<Bound<'_, PyAny>>,
+    max_entry_bytes: Option<Bound<'_, PyAny>>,
+    max_total_bytes: Option<Bound<'_, PyAny>>,
+    max_compression_ratio: Option<Bound<'_, PyAny>>,
+    max_name_len: Option<Bound<'_, PyAny>>,
+    max_slides: Option<Bound<'_, PyAny>>,
+) -> PyResult<PyPresentation> {
+    let limits = zip_limits(
+        max_entries.as_ref(),
+        max_entry_bytes.as_ref(),
+        max_total_bytes.as_ref(),
+        max_compression_ratio.as_ref(),
+        max_name_len.as_ref(),
+        max_slides.as_ref(),
+    )?;
     let owned = data.to_vec();
-    let parsed = py.detach(|| parse_bytes(&owned)).map_err(map_err)?;
+    let parsed = py
+        .detach(|| parse_bytes_with_limits(&owned, &limits))
+        .map_err(map_err)?;
     Ok(PyPresentation::new(parsed))
 }
 

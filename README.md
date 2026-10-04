@@ -59,7 +59,12 @@ compression ratio of 10,000 (only checked for entries over 1 MiB) and 1024-byte
 entry names, and 5,000 slides (counted after de-duplicating repeated `p:sldIdLst` references). Absolute, drive-letter (`C:`) or `..` entry paths are rejected, and group /
 `mc:AlternateContent` nesting deeper than 64 levels is skipped instead of
 recursing. Rust callers can pass custom limits via `parse_bytes_with_limits` /
-`parse_path_with_limits`.
+`parse_path_with_limits`; Python callers via keyword-only arguments of
+`pptspine.open(path, ...)` / `pptspine.open_bytes(data, ...)` — `max_entries`,
+`max_entry_bytes`, `max_total_bytes`, `max_compression_ratio`, `max_name_len`,
+`max_slides` (positive integers; omitted / `None` keeps the default above; zero,
+negative, non-integer or `bool` values raise `ValueError`; a hit still raises
+`PptZipError`). E.g. `pptspine.open_bytes(untrusted, max_slides=200, max_total_bytes=64 * 2**20)`.
 
 ## Install
 

@@ -105,7 +105,30 @@ class Presentation:
     def __len__(self) -> int: ...
 
 def version() -> str: ...
-def open(path: str | PathLike[str]) -> Presentation: ...
-def open_bytes(data: bytes) -> Presentation: ...
+def open(
+    path: str | PathLike[str],
+    *,
+    max_entries: int | None = None,
+    max_entry_bytes: int | None = None,
+    max_total_bytes: int | None = None,
+    max_compression_ratio: int | None = None,
+    max_name_len: int | None = None,
+    max_slides: int | None = None,
+) -> Presentation:
+    """解析 ``.pptx``。可选关键字参数调整 zip 解压限额(正整数,``None`` = 缺省:条目数 10000、
+    单条目 256 MiB、总解压 1 GiB、压缩比 10000、条目名 1024 字节、幻灯片数 5000);非法值
+    抛 ``ValueError``,超限抛 ``PptZipError``。"""
+
+def open_bytes(
+    data: bytes,
+    *,
+    max_entries: int | None = None,
+    max_entry_bytes: int | None = None,
+    max_total_bytes: int | None = None,
+    max_compression_ratio: int | None = None,
+    max_name_len: int | None = None,
+    max_slides: int | None = None,
+) -> Presentation:
+    """同 :func:`open`,输入为内存字节。"""
 def ocr_image(data: bytes) -> list[dict[str, Any]]: ...
 def reconstruct_image_table(data: bytes) -> list[dict[str, Any]]: ...
