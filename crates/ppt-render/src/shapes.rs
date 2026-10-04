@@ -54,10 +54,7 @@ fn fill_of(ctx: &mut RenderCtx<'_>, f: ResolvedFill) -> Fill {
         ResolvedFill::Gradient(_) => ctx.warnings.push(ExportWarning::GradientDegraded {
             kind: "gradFill".to_string(),
         }),
-        ResolvedFill::Pattern(_) => ctx.warnings.push(ExportWarning::Custom {
-            kind: PATTERN_FILL_KIND.to_string(),
-            detail: "图案填充(pattFill)v1 降级为前景 / 背景平均色的纯色".to_string(),
-        }),
+        ResolvedFill::Pattern(_) => pattern_fill_warning(ctx),
         ResolvedFill::Solid(_) => {}
     }
     let c = f.color();
@@ -66,6 +63,14 @@ fn fill_of(ctx: &mut RenderCtx<'_>, f: ResolvedFill) -> Fill {
         alpha: c.alpha.map_or(1.0, f64::from),
         even_odd: false,
     }
+}
+
+/// 图案填充降级告警(形状填充与幻灯片背景共用)。
+pub(crate) fn pattern_fill_warning(ctx: &mut RenderCtx<'_>) {
+    ctx.warnings.push(ExportWarning::Custom {
+        kind: PATTERN_FILL_KIND.to_string(),
+        detail: "图案填充(pattFill)v1 降级为前景 / 背景平均色的纯色".to_string(),
+    });
 }
 
 /// 已解析描边 → 引擎描边(颜色缺省黑;线宽缺省 0.75 pt,随组合缩放;

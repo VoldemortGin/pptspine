@@ -250,7 +250,7 @@ fn parse_bg<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Option<Ba
     bg
 }
 
-/// 解析 `p:bgPr` 的第一个填充子元素:solidFill / gradFill / blipFill(经 rels 折
+/// 解析 `p:bgPr` 的第一个填充子元素:solidFill / gradFill / pattFill / blipFill(经 rels 折
 /// media 裸名)/ noFill。已消费起始标签。
 fn parse_bg_pr<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Option<Background> {
     let mut bg = None;
@@ -274,6 +274,7 @@ fn parse_bg_pr<R: std::io::BufRead>(reader: &mut Reader<R>, ctx: &Ctx) -> Option
                             media_name: data.rel_id.as_deref().and_then(|r| media_name_of(ctx, r)),
                         });
                     }
+                    b"pattFill" => bg = Some(Background::Fill(parse_patt_fill(reader))),
                     b"noFill" => {
                         bg = Some(Background::Fill(Fill::None));
                         skip_element(reader, &name);
@@ -1670,6 +1671,11 @@ fn parse_math<R: std::io::BufRead>(reader: &mut Reader<R>) -> Option<TextRun> {
                             }
                             None => top.other_depth += 1,
                         }
+                    }
+                    // 结构深度已达上限:该结构退化为纯拼接(文字保留),记一次降级。
+                    _ if top.other_depth == 0 && math_struct_of(name).is_some() => {
+                        note_nest_skipped();
+                        top.other_depth += 1;
                     }
                     _ => top.other_depth += 1,
                 }

@@ -5,7 +5,7 @@ use crate::geom::Emu;
 use crate::model::{Chart, Presentation, Shape, Slide};
 use crate::resolved::{ResolvedPresentation, ResolvedSlide};
 
-use super::markdown::resolved_paragraphs;
+use super::markdown::{resolved_paragraphs, resolved_table};
 use super::reading_order::{flatten, reading_order, FlatShape};
 use super::{chart_label, chart_table, frame_text, notes_text, table_text};
 
@@ -115,7 +115,7 @@ fn shape_text(f: &FlatShape) -> Option<String> {
             .as_deref()
             .map(|tf| frame_text(tf, resolved_paragraphs(f, tf.paragraphs.len())))
             .unwrap_or_default(),
-        Shape::Table(t) => table_text(t),
+        Shape::Table(t) => table_text(t, resolved_table(f)),
         Shape::Placeholder(p) => match &p.chart {
             Some(c) => chart_text(c),
             None => p.diagram_text.join("\n"),

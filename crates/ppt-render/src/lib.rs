@@ -182,6 +182,9 @@ fn background_ops(
                     kind: "bgFill".to_string(),
                 });
             }
+            if matches!(fill, ResolvedFill::Pattern(_)) {
+                shapes::pattern_fill_warning(ctx);
+            }
             let c = text::rgb(fill.color());
             ops.push(Op::FillRect {
                 x: 0.0,
@@ -667,6 +670,27 @@ mod tests {
         let hay = String::from_utf8_lossy(&out.pdf);
         // 满页红色背景填充(内容流不压缩,可 grep)。
         assert!(hay.contains("1 0 0 rg"), "background red fill missing");
+    }
+
+    /// 图案填充背景:画两色平均色满页 + 与形状同一条 `pattern-fill-degraded` 告警。
+    #[test]
+    fn pattern_background_is_flat_color_with_the_shared_warning() {
+        use ppt_core::resolved::ResolvedBackground;
+        let slide = ResolvedSlide {
+            index: 0,
+            background: Some(ResolvedBackground::Color(ResolvedFill::Pattern(
+                ResolvedColor::opaque([255, 0, 0]),
+            ))),
+            inherited_shapes: vec![],
+            shapes: vec![],
+            accents: ppt_core::resolved::DEFAULT_ACCENTS,
+        };
+        let out = render(&pres(vec![slide]));
+        assert_eq!(
+            custom_kinds(&out),
+            vec!["pattern-fill-degraded".to_string()]
+        );
+        assert!(String::from_utf8_lossy(&out.pdf).contains("1 0 0 rg"));
     }
 
     #[test]

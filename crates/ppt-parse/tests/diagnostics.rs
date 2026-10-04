@@ -177,6 +177,36 @@ fn nesting_beyond_the_limit_is_reported_with_a_count() {
     assert_eq!((d[0].part.as_str(), d[0].count), (SLIDE, 1));
 }
 
+/// 公式结构嵌套超过上限时,更深的结构退化成纯拼接(文字不丢),并记一条 `nesting-too-deep`
+/// 诊断(此前完全没有记录);浅公式不产生诊断。
+#[test]
+fn math_nesting_beyond_the_limit_is_reported_and_the_text_is_kept() {
+    let math_sp = |inner: &str| {
+        format!(
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="2" name="M"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr/>
+<p:txBody><a:bodyPr/><a:p><a14:m xmlns:a14="http://schemas.microsoft.com/office/drawing/2010/main" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:oMathPara><m:oMath>{inner}</m:oMath></m:oMathPara></a14:m></a:p></p:txBody></p:sp>"#
+        )
+    };
+    let nest = |depth: usize| {
+        let mut inner = "<m:r><m:t>DEEPTEXT</m:t></m:r>".to_string();
+        for _ in 0..depth {
+            inner = format!(
+                "<m:sSup><m:e>{inner}</m:e><m:sup><m:r><m:t>2</m:t></m:r></m:sup></m:sSup>"
+            );
+        }
+        inner
+    };
+    let p = parse(&deck(&slide_xml(&math_sp(&nest(70))), &[]));
+    let d = kinds(&p, DiagnosticKind::NestingTooDeep);
+    assert_eq!(d.len(), 1, "{:?}", p.presentation.diagnostics);
+    assert_eq!(d[0].part, SLIDE);
+    assert!(d[0].count >= 1);
+    assert!(slide_text(&p).contains("DEEPTEXT"), "text must survive");
+
+    let p = parse(&deck(&slide_xml(&math_sp(&nest(5))), &[]));
+    assert!(kinds(&p, DiagnosticKind::NestingTooDeep).is_empty());
+}
+
 #[test]
 fn duplicate_slide_references_are_reported_per_slide_part() {
     let bytes = zip(&[

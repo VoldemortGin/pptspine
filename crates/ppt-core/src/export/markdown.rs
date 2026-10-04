@@ -12,6 +12,7 @@
 use crate::model::{Chart, Hyperlink, Paragraph, Picture, Presentation, Shape, Slide, TextFrame};
 use crate::resolved::{
     ResolvedBullet, ResolvedParagraph, ResolvedPresentation, ResolvedShape, ResolvedSlide,
+    ResolvedTable,
 };
 use crate::style::Bullet;
 
@@ -115,6 +116,14 @@ pub(super) fn resolved_paragraphs<'a>(
     (paras.len() == raw_len).then_some(paras)
 }
 
+/// 形状对应的终态表格(表格形状才有)。
+pub(super) fn resolved_table<'a>(f: &FlatShape<'a>) -> Option<&'a ResolvedTable> {
+    match f.resolved? {
+        ResolvedShape::Table(t) => Some(t),
+        _ => None,
+    }
+}
+
 fn shape_blocks(f: &FlatShape, skip_first_para: bool, out: &mut Vec<String>) {
     match f.shape {
         Shape::TextBox(_) | Shape::Auto(_) => {
@@ -123,7 +132,7 @@ fn shape_blocks(f: &FlatShape, skip_first_para: bool, out: &mut Vec<String>) {
             }
         }
         Shape::Table(t) => {
-            let md = table_markdown(t);
+            let md = table_markdown(t, resolved_table(f));
             if !md.is_empty() {
                 out.push(md);
             }

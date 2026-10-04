@@ -15,6 +15,11 @@ const NS: &str = r#"xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/ma
        xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main""#;
 
 fn deck(sp_tree: &str) -> Vec<u8> {
+    deck_with_bg(sp_tree, "")
+}
+
+/// 同 [`deck`],slide 的 `p:cSld` 里另带 `bg`(整个 `<p:bg>…</p:bg>` 元素文本)。
+fn deck_with_bg(sp_tree: &str, bg: &str) -> Vec<u8> {
     let rels = |body: &str| {
         format!(
             r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{body}</Relationships>"#
@@ -31,7 +36,7 @@ fn deck(sp_tree: &str) -> Vec<u8> {
         ),
         (
             "ppt/slides/slide1.xml",
-            format!(r#"<p:sld {NS}><p:cSld><p:spTree>{sp_tree}</p:spTree></p:cSld></p:sld>"#).into_bytes(),
+            format!(r#"<p:sld {NS}><p:cSld>{bg}<p:spTree>{sp_tree}</p:spTree></p:cSld></p:sld>"#).into_bytes(),
         ),
         (
             "ppt/slides/_rels/slide1.xml.rels",
@@ -191,4 +196,39 @@ fn explicit_shape_fill_beats_group_fill() {
     let red = r#"<a:solidFill><a:srgbClr val="FF0000"/></a:solidFill>"#;
     let a = resolved_leaf(&deck(&grp(SOLID_GREEN, &sp("rect", red))));
     assert_eq!(a.fill.map(|f| f.color().rgb), Some([255, 0, 0]));
+}
+
+const PATT: &str = r#"<a:pattFill prst="ltUpDiag"><a:fgClr><a:srgbClr val="FF0000"/></a:fgClr><a:bgClr><a:srgbClr val="0000FF"/></a:bgClr></a:pattFill>"#;
+
+/// 背景 `p:bgPr > a:pattFill` 与形状图案填充同规则:降级为两色平均色(此前被整个忽略 = 无背景)。
+#[test]
+fn background_patt_fill_degrades_to_the_mean_color() {
+    let bytes = deck_with_bg("", &format!("<p:bg><p:bgPr>{PATT}</p:bgPr></p:bg>"));
+    let parsed = parse_bytes(&bytes).expect("parse");
+    let resolved = resolve(&parsed);
+    let Some(ppt_core::resolved::ResolvedBackground::Color(ResolvedFill::Pattern(c))) =
+        &resolved.slides[0].background
+    else {
+        panic!(
+            "expected pattern background, got {:?}",
+            resolved.slides[0].background
+        );
+    };
+    assert_eq!(c.rgb, [128, 0, 128]);
+}
+
+/// 背景 `a:blipFill` 本就支持:折成带 media 名的图片背景(此处只钉住现状,不改行为)。
+#[test]
+fn background_blip_fill_resolves_to_a_picture() {
+    let bg = r#"<p:bg><p:bgPr><a:blipFill><a:blip r:embed="rId7"/></a:blipFill></p:bgPr></p:bg>"#;
+    let parsed = parse_bytes(&deck_with_bg("", bg)).expect("parse");
+    let resolved = resolve(&parsed);
+    assert!(
+        matches!(
+            &resolved.slides[0].background,
+            Some(ppt_core::resolved::ResolvedBackground::Picture { media_name }) if media_name == "image1.png"
+        ),
+        "{:?}",
+        resolved.slides[0].background
+    );
 }

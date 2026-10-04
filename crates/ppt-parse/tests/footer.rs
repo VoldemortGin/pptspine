@@ -361,3 +361,59 @@ fn text_exports_use_the_evaluated_slide_number_and_keep_cached_dates() {
     let raw = presentation_text_with(&d.parsed.presentation, None, &opts);
     assert!(raw.contains("Page 7"), "{raw}");
 }
+
+/// 表格单元格里的 `slidenum` 字段与正文形状一样:文本导出(纯文本 / GFM / HTML 三种表格
+/// 渲染)取终态求值结果,而不是缓存文本;没有终态 IR 时才退回缓存文本。
+#[test]
+fn table_cell_fields_use_the_evaluated_slide_number_in_text_exports() {
+    let cell = |inner: &str, attrs: &str| {
+        format!(r#"<a:tc{attrs}><a:txBody><a:bodyPr/>{inner}</a:txBody></a:tc>"#)
+    };
+    let page = r#"<a:p><a:r><a:t>Page </a:t></a:r><a:fld id="{F}" type="slidenum"><a:t>7</a:t></a:fld></a:p>"#;
+    let table = |rows: &str| {
+        format!(
+            r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="4" name="T"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>
+<p:xfrm><a:off x="0" y="0"/><a:ext cx="200" cy="100"/></p:xfrm>
+<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table"><a:tbl>
+<a:tblGrid><a:gridCol w="100"/><a:gridCol w="100"/></a:tblGrid>{rows}</a:tbl></a:graphicData></a:graphic></p:graphicFrame>"#
+        )
+    };
+    let plain = table(&format!(
+        r#"<a:tr h="100">{}{}</a:tr>"#,
+        cell(page, ""),
+        cell(r#"<a:p><a:r><a:t>x</a:t></a:r></a:p>"#, "")
+    ));
+    // 带合并(gridSpan)→ Markdown 走 HTML 表格路径。
+    let merged = table(&format!(
+        r#"<a:tr h="100">{}{}</a:tr>"#,
+        cell(page, r#" gridSpan="2""#),
+        cell(r#"<a:p><a:r><a:t>hm</a:t></a:r></a:p>"#, r#" hMerge="1""#)
+    ));
+    let slides = [
+        SlideDef {
+            sp_tree: format!("{plain}{merged}"),
+            hidden: false,
+        },
+        SlideDef {
+            sp_tree: format!("{plain}{merged}"),
+            hidden: false,
+        },
+    ];
+    let d = deck(r#"firstSlideNum="5""#, &slides);
+    let opts = ExportOptions::default();
+
+    let text = presentation_text_with(&d.parsed.presentation, Some(&d.resolved), &opts);
+    assert!(
+        text.contains("Page 5 | x") && text.contains("Page 6 | x"),
+        "{text}"
+    );
+    assert!(!text.contains("Page 7"), "{text}");
+
+    let md = presentation_markdown_with(&d.parsed.presentation, Some(&d.resolved), &opts);
+    assert!(md.contains("| Page 5 | x |"), "gfm: {md}");
+    assert!(md.contains("<td colspan=\"2\">Page 6</td>"), "html: {md}");
+    assert!(!md.contains("Page 7"), "{md}");
+
+    let raw = presentation_text_with(&d.parsed.presentation, None, &opts);
+    assert!(raw.contains("Page 7 | x"), "{raw}");
+}

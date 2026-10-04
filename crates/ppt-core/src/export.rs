@@ -13,7 +13,7 @@ mod view;
 use crate::model::{
     Cell, Chart, ChartKind, Paragraph, Presentation, RunKind, Slide, Table, TextFrame, TextRun,
 };
-use crate::resolved::{ResolvedParagraph, ResolvedRun};
+use crate::resolved::{ResolvedCell, ResolvedParagraph, ResolvedRun, ResolvedTable};
 
 pub use markdown::presentation_markdown_with;
 pub use view::{presentation_text_with, slide_text_with, ExportOptions, TextOrder};
@@ -46,10 +46,6 @@ fn frame_text(tf: &TextFrame, resolved: Option<&[ResolvedParagraph]>) -> String 
         .join("\n")
 }
 
-fn paragraph_text(p: &Paragraph) -> String {
-    paragraph_text_with(p, None)
-}
-
 /// 段落纯文本;字段 run(`a:fld`)有终态 run 时取其文字——`slidenum` 的页码求值只在
 /// `resolve.rs` 一处(文本导出与 PDF 共用),`datetime*` 在那里保持缓存文本。无终态 IR 时退回缓存文本。
 fn paragraph_text_with(p: &Paragraph, resolved: Option<&ResolvedParagraph>) -> String {
@@ -68,23 +64,31 @@ fn run_text<'a>(run: &'a TextRun, resolved: Option<&'a ResolvedRun>) -> &'a str 
     }
 }
 
-fn cell_text(c: &Cell) -> String {
+/// 单元格纯文本;`resolved` 为同位置的终态单元格(段落按下标配对,字段 run 取其求值结果)。
+fn cell_text(c: &Cell, resolved: Option<&ResolvedCell>) -> String {
     c.paragraphs
         .iter()
-        .map(paragraph_text)
+        .enumerate()
+        .map(|(i, p)| paragraph_text_with(p, resolved.and_then(|rc| rc.paragraphs.get(i))))
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
 }
 
-fn table_text(t: &Table) -> String {
+/// 终态表格里 `(行, 列)` 处的单元格(终态逐行逐格与原表一一对应;越界 → `None`)。
+fn resolved_cell(rt: Option<&ResolvedTable>, ri: usize, ci: usize) -> Option<&ResolvedCell> {
+    rt?.rows.get(ri)?.cells.get(ci)
+}
+
+fn table_text(t: &Table, rt: Option<&ResolvedTable>) -> String {
     let mut lines: Vec<String> = Vec::new();
-    for row in &t.rows {
+    for (ri, row) in t.rows.iter().enumerate() {
         let cells: Vec<String> = row
             .cells
             .iter()
-            .filter(|c| !c.merged) // 被合并掉的延续格不重复输出
-            .map(cell_text)
+            .enumerate()
+            .filter(|(_, c)| !c.merged) // 被合并掉的延续格不重复输出
+            .map(|(ci, c)| cell_text(c, resolved_cell(rt, ri, ci)))
             .collect();
         lines.push(cells.join(" | "));
     }
@@ -227,7 +231,7 @@ fn group_thousands(s: &str) -> String {
 
 // ---- Markdown 辅助 -------------------------------------------------------
 
-fn table_markdown(t: &Table) -> String {
+fn table_markdown(t: &Table, rt: Option<&ResolvedTable>) -> String {
     if t.rows.is_empty() {
         return String::new();
     }
@@ -237,13 +241,13 @@ fn table_markdown(t: &Table) -> String {
         .flat_map(|r| &r.cells)
         .any(|c| c.col_span > 1 || c.row_span > 1 || c.merged);
     if has_merge {
-        table_html(t)
+        table_html(t, rt)
     } else {
-        table_gfm(t)
+        table_gfm(t, rt)
     }
 }
 
-fn table_gfm(t: &Table) -> String {
+fn table_gfm(t: &Table, rt: Option<&ResolvedTable>) -> String {
     let cols = t.rows.iter().map(|r| r.cells.len()).max().unwrap_or(0);
     if cols == 0 {
         return String::new();
@@ -253,7 +257,8 @@ fn table_gfm(t: &Table) -> String {
         let mut cells: Vec<String> = row
             .cells
             .iter()
-            .map(|c| escape_pipe(&cell_text(c)))
+            .enumerate()
+            .map(|(ci, c)| escape_pipe(&cell_text(c, resolved_cell(rt, i, ci))))
             .collect();
         while cells.len() < cols {
             cells.push(String::new());
@@ -267,11 +272,11 @@ fn table_gfm(t: &Table) -> String {
     lines.join("\n")
 }
 
-fn table_html(t: &Table) -> String {
+fn table_html(t: &Table, rt: Option<&ResolvedTable>) -> String {
     let mut s = String::from("<table>");
-    for row in &t.rows {
+    for (ri, row) in t.rows.iter().enumerate() {
         s.push_str("\n  <tr>");
-        for c in &row.cells {
+        for (ci, c) in row.cells.iter().enumerate() {
             if c.merged {
                 continue; // 被合并掉的延续格不输出,跨度由主格的 colspan/rowspan 表达
             }
@@ -284,7 +289,7 @@ fn table_html(t: &Table) -> String {
             }
             s.push_str(&format!(
                 "\n    <td{attrs}>{}</td>",
-                escape_html(&cell_text(c))
+                escape_html(&cell_text(c, resolved_cell(rt, ri, ci)))
             ));
         }
         s.push_str("\n  </tr>");
@@ -392,7 +397,7 @@ mod tests {
                 },
             ],
         };
-        let md = table_markdown(&table);
+        let md = table_markdown(&table, None);
         assert!(md.contains("| A1 | B1 |"));
         assert!(md.contains("| --- | --- |"));
         assert!(md.contains("| A2 | B2 |"));
@@ -418,7 +423,7 @@ mod tests {
                 },
             ],
         };
-        let md = table_markdown(&table);
+        let md = table_markdown(&table, None);
         assert!(md.starts_with("<table>"));
         assert!(md.contains("<td colspan=\"2\">Header</td>"));
         assert!(md.contains("<td>A2</td>"));
@@ -466,7 +471,7 @@ mod tests {
                 height: None,
             }],
         };
-        let md = table_markdown(&table);
+        let md = table_markdown(&table, None);
         assert!(md.contains("a&lt;b&gt;&amp;c"));
     }
 }
