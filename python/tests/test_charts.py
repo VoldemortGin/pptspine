@@ -7,6 +7,9 @@ import warnings
 
 import pptspine
 
+# 图表系列 dict 新增的样式键(无样式时的取值)。
+_NO_STYLE = {"color": None, "point_colors": {}, "labels": None}
+
 
 def _chart(pres: pptspine.Presentation, slide: int) -> dict:
     (ph,) = [s for s in pres.slide(slide).shapes() if s["kind"] == "placeholder"]
@@ -27,8 +30,8 @@ def test_bar_chart_dict(chart_pptx_bytes):
     assert c["title"] == "Quarterly Sales"
     assert c["categories"] == ["Q1", "Q2", "Q3"]
     assert c["series"] == [
-        {"name": "North", "values": [10.0, 20.5, 30.0], "format_code": "General"},
-        {"name": "South", "values": [4.0, 5.0, 6.0], "format_code": "General"},
+        {"name": "North", "values": [10.0, 20.5, 30.0], "format_code": "General", **_NO_STYLE},
+        {"name": "South", "values": [4.0, 5.0, 6.0], "format_code": "General", **_NO_STYLE},
     ]
     assert c["warnings"] == []
 
@@ -64,7 +67,9 @@ def test_pie_chart_single_series_with_percent_format(chart_pptx_bytes):
     assert c["kind"] == "pie"
     assert c["title"] == "Fruit Mix"
     assert c["categories"] == ["Apples", "Pears", "Plums"]
-    assert c["series"] == [{"name": "Share", "values": [0.25, 0.5, 0.25], "format_code": "0%"}]
+    assert c["series"] == [
+        {"name": "Share", "values": [0.25, 0.5, 0.25], "format_code": "0%", **_NO_STYLE}
+    ]
     md = _md_slide(pres.to_markdown(), 2)
     assert (
         "#### Chart: Fruit Mix\n\n| Category | Share |\n| --- | --- |\n"
@@ -95,7 +100,7 @@ def test_sparse_points_and_missing_cache(chart_pptx_bytes):
     assert c["categories"] == ["Jan", "Feb", "Mar", "Apr"]
     dense, linked = c["series"]
     assert dense["values"] == [1.0, None, 3.0, None]
-    assert linked == {"name": "Linked", "values": [], "format_code": None}
+    assert linked == {"name": "Linked", "values": [], "format_code": None, **_NO_STYLE}
     assert any("Linked" in w and "cache missing" in w for w in c["warnings"]), c["warnings"]
     md = _md_slide(pres.to_markdown(), 4)
     assert (
@@ -118,3 +123,28 @@ def test_chart_frames_still_render_as_placeholder(chart_pptx_bytes):
         warnings.simplefilter("ignore")  # 字体替换告警与本测试无关
         pdf = pptspine.open_bytes(chart_pptx_bytes).to_pdf()
     assert pdf.startswith(b"%PDF")
+
+
+def test_series_colors_point_colors_and_labels_in_dict(styled_chart_pptx_bytes):
+    pres = pptspine.open_bytes(styled_chart_pptx_bytes)
+    bar = _chart(pres, 0)["series"][0]
+    assert bar["color"] == "FF0000"
+    assert bar["point_colors"] == {1: "0000FF"}
+    assert bar["labels"] == {"show_val": True, "show_cat_name": False, "show_percent": False}
+    pie = _chart(pres, 1)
+    assert pie["of_pie"] is False
+    assert pie["series"][0]["color"] is None
+    assert pie["series"][0]["point_colors"] == {0: "00AA00"}
+    assert pie["series"][0]["labels"]["show_percent"] is True
+    assert _chart(pres, 2)["of_pie"] is True
+    assert _chart(pres, 2)["kind"] == "pie"
+
+
+def test_styled_charts_render_vectors_and_of_pie_degrades(styled_chart_pptx_bytes):
+    """柱 / 饼(带系列色 + 标签)照常画;复合饼走占位框,经 ``warnings`` 上浮 ``chart-degraded``
+    (逐种类只上浮一次,故整份 deck 恰一条,来自第三页)。"""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        pdf = pptspine.open_bytes(styled_chart_pptx_bytes).to_pdf()
+    assert pdf.startswith(b"%PDF")
+    assert sum("chart-degraded" in str(w.message) for w in caught) == 1

@@ -15,6 +15,14 @@ class ChartSeriesDict(TypedDict):
     name: str | None
     values: list[float | None]
     format_code: str | None
+    color: str | None
+    point_colors: dict[int, str | None]
+    labels: ChartLabelsDict | None
+
+class ChartLabelsDict(TypedDict):
+    show_val: bool
+    show_cat_name: bool
+    show_percent: bool
 
 class ChartDict(TypedDict):
     kind: str
@@ -25,6 +33,7 @@ class ChartDict(TypedDict):
     grouping: str | None
     three_d: bool
     combo: bool
+    of_pie: bool
     warnings: list[str]
 
 class PptError(Exception):

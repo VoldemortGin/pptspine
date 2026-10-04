@@ -376,7 +376,7 @@ fn placeholder_dict<'py>(py: Python<'py>, p: &GraphicPlaceholder) -> PyResult<Bo
 }
 
 /// 图表缓存数据 [`Chart`] -> dict(`kind` / `title` / `categories` / `series` / `bar_dir` /
-/// `grouping` / `three_d` / `combo` / `warnings`)。
+/// `grouping` / `three_d` / `combo` / `of_pie` / `warnings`)。
 fn chart_dict<'py>(py: Python<'py>, c: &Chart) -> PyResult<Bound<'py, PyDict>> {
     let d = PyDict::new(py);
     d.set_item("kind", c.kind.name())?;
@@ -388,6 +388,22 @@ fn chart_dict<'py>(py: Python<'py>, c: &Chart) -> PyResult<Bound<'py, PyDict>> {
         sd.set_item("name", s.name.as_deref())?;
         sd.set_item("values", &s.values)?;
         sd.set_item("format_code", s.format_code.as_deref())?;
+        sd.set_item("color", s.color.as_ref().and_then(spec_hex))?;
+        let points = PyDict::new(py);
+        for (idx, c) in &s.point_colors {
+            points.set_item(idx, spec_hex(c))?;
+        }
+        sd.set_item("point_colors", points)?;
+        match s.labels {
+            Some(l) => {
+                let ld = PyDict::new(py);
+                ld.set_item("show_val", l.show_val)?;
+                ld.set_item("show_cat_name", l.show_cat_name)?;
+                ld.set_item("show_percent", l.show_percent)?;
+                sd.set_item("labels", ld)?;
+            }
+            None => sd.set_item("labels", py.None())?,
+        }
         series.append(sd)?;
     }
     d.set_item("series", series)?;
@@ -395,6 +411,7 @@ fn chart_dict<'py>(py: Python<'py>, c: &Chart) -> PyResult<Bound<'py, PyDict>> {
     d.set_item("grouping", c.grouping.as_deref())?;
     d.set_item("three_d", c.three_d)?;
     d.set_item("combo", c.combo)?;
+    d.set_item("of_pie", c.of_pie)?;
     d.set_item("warnings", &c.warnings)?;
     Ok(d)
 }

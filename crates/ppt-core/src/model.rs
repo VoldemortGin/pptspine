@@ -625,6 +625,8 @@ pub struct Chart {
     pub three_d: bool,
     /// `c:plotArea` 含多个图类型元素(组合图)。
     pub combo: bool,
+    /// 主图类型是 `c:ofPieChart`(复合饼 / 条形饼;`kind` 仍并入 `Pie`)。
+    pub of_pie: bool,
     /// 抽取降级告警(缺缓存、点数截断等)。
     pub warnings: Vec<String>,
 }
@@ -638,6 +640,22 @@ pub struct ChartSeries {
     pub values: Vec<Option<f64>>,
     /// 值的数字格式(`c:numCache > c:formatCode`,如 `"General"` / `"0.0%"`)。
     pub format_code: Option<String>,
+    /// 系列自带的颜色:柱 / 条 / 面积取 `c:spPr > a:solidFill`,折线取 `c:spPr > a:ln > a:solidFill`;
+    /// 缺失 / 渐变 / 图案填充为 `None`(渲染回落主题 accent 循环)。
+    pub color: Option<ColorSpec>,
+    /// 逐点颜色(`c:dPt@idx` + `c:spPr > a:solidFill`),按文档顺序;饼图的扇区色即来自这里。
+    pub point_colors: Vec<(usize, ColorSpec)>,
+    /// 生效的数据标签设置(系列级 `c:dLbls` 覆盖图表类型级 `c:dLbls`);都没有为 `None`。
+    pub labels: Option<DataLabels>,
+}
+
+/// 数据标签设置(`c:dLbls` 的 `c:showVal` / `c:showCatName` / `c:showPercent`;
+/// `c:numFmt` 数字格式码不读,标签按默认格式)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DataLabels {
+    pub show_val: bool,
+    pub show_cat_name: bool,
+    pub show_percent: bool,
 }
 
 /// 描边属性(`a:ln`):颜色 + 线宽 + 虚线预设 + 两端线端装饰。

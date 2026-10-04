@@ -21,8 +21,9 @@ use std::collections::BTreeMap;
 use ppt_core::color::{apply_transforms, ColorSpec, ResolvedColor};
 use ppt_core::geom::Rect;
 use ppt_core::model::{
-    AutoShape, Autofit, Background, BodyProps, Cell, Connector, Fill, Paragraph, Presentation,
-    Shape, Slide, Stroke, Table, TableFlags, TablePartStyle, TableStyle, TextFrame, TextRun,
+    AutoShape, Autofit, Background, BodyProps, Cell, Connector, Fill, GraphicPlaceholder,
+    Paragraph, Presentation, Shape, Slide, Stroke, Table, TableFlags, TablePartStyle, TableStyle,
+    TextFrame, TextRun,
 };
 use ppt_core::model::{LineEnd, LineEndKind};
 use ppt_core::resolved::{
@@ -232,8 +233,22 @@ fn resolve_shape(shape: &Shape, ctx: &Ctx) -> ResolvedShape {
                 children: g.children.iter().map(|c| resolve_shape(c, ctx)).collect(),
             })
         }
-        Shape::Placeholder(gp) => ResolvedShape::Placeholder(gp.clone()),
+        Shape::Placeholder(gp) => ResolvedShape::Placeholder(resolve_graphic(gp, ctx)),
     }
+}
+
+/// 图表帧:系列色 / 逐点色里的 schemeClr(及变换)经 clrMap + clrScheme 终端化为显式 srgb
+/// (不带变换),渲染侧直接取色;alpha 丢弃(图表按不透明画)。
+fn resolve_graphic(gp: &GraphicPlaceholder, ctx: &Ctx) -> GraphicPlaceholder {
+    let mut gp = gp.clone();
+    let terminal = |spec: &ColorSpec| ColorSpec::srgb(resolve_color(ctx, spec, None).rgb);
+    for s in gp.chart.iter_mut().flat_map(|c| c.series.iter_mut()) {
+        s.color = s.color.as_ref().map(terminal);
+        for (_, c) in &mut s.point_colors {
+            *c = terminal(c);
+        }
+    }
+    gp
 }
 
 // ---- 文本 -----------------------------------------------------------------

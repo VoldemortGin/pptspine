@@ -8,10 +8,13 @@
 //!
 //! 容错:未知元素跳过、畸形数字 → 缺点、绝不 panic;点数 / 系列数设上限防放大攻击。
 
-use ppt_core::model::{Chart, ChartKind, ChartSeries};
+use ppt_core::color::ColorSpec;
+use ppt_core::model::{Chart, ChartKind, ChartSeries, DataLabels};
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 
+use super::slide::parse_ln;
+use super::text_style::parse_solid_fill;
 use super::{attr_of, local_name, read_text, skip_element};
 
 /// 单个缓存的最大点数(超出的 `idx` 丢弃;`ptCount` 截到此值)。
@@ -51,6 +54,13 @@ struct RawSeries {
     name: Option<String>,
     cat: Option<Cache>,
     val: Option<Cache>,
+    /// `c:spPr > a:solidFill`。
+    fill: Option<ColorSpec>,
+    /// `c:spPr > a:ln > a:solidFill`。
+    line: Option<ColorSpec>,
+    point_colors: Vec<(usize, ColorSpec)>,
+    /// 系列级 `c:dLbls`(`c:delete` 记全 false,以便覆盖类型级)。
+    labels: Option<DataLabels>,
 }
 
 /// 解析一份图表部件 XML。找不到任何图类型时 `kind` 记为 `Other("")`。
@@ -70,6 +80,7 @@ pub fn parse(xml: &str) -> Chart {
         grouping: None,
         three_d: false,
         combo: false,
+        of_pie: false,
         warnings: Vec::new(),
     };
     let mut buf = Vec::new();
@@ -127,6 +138,7 @@ fn parse_chart_el<R: std::io::BufRead>(reader: &mut Reader<R>, chart: &mut Chart
         chart.bar_dir = info.bar_dir;
         chart.grouping = info.grouping;
         chart.three_d = info.three_d;
+        chart.of_pie = info.of_pie;
     }
     for (kind, rs) in raw {
         let label = rs.name.clone().unwrap_or_else(|| "(unnamed)".to_string());
@@ -167,6 +179,16 @@ fn parse_chart_el<R: std::io::BufRead>(reader: &mut Reader<R>, chart: &mut Chart
             name: rs.name,
             values,
             format_code,
+            // 折线的颜色是线色,其余取填充色。
+            color: if kind == ChartKind::Line {
+                rs.line
+            } else {
+                rs.fill
+            },
+            point_colors: rs.point_colors,
+            labels: rs
+                .labels
+                .filter(|l| l.show_val || l.show_cat_name || l.show_percent),
         });
     }
 
@@ -287,6 +309,10 @@ struct PlotInfo {
     bar_dir: Option<String>,
     grouping: Option<String>,
     three_d: bool,
+    /// `c:ofPieChart`(复合饼)。
+    of_pie: bool,
+    /// 类型级 `c:dLbls`(系列未自设时继承)。
+    labels: Option<DataLabels>,
 }
 
 /// 图类型元素本地名是否为 3D 变体(如 `bar3DChart`)。
@@ -313,6 +339,7 @@ fn parse_plot_area<R: std::io::BufRead>(
                     Some(kind) => {
                         let mut info = parse_plot(reader, &kind, raw, st);
                         info.three_d = is_3d(&el);
+                        info.of_pie = el == "ofPieChart";
                         kinds.push((kind, info));
                     }
                     None => skip_element(reader, &name),
@@ -323,6 +350,7 @@ fn parse_plot_area<R: std::io::BufRead>(
                 if let Some(kind) = ChartKind::from_element(&name) {
                     let info = PlotInfo {
                         three_d: is_3d(&name),
+                        of_pie: name == "ofPieChart",
                         ..PlotInfo::default()
                     };
                     kinds.push((kind, info));
@@ -344,12 +372,15 @@ fn parse_plot<R: std::io::BufRead>(
     st: &mut State,
 ) -> PlotInfo {
     let mut info = PlotInfo::default();
+    let first = raw.len();
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
                 let name = local_name(e.name().as_ref()).to_vec();
-                if name.as_slice() == b"ser" && raw.len() < MAX_SERIES {
+                if name.as_slice() == b"dLbls" {
+                    info.labels = Some(parse_dlbls(reader));
+                } else if name.as_slice() == b"ser" && raw.len() < MAX_SERIES {
                     raw.push((kind.clone(), parse_ser(reader, st)));
                 } else {
                     if name.as_slice() == b"ser" {
@@ -370,6 +401,12 @@ fn parse_plot<R: std::io::BufRead>(
         }
         buf.clear();
     }
+    // `c:dLbls` 排在 `c:ser` 之后:读完整个图类型元素再把类型级设置填给没自设的系列。
+    if let Some(group) = info.labels {
+        for (_, rs) in &mut raw[first..] {
+            rs.labels.get_or_insert(group);
+        }
+    }
     info
 }
 
@@ -385,6 +422,13 @@ fn parse_ser<R: std::io::BufRead>(reader: &mut Reader<R>, st: &mut State) -> Raw
                     b"tx" => s.name = parse_tx(reader),
                     b"cat" | b"xVal" => s.cat = Some(parse_data_source(reader, st)),
                     b"val" | b"yVal" => s.val = Some(parse_data_source(reader, st)),
+                    b"spPr" => (s.fill, s.line) = parse_sppr_colors(reader),
+                    b"dPt" => {
+                        if let (Some(idx), Some(color)) = parse_dpt(reader) {
+                            s.point_colors.push((idx, color));
+                        }
+                    }
+                    b"dLbls" => s.labels = Some(parse_dlbls(reader)),
                     _ => skip_element(reader, &name),
                 }
             }
@@ -399,6 +443,89 @@ fn parse_ser<R: std::io::BufRead>(reader: &mut Reader<R>, st: &mut State) -> Raw
         buf.clear();
     }
     s
+}
+
+/// `c:spPr`:直接子 `a:solidFill` 的颜色与 `a:ln > a:solidFill` 的颜色;渐变 / 图案 / `noFill`
+/// 一律跳过(取不到颜色,渲染回落 accent)。已消费起始标签。
+fn parse_sppr_colors<R: std::io::BufRead>(
+    reader: &mut Reader<R>,
+) -> (Option<ColorSpec>, Option<ColorSpec>) {
+    let (mut fill, mut line) = (None, None);
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                let name = local_name(e.name().as_ref()).to_vec();
+                match name.as_slice() {
+                    b"solidFill" => fill = parse_solid_fill(reader),
+                    b"ln" => line = parse_ln(reader, &e).and_then(|s| s.color),
+                    _ => skip_element(reader, &name),
+                }
+            }
+            Ok(Event::End(_)) | Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    (fill, line)
+}
+
+/// `c:dPt`:`c:idx@val` + `c:spPr > a:solidFill`。已消费起始标签。
+fn parse_dpt<R: std::io::BufRead>(reader: &mut Reader<R>) -> (Option<usize>, Option<ColorSpec>) {
+    let (mut idx, mut color) = (None, None);
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                let name = local_name(e.name().as_ref()).to_vec();
+                if name.as_slice() == b"spPr" {
+                    color = parse_sppr_colors(reader).0;
+                } else {
+                    skip_element(reader, &name);
+                }
+            }
+            Ok(Event::Empty(e)) => {
+                if local_name(e.name().as_ref()) == b"idx" {
+                    idx = attr_of(&e, b"val").and_then(|v| v.trim().parse().ok());
+                }
+            }
+            Ok(Event::End(_)) | Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    (idx.filter(|i| *i < MAX_POINTS), color)
+}
+
+/// `c:dLbls`:`c:showVal` / `c:showCatName` / `c:showPercent`(未写 = false);`c:delete` = 全关;
+/// `c:numFmt` / 逐点 `c:dLbl` 等其余子元素跳过。已消费起始标签。
+fn parse_dlbls<R: std::io::BufRead>(reader: &mut Reader<R>) -> DataLabels {
+    let mut l = DataLabels::default();
+    let mut deleted = false;
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(e)) => {
+                let name = local_name(e.name().as_ref()).to_vec();
+                skip_element(reader, &name);
+            }
+            Ok(Event::Empty(e)) => match local_name(e.name().as_ref()) {
+                b"showVal" => l.show_val = val_true(&e),
+                b"showCatName" => l.show_cat_name = val_true(&e),
+                b"showPercent" => l.show_percent = val_true(&e),
+                b"delete" => deleted = val_true(&e),
+                _ => {}
+            },
+            Ok(Event::End(_)) | Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+    if deleted {
+        DataLabels::default()
+    } else {
+        l
+    }
 }
 
 /// 数据源元素(`c:cat` / `c:val` / …)内的 `strRef` / `numRef` / `strLit` / `numLit` /
@@ -750,6 +877,138 @@ mod tests {
             (c.bar_dir, c.grouping, c.three_d, c.combo),
             (None, None, false, false)
         );
+    }
+
+    /// `c:ser > c:spPr`:柱取 solidFill、折线取 `a:ln` 的 solidFill(含 schemeClr 与变换原样保留);
+    /// 渐变 / 图案 / noFill 跳过;`c:dPt` 逐点色。
+    #[test]
+    fn series_and_point_colors_are_parsed() {
+        use ppt_core::color::ColorSpec;
+        let val = r#"<c:val><c:numLit><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val>"#;
+        let c = parse(&space(
+            &format!(
+                r#"<c:barChart><c:barDir val="col"/>
+                <c:ser><c:spPr><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill><a:ln><a:solidFill><a:srgbClr val="00FF00"/></a:solidFill></a:ln></c:spPr>{val}</c:ser>
+                <c:ser><c:spPr><a:solidFill><a:schemeClr val="accent2"><a:lumMod val="75000"/></a:schemeClr></a:solidFill></c:spPr>{val}</c:ser>
+                <c:ser><c:spPr><a:gradFill><a:gsLst><a:gs pos="0"><a:srgbClr val="0000FF"/></a:gs></a:gsLst></a:gradFill></c:spPr>{val}</c:ser>
+                <c:ser><c:spPr><a:pattFill prst="pct5"><a:fgClr><a:srgbClr val="0000FF"/></a:fgClr></a:pattFill></c:spPr>{val}</c:ser>
+                <c:ser>{val}</c:ser></c:barChart>"#
+            ),
+            "",
+        ));
+        let colors: Vec<_> = c.series.iter().map(|s| s.color.clone()).collect();
+        assert_eq!(
+            colors[0],
+            Some(ColorSpec::srgb([0xFF, 0, 0])),
+            "柱取 solidFill 而非 ln"
+        );
+        assert!(
+            matches!(&colors[1], Some(ColorSpec::Scheme { name, transforms }) if name == "accent2" && transforms.len() == 1),
+            "schemeClr + 变换原样保留: {:?}",
+            colors[1]
+        );
+        assert_eq!(
+            &colors[2..],
+            &[None, None, None],
+            "渐变 / 图案 / 无 spPr 跳过"
+        );
+
+        let c = parse(&space(
+            &format!(
+                r#"<c:lineChart><c:ser><c:spPr><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill><a:ln w="28575"><a:solidFill><a:srgbClr val="00FF00"/></a:solidFill></a:ln></c:spPr>{val}</c:ser></c:lineChart>"#
+            ),
+            "",
+        ));
+        assert_eq!(
+            c.series[0].color,
+            Some(ColorSpec::srgb([0, 0xFF, 0])),
+            "折线取 ln 颜色"
+        );
+
+        let c = parse(&space(
+            &format!(
+                r#"<c:pieChart><c:varyColors val="1"/><c:ser>{val}
+                <c:dPt><c:idx val="0"/><c:bubble3D val="0"/><c:spPr><a:solidFill><a:srgbClr val="112233"/></a:solidFill></c:spPr></c:dPt>
+                <c:dPt><c:idx val="2"/><c:spPr><a:gradFill/></c:spPr></c:dPt>
+                <c:dPt><c:idx val="3"/><c:spPr><a:solidFill><a:srgbClr val="445566"/></a:solidFill></c:spPr></c:dPt>
+                </c:ser></c:pieChart>"#
+            ),
+            "",
+        ));
+        assert_eq!(
+            c.series[0].point_colors,
+            vec![
+                (0, ColorSpec::srgb([0x11, 0x22, 0x33])),
+                (3, ColorSpec::srgb([0x44, 0x55, 0x66]))
+            ]
+        );
+    }
+
+    /// `c:dLbls`:系列级整体覆盖图表类型级;`c:delete` 关闭;未写的 show* 视为 false;
+    /// `c:numFmt` 非 General 不影响解析。
+    #[test]
+    fn data_labels_series_overrides_group() {
+        use ppt_core::model::DataLabels;
+        let val = r#"<c:val><c:numLit><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val>"#;
+        let c = parse(&space(
+            &format!(
+                r#"<c:barChart><c:barDir val="col"/>
+                <c:ser>{val}</c:ser>
+                <c:ser><c:dLbls><c:numFmt formatCode="0.0%" sourceLinked="0"/><c:showVal val="0"/><c:showCatName val="1"/></c:dLbls>{val}</c:ser>
+                <c:ser><c:dLbls><c:delete val="1"/></c:dLbls>{val}</c:ser>
+                <c:dLbls><c:numFmt formatCode="0.00" sourceLinked="0"/><c:showLegendKey val="0"/><c:showVal val="1"/><c:showCatName val="0"/><c:showPercent val="0"/></c:dLbls>
+                </c:barChart>
+                <c:lineChart><c:ser>{val}</c:ser></c:lineChart>"#
+            ),
+            "",
+        ));
+        let l: Vec<_> = c.series.iter().map(|s| s.labels).collect();
+        assert_eq!(
+            l[0],
+            Some(DataLabels {
+                show_val: true,
+                ..DataLabels::default()
+            }),
+            "继承图表类型级"
+        );
+        assert_eq!(
+            l[1],
+            Some(DataLabels {
+                show_cat_name: true,
+                ..DataLabels::default()
+            }),
+            "系列级整体覆盖(showVal 未设 = false)"
+        );
+        assert_eq!(l[2], None, "delete = 无标签");
+        assert_eq!(l[3], None, "另一图类型不继承 barChart 的 dLbls");
+
+        let c = parse(&space(
+            &format!(
+                r#"<c:pieChart><c:ser>{val}<c:dLbls><c:showPercent val="1"/></c:dLbls></c:ser></c:pieChart>"#
+            ),
+            "",
+        ));
+        assert_eq!(
+            c.series[0].labels,
+            Some(DataLabels {
+                show_percent: true,
+                ..DataLabels::default()
+            })
+        );
+    }
+
+    /// `c:ofPieChart` 仍并入 `Pie`,但带 `of_pie` 标记(渲染据此降级占位框)。
+    #[test]
+    fn of_pie_is_marked() {
+        let ser = r#"<c:ser><c:val><c:numLit><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val></c:ser>"#;
+        let c = parse(&space(
+            &format!("<c:ofPieChart><c:ofPieType val=\"pie\"/>{ser}</c:ofPieChart>"),
+            "",
+        ));
+        assert_eq!(c.kind, ChartKind::Pie);
+        assert!(c.of_pie);
+        let c = parse(&space(&format!("<c:pieChart>{ser}</c:pieChart>"), ""));
+        assert!(!c.of_pie);
     }
 
     #[test]

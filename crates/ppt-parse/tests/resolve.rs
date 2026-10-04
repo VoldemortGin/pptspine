@@ -263,8 +263,10 @@ fn build_deck_extra(
         ),
         ("ppt/theme/theme1.xml", THEME1.into()),
     ];
+    // 同名额外部件替换基础部件(如自带图表关系的 slide rels)。
     let parts: Vec<(&str, String)> = parts
         .into_iter()
+        .filter(|(n, _)| !extra_parts.iter().any(|(en, _)| en == n))
         .chain(extra_parts.iter().map(|(n, b)| (*n, (*b).to_string())))
         .collect();
     let mut buf = Cursor::new(Vec::new());
@@ -1816,4 +1818,58 @@ fn explicit_no_fill_connector_sets_no_line() {
         inherited.stroke.is_some() && !inherited.no_line,
         "继承 lnRef"
     );
+}
+
+// ---- 图表系列色:schemeClr + 变换经主题终端化 --------------------------------
+
+/// 图表 `c:spPr` / `c:dPt` 里的 schemeClr(带 lumMod)在解析阶段落成显式 srgb(经 clrMap +
+/// clrScheme + 变换),渲染侧据此直接取色;srgb 原样保留。
+#[test]
+fn chart_series_scheme_colors_resolve_through_theme() {
+    use ppt_core::color::ColorSpec;
+    let frame = r#"<p:graphicFrame>
+      <p:nvGraphicFramePr><p:cNvPr id="4" name="Chart"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>
+      <p:xfrm><a:off x="0" y="0"/><a:ext cx="4000000" cy="3000000"/></p:xfrm>
+      <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">
+        <c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rId5"/>
+      </a:graphicData></a:graphic></p:graphicFrame>"#;
+    let rels = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/slideLayout1.xml"/>
+  <Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/>
+</Relationships>"#;
+    let chart = r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"
+        xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:chart><c:plotArea>
+      <c:barChart><c:barDir val="col"/>
+        <c:ser><c:spPr><a:solidFill><a:schemeClr val="accent1"><a:lumMod val="75000"/></a:schemeClr></a:solidFill></c:spPr>
+          <c:dPt><c:idx val="1"/><c:spPr><a:solidFill><a:srgbClr val="123456"/></a:solidFill></c:spPr></c:dPt>
+          <c:dPt><c:idx val="2"/><c:spPr><a:solidFill><a:schemeClr val="accent2"/></a:solidFill></c:spPr></c:dPt>
+          <c:val><c:numLit><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val></c:ser>
+      </c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
+    let xml = build_deck_extra(
+        &slide_with(frame, ""),
+        "",
+        &layout1(),
+        &master1(),
+        &[
+            ("ppt/slides/_rels/slide1.xml.rels", rels),
+            ("ppt/charts/chart1.xml", chart),
+        ],
+    );
+    let slide = resolve(&parse_bytes(&xml).expect("parse")).slides.remove(0);
+    let ResolvedShape::Placeholder(gp) = &slide.shapes[0] else {
+        panic!("expected chart placeholder");
+    };
+    let s = &gp.chart.as_ref().expect("chart").series[0];
+    let rgb = |c: &ColorSpec| match c {
+        ColorSpec::Srgb { rgb, transforms } if transforms.is_empty() => *rgb,
+        other => panic!("颜色应已终端化为 srgb: {other:?}"),
+    };
+    assert_rgb_within(
+        rgb(s.color.as_ref().expect("color")),
+        [0x2F, 0x55, 0x97],
+        "accent1 lumMod75",
+    );
+    assert_eq!(rgb(&s.point_colors[0].1), [0x12, 0x34, 0x56]);
+    assert_rgb_within(rgb(&s.point_colors[1].1), [0xED, 0x7D, 0x31], "dPt accent2");
 }

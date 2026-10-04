@@ -1973,3 +1973,52 @@ def build_chart_pptx() -> bytes:
 def chart_pptx_bytes() -> bytes:
     """图表数据抽取验收 deck(见 :func:`build_chart_pptx`)。"""
     return build_chart_pptx()
+
+
+# 图表系列色 / 数据标签 / 复合饼:三张 slide 各一个图表帧。
+_FILL = '<a:solidFill><a:srgbClr val="{}"/></a:solidFill>'
+
+
+def _fruit_ser(extra_head: str = "", extra_tail: str = "") -> str:
+    return (
+        '<c:ser><c:idx val="0"/><c:order val="0"/>'
+        f"{extra_head}"
+        f"<c:cat>{_str_ref(['Apples', 'Pears', 'Plums'])}</c:cat>"
+        f"<c:val>{_num_ref(['50', '30', '20'])}</c:val>{extra_tail}</c:ser>"
+    )
+
+
+_CHART_STYLED_BAR = _chart_space(
+    '<c:barChart><c:barDir val="col"/><c:grouping val="clustered"/>'
+    + _fruit_ser(
+        f'<c:spPr>{_FILL.format("FF0000")}</c:spPr>'
+        f'<c:dPt><c:idx val="1"/><c:spPr>{_FILL.format("0000FF")}</c:spPr></c:dPt>'
+        '<c:dLbls><c:numFmt formatCode="0.0%" sourceLinked="0"/><c:showVal val="1"/>'
+        '<c:showCatName val="0"/><c:showPercent val="0"/></c:dLbls>'
+    )
+    + "</c:barChart>"
+)
+_CHART_STYLED_PIE = _chart_space(
+    '<c:pieChart><c:varyColors val="1"/>'
+    + _fruit_ser(
+        f'<c:dPt><c:idx val="0"/><c:spPr>{_FILL.format("00AA00")}</c:spPr></c:dPt>',
+        '<c:dLbls><c:showVal val="0"/><c:showCatName val="0"/><c:showPercent val="1"/></c:dLbls>',
+    )
+    + "</c:pieChart>"
+)
+_CHART_OF_PIE = _chart_space(
+    '<c:ofPieChart><c:ofPieType val="pie"/><c:varyColors val="1"/>' + _fruit_ser() + "</c:ofPieChart>"
+)
+
+
+@pytest.fixture(scope="session")
+def styled_chart_pptx_bytes() -> bytes:
+    """系列色 / 逐点色 / 数据标签(柱、饼)+ 复合饼(``ofPieChart``)各一张 slide。"""
+    charts = [_CHART_STYLED_BAR, _CHART_STYLED_PIE, _CHART_OF_PIE]
+    return build_chain_pptx(
+        [
+            (_chain_slide(_chart_frame()), [("rId5", _REL_CHART, f"../charts/chart{i + 1}.xml", False)])
+            for i in range(len(charts))
+        ],
+        extra_parts={f"ppt/charts/chart{i}.xml": c for i, c in enumerate(charts, start=1)},
+    )

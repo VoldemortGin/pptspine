@@ -1624,7 +1624,7 @@ mod tests {
         let s = |name: &str, v: [f64; 3]| ChartSeries {
             name: Some(name.into()),
             values: v.iter().map(|x| Some(*x)).collect(),
-            format_code: None,
+            ..ChartSeries::default()
         };
         Chart {
             kind,
@@ -1638,6 +1638,7 @@ mod tests {
             grouping: Some("clustered".into()),
             three_d: false,
             combo: false,
+            of_pie: false,
             warnings: Vec::new(),
         }
     }
@@ -1712,6 +1713,52 @@ mod tests {
         let out = render(&one_slide(vec![smart_art]));
         assert!(has_placeholder_box(&out.pdf));
         assert_eq!(chart_degraded(&out), 0, "SmartArt 不发图表告警");
+    }
+
+    /// 复合饼(`ofPieChart`)不再按普通饼画:占位框 + `chart-degraded`。
+    #[test]
+    fn of_pie_chart_keeps_placeholder_and_warns() {
+        use ppt_core::model::ChartKind;
+        let mut c = sample_chart(ChartKind::Pie);
+        c.of_pie = true;
+        let out = render(&one_slide(vec![chart_shape(Some(c), CHART_URI)]));
+        assert!(has_placeholder_box(&out.pdf));
+        assert_eq!(chart_degraded(&out), 1, "{:?}", out.warnings);
+    }
+
+    /// 系列自带色胜过 accent(accent1 仍是红,系列 0 显式绿);数据标签多出文字;逐字节确定。
+    #[test]
+    fn chart_uses_series_colors_and_draws_data_labels() {
+        use ppt_core::color::ColorSpec;
+        use ppt_core::model::{ChartKind, DataLabels};
+        for kind in [ChartKind::Bar, ChartKind::Line, ChartKind::Pie] {
+            let plain = sample_chart(kind.clone());
+            let mut styled = plain.clone();
+            styled.series[0].color = Some(ColorSpec::srgb([0, 255, 0]));
+            styled.series[0].point_colors = vec![(0, ColorSpec::srgb([0, 255, 0]))];
+            styled.series[0].labels = Some(DataLabels {
+                show_val: true,
+                ..DataLabels::default()
+            });
+            let deck = |c| {
+                let mut d = one_slide(vec![chart_shape(Some(c), CHART_URI)]);
+                d.slides[0].accents[0] = [255, 0, 0];
+                d
+            };
+            let (a, b) = (render(&deck(plain)), render(&deck(styled.clone())));
+            let (ha, hb) = (
+                String::from_utf8_lossy(&a.pdf),
+                String::from_utf8_lossy(&b.pdf),
+            );
+            assert!(!ha.contains("0 1 0 rg"), "{kind:?}: 无显式色时不出现绿");
+            assert!(hb.contains("0 1 0 rg"), "{kind:?}: 显式系列色");
+            assert!(
+                hb.matches("BT").count() > ha.matches("BT").count(),
+                "{kind:?}: 数据标签多出文字"
+            );
+            assert_eq!(chart_degraded(&b), 0);
+            assert_eq!(b.pdf, render(&deck(styled)).pdf, "{kind:?}: 确定性");
+        }
     }
 
     /// 同输入两次渲染字节一致(无随机 / 时间 / 哈希序依赖)。
