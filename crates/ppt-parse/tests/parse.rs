@@ -382,6 +382,49 @@ fn alternate_content_first_non_empty_choice_wins() {
     assert_eq!(first_text(&shapes[0]), "SECOND");
 }
 
+const FALLBACK_SP: &str = r#"<mc:Fallback><p:sp><p:txBody><a:p><a:r><a:t>FALLBACK</a:t></a:r></a:p></p:txBody></p:sp></mc:Fallback>"#;
+const EMPTY_GRP: &str = r#"<p:grpSp><p:nvGrpSpPr><p:cNvPr id="2" name="g"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p14:contentPart r:id="rId5"/></p:grpSp>"#;
+
+/// 组合墨迹的形态:Choice 里是子元素全不认识的空 `p:grpSp`(只剩一个空组合),
+/// 它不算实质内容,必须让位给带文字的 Fallback。
+#[test]
+fn alternate_content_empty_group_choice_yields_to_fallback() {
+    let shapes = shapes_of(&format!(
+        r#"<mc:AlternateContent><mc:Choice Requires="p14">{EMPTY_GRP}</mc:Choice>{FALLBACK_SP}</mc:AlternateContent>"#
+    ));
+    assert_eq!(shapes.len(), 1);
+    assert_eq!(first_text(&shapes[0]), "FALLBACK");
+}
+
+/// 嵌套两层的空组合同样按空处理。
+#[test]
+fn alternate_content_nested_empty_groups_yield_to_fallback() {
+    let inner = r#"<p:grpSp><p:nvGrpSpPr><p:cNvPr id="3" name="g2"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p14:contentPart r:id="rId5"/></p:grpSp>"#;
+    let outer = format!(
+        r#"<p:grpSp><p:nvGrpSpPr><p:cNvPr id="2" name="g"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>{inner}</p:grpSp>"#
+    );
+    let shapes = shapes_of(&format!(
+        r#"<mc:AlternateContent><mc:Choice Requires="p14">{outer}</mc:Choice>{FALLBACK_SP}</mc:AlternateContent>"#
+    ));
+    assert_eq!(shapes.len(), 1);
+    assert_eq!(first_text(&shapes[0]), "FALLBACK");
+}
+
+/// 组合里有一个真实形状 → 仍选 Choice,Fallback 不取。
+#[test]
+fn alternate_content_group_with_a_real_shape_still_picks_choice() {
+    let grp = r#"<p:grpSp><p:nvGrpSpPr><p:cNvPr id="2" name="g"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>
+        <p:sp><p:txBody><a:p><a:r><a:t>CHOICE</a:t></a:r></a:p></p:txBody></p:sp></p:grpSp>"#;
+    let shapes = shapes_of(&format!(
+        r#"<mc:AlternateContent><mc:Choice Requires="p14">{grp}</mc:Choice>{FALLBACK_SP}</mc:AlternateContent>"#
+    ));
+    assert_eq!(shapes.len(), 1);
+    let Shape::Group(g) = &shapes[0] else {
+        panic!("expected group, got {:?}", shapes[0]);
+    };
+    assert_eq!(first_text(&g.children[0]), "CHOICE");
+}
+
 /// 形状树层面 5000 层嵌套 AlternateContent 不栈溢出、不 panic。
 #[test]
 fn deeply_nested_shape_alternate_content_does_not_overflow() {

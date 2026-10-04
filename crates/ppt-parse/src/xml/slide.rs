@@ -479,6 +479,16 @@ fn parse_grp_sppr<R: std::io::BufRead>(
     (xfrm, fill)
 }
 
+/// 形状是否有实质内容:裸 OLE 占位框(没有预览图可画的 OLE graphicFrame)与没有任何实质后代的
+/// 组合(含嵌套)都算空壳;其余形状都算实质。组合嵌套深度由解析层限制在 64 层内,递归有界。
+fn has_substance(s: &Shape) -> bool {
+    match s {
+        Shape::Group(g) => g.children.iter().any(has_substance),
+        Shape::Placeholder(p) => !p.kind.as_deref().is_some_and(|k| k.ends_with("/ole")),
+        _ => true,
+    }
+}
+
 /// 解析 `mc:AlternateContent`(Markup Compatibility,ECMA-376 Part 3),与 docspine 同策略:
 /// 按文档顺序把每个 `mc:Choice` 交给形状解析试一遍,第一个**产出非空形状**的被选中;
 /// Choice 里常是本仓不认识的新版元素(`p14:` / `a14:` …),解析为空是预期的,此时回落
@@ -488,15 +498,14 @@ fn parse_grp_sppr<R: std::io::BufRead>(
 /// OLE 例外:PowerPoint 常把整个 graphicFrame 包进来,Choice 里的 `p:oleObj` 只有 `p:embed`
 /// (解析为无预览图的 OLE 占位框,非空但无实质内容),带 `p:pic` 预览图的在 Fallback。
 /// 只含这种"裸 OLE 占位框"的分支算**弱**内容:有实质内容的分支优先,两边都只有弱内容时
-/// 仍取第一个非空分支(保住占位框)。已消费起始标签。
+/// 仍取第一个非空分支(保住占位框)。组合递归判定:没有任何实质后代的组合(如 Choice 里
+/// 子元素全不认识的组合墨迹 `p:grpSp`)同样算弱内容,见 [`has_substance`]。已消费起始标签。
 fn parse_alternate_content<R: std::io::BufRead>(
     reader: &mut Reader<R>,
     ctx: &Ctx,
     out: &mut Vec<Shape>,
 ) {
-    // 裸 OLE 占位框:没有预览图可画的 OLE graphicFrame。
-    let is_bare_ole = |s: &Shape| matches!(s, Shape::Placeholder(p) if p.kind.as_deref().is_some_and(|k| k.ends_with("/ole")));
-    let strong = |v: &Vec<Shape>| v.iter().any(|s| !is_bare_ole(s));
+    let strong = |v: &Vec<Shape>| v.iter().any(has_substance);
     let mut chosen: Option<Vec<Shape>> = None;
     let mut fallback: Option<Vec<Shape>> = None;
     let mut buf = Vec::new();
