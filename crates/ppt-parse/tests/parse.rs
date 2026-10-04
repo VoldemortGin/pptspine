@@ -1170,3 +1170,210 @@ fn tbl_pr_flags_and_tcpr_no_fill_parsed() {
     assert_eq!(b.table_style_id.as_deref(), Some("{X}"));
     assert!(!b.rows[0].cells[0].no_fill);
 }
+
+// ---------------------------------------------------------------- 任务 C:展开写法 vs 自闭合
+
+/// 把所有自闭合标签 `<x a="1"/>` 改写成展开写法 `<x a="1"></x>`(语义等价的合法 XML)。
+fn expand_empty_tags(xml: &str) -> String {
+    let mut out = String::with_capacity(xml.len() * 2);
+    let mut rest = xml;
+    while let Some(lt) = rest.find('<') {
+        out.push_str(&rest[..lt]);
+        let tail = &rest[lt..];
+        let Some(gt) = tail.find('>') else {
+            out.push_str(tail);
+            return out;
+        };
+        let tag = &tail[..=gt];
+        let is_decl = tag.starts_with("<?") || tag.starts_with("<!");
+        if tag.ends_with("/>") && !is_decl {
+            let name_end = tag[1..]
+                .find(|c: char| c.is_whitespace() || c == '/' || c == '>')
+                .map_or(tag.len(), |i| i + 1);
+            let name = &tag[1..name_end];
+            out.push_str(&tag[..tag.len() - 2]);
+            out.push_str(&format!("></{name}>"));
+        } else {
+            out.push_str(tag);
+        }
+        rest = &tail[gt + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// 同一份 spTree 内容,自闭合与展开写法解析出的 slide(形状 / 背景 / 颜色映射等)必须完全相同。
+fn assert_same_when_expanded(label: &str, sp_tree_inner: &str) {
+    if let Err(msg) = same_when_expanded(label, sp_tree_inner) {
+        panic!("{msg}");
+    }
+}
+
+fn same_when_expanded(label: &str, sp_tree_inner: &str) -> Result<(), String> {
+    let parse = |inner: &str| {
+        let parsed = parse_bytes(&pptx_with_sp_tree(inner)).expect("parse");
+        format!("{:?}", parsed.presentation.slides[0])
+    };
+    let compact = parse(sp_tree_inner);
+    let expanded_xml = expand_empty_tags(sp_tree_inner);
+    assert_ne!(sp_tree_inner, expanded_xml, "{label}: 片段里应含自闭合标签");
+    let expanded = parse(&expanded_xml);
+    if compact == expanded {
+        Ok(())
+    } else {
+        Err(format!(
+            "{label}: 展开写法与自闭合解析结果不一致\n compact={compact}\n expanded={expanded}"
+        ))
+    }
+}
+
+/// 展开写法的 `a:off` / `a:ext` 不能让 `parse_xfrm` 提前返回、导致 xfrm 之后的填充与线条丢失。
+#[test]
+fn expanded_xfrm_children_do_not_desync_sppr() {
+    let sp = r#"<p:sp><p:spPr>
+          <a:xfrm rot="5400000" flipH="1"><a:off x="100" y="200"/><a:ext cx="300" cy="400"/></a:xfrm>
+          <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+          <a:solidFill><a:srgbClr val="FF0000"/></a:solidFill>
+          <a:ln w="12700"><a:solidFill><a:srgbClr val="00FF00"/></a:solidFill></a:ln>
+        </p:spPr></p:sp>"#;
+    let expanded = expand_empty_tags(sp);
+    assert!(expanded.contains("<a:off x=\"100\" y=\"200\"></a:off>"));
+    let shapes = shapes_of(&expanded);
+    let Shape::Auto(a) = &shapes[0] else {
+        panic!("expected autoshape, got {:?}", shapes[0]);
+    };
+    let r = a.rect.expect("rect");
+    assert_eq!((r.x, r.y, r.w, r.h), (100, 200, 300, 400));
+    assert!(a.fill.is_some(), "xfrm 之后的填充不能丢");
+    assert!(a.stroke.is_some(), "xfrm 之后的线条不能丢");
+    assert_same_when_expanded("sp", sp);
+}
+
+/// 扫描:各叶子元素读取处(自闭合 vs 展开)逐个对照。
+#[test]
+fn expanded_leaf_elements_parse_like_self_closed() {
+    let cases: &[(&str, &str)] = &[
+        (
+            "sp:spPr(xfrm/prstGeom/avLst/gd/solidFill/ln/prstDash/headEnd/tailEnd)",
+            r#"<p:sp><p:spPr>
+              <a:xfrm rot="60000" flipV="1"><a:off x="1" y="2"/><a:ext cx="30" cy="40"/></a:xfrm>
+              <a:prstGeom prst="roundRect"><a:avLst><a:gd name="adj" fmla="val 16667"/></a:avLst></a:prstGeom>
+              <a:solidFill><a:schemeClr val="accent1"><a:lumMod val="75000"/><a:alpha val="50000"/></a:schemeClr></a:solidFill>
+              <a:ln w="19050"><a:solidFill><a:srgbClr val="112233"/></a:solidFill><a:prstDash val="dash"/>
+                <a:headEnd type="triangle" w="lg" len="sm"/><a:tailEnd type="oval"/></a:ln>
+            </p:spPr></p:sp>"#,
+        ),
+        (
+            "sp:gradFill",
+            r#"<p:sp><p:spPr><a:xfrm><a:off x="1" y="2"/><a:ext cx="3" cy="4"/></a:xfrm>
+              <a:gradFill><a:gsLst><a:gs pos="0"><a:srgbClr val="FF0000"/></a:gs>
+              <a:gs pos="100000"><a:schemeClr val="bg1"><a:tint val="50000"/></a:schemeClr></a:gs></a:gsLst><a:lin ang="5400000"/></a:gradFill>
+              <a:ln><a:noFill/></a:ln></p:spPr></p:sp>"#,
+        ),
+        (
+            "sp:nv+style+txBody",
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="2" name="T" descr="d"><a:hlinkClick r:id="rId9"/></p:cNvPr><p:cNvSpPr/><p:nvPr><p:ph type="title" idx="1"/></p:nvPr></p:nvSpPr>
+              <p:spPr><a:xfrm><a:off x="1" y="2"/><a:ext cx="3" cy="4"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+              <p:style><a:lnRef idx="2"><a:schemeClr val="accent1"><a:shade val="50000"/></a:schemeClr></a:lnRef>
+                <a:fillRef idx="1"><a:schemeClr val="accent1"/></a:fillRef><a:effectRef idx="0"><a:schemeClr val="accent1"/></a:effectRef>
+                <a:fontRef idx="minor"><a:schemeClr val="lt1"/></a:fontRef></p:style>
+              <p:txBody><a:bodyPr wrap="square" lIns="1" anchor="ctr"><a:normAutofit fontScale="90000" lnSpcReduction="10000"/></a:bodyPr>
+                <a:lstStyle><a:lvl1pPr marL="10" algn="l"><a:lnSpc><a:spcPct val="90000"/></a:lnSpc><a:buNone/>
+                  <a:defRPr sz="1800" b="1"><a:solidFill><a:srgbClr val="222222"/></a:solidFill><a:latin typeface="Arial"/></a:defRPr></a:lvl1pPr></a:lstStyle>
+                <a:p><a:pPr lvl="1" algn="ctr"><a:spcBef><a:spcPts val="600"/></a:spcBef><a:buFont typeface="Wingdings"/><a:buChar char="x"/></a:pPr>
+                  <a:r><a:rPr lang="en-US" sz="2000" i="1"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill><a:latin typeface="Calibri"/><a:ea typeface="SimSun"/>
+                    <a:hlinkClick r:id="rId9"/></a:rPr><a:t>hi</a:t></a:r><a:br><a:rPr lang="en-US"/></a:br><a:endParaRPr lang="en-US"/></a:p></p:txBody></p:sp>"#,
+        ),
+        (
+            "bare empties(prstGeom/noFill/ln/bodyPr/lstStyle/pPr/rPr/br/fld/endParaRPr/a:p)",
+            r#"<p:sp><p:nvSpPr><p:cNvPr id="2" name="B"/><p:cNvSpPr/><p:nvPr><p:ph type="body"/></p:nvPr></p:nvSpPr>
+              <p:spPr><a:xfrm><a:off x="1" y="2"/><a:ext cx="3" cy="4"/></a:xfrm><a:prstGeom prst="rect"/><a:noFill/><a:ln w="12700"/></p:spPr>
+              <p:txBody><a:bodyPr wrap="none" anchor="b"/><a:lstStyle/><a:p><a:pPr algn="ctr"/><a:r><a:rPr b="1" sz="900"/><a:t>x</a:t></a:r><a:br/>
+              <a:fld type="slidenum"/><a:endParaRPr lang="en-US"/></a:p><a:p/></p:txBody></p:sp>
+              <p:cxnSp><p:spPr><a:xfrm><a:off x="1" y="2"/><a:ext cx="3" cy="4"/></a:xfrm><a:prstGeom prst="line"/><a:ln w="9525"/></p:spPr></p:cxnSp>
+              <p:pic><p:blipFill><a:blip r:embed="rId2"/><a:stretch/></p:blipFill><p:spPr><a:xfrm><a:off x="1" y="2"/><a:ext cx="3" cy="4"/></a:xfrm></p:spPr></p:pic>"#,
+        ),
+        (
+            "grpSp(xfrm/chOff/chExt)",
+            r#"<p:grpSp><p:nvGrpSpPr><p:cNvPr id="3" name="G"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr>
+              <p:grpSpPr><a:xfrm rot="100" flipH="1"><a:off x="10" y="20"/><a:ext cx="300" cy="400"/><a:chOff x="1" y="2"/><a:chExt cx="30" cy="40"/></a:xfrm>
+              <a:solidFill><a:srgbClr val="ABCDEF"/></a:solidFill></p:grpSpPr>
+              <p:sp><p:spPr><a:xfrm><a:off x="1" y="2"/><a:ext cx="3" cy="4"/></a:xfrm><a:prstGeom prst="ellipse"><a:avLst/></a:prstGeom>
+              <a:solidFill><a:srgbClr val="010203"/></a:solidFill></p:spPr></p:sp></p:grpSp>"#,
+        ),
+        (
+            "cxnSp",
+            r#"<p:cxnSp><p:nvCxnSpPr><p:cNvPr id="4" name="C"/><p:cNvCxnSpPr/><p:nvPr/></p:nvCxnSpPr>
+              <p:spPr><a:xfrm flipV="1"><a:off x="100" y="200"/><a:ext cx="300" cy="400"/></a:xfrm>
+              <a:prstGeom prst="line"><a:avLst/></a:prstGeom>
+              <a:ln w="9525"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill><a:tailEnd type="arrow"/></a:ln></p:spPr>
+              <p:style><a:lnRef idx="1"><a:schemeClr val="accent1"/></a:lnRef></p:style></p:cxnSp>"#,
+        ),
+        (
+            "pic(blip/srcRect/stretch)",
+            r#"<p:pic><p:nvPicPr><p:cNvPr id="5" name="P" descr="alt"><a:hlinkClick r:id="rId9"/></p:cNvPr><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+              <p:blipFill><a:blip r:embed="rId2"/><a:srcRect l="1000" t="2000" r="3000" b="4000"/><a:stretch><a:fillRect/></a:stretch></p:blipFill>
+              <p:spPr><a:xfrm><a:off x="1" y="2"/><a:ext cx="3" cy="4"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>"#,
+        ),
+        (
+            "table(tblPr/gridCol/tcPr edges)",
+            r#"<p:graphicFrame><p:xfrm><a:off x="0" y="0"/><a:ext cx="100" cy="100"/></p:xfrm>
+              <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/table">
+              <a:tbl><a:tblPr firstRow="1" bandRow="1"><a:tableStyleId>{S}</a:tableStyleId></a:tblPr>
+              <a:tblGrid><a:gridCol w="50"><a:extLst><a:ext uri="x"><a:colId val="1"/></a:ext></a:extLst></a:gridCol><a:gridCol w="50"/></a:tblGrid>
+              <a:tr h="100"><a:tc gridSpan="2"><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr sz="1000"/><a:t>A</a:t></a:r></a:p></a:txBody>
+                <a:tcPr marL="1" anchor="ctr"><a:lnL w="12700"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:lnL><a:lnR><a:noFill/></a:lnR>
+                <a:lnT w="6350"><a:solidFill><a:schemeClr val="tx1"/></a:solidFill><a:prstDash val="sysDash"/></a:lnT><a:lnB w="1"><a:noFill/></a:lnB>
+                <a:solidFill><a:srgbClr val="00FF00"/></a:solidFill></a:tcPr></a:tc><a:tc hMerge="1"><a:txBody><a:p/></a:txBody><a:tcPr/></a:tc></a:tr>
+              </a:tbl></a:graphicData></a:graphic></p:graphicFrame>"#,
+        ),
+        (
+            "graphicFrame(chart/other)",
+            r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="6" name="Chart"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr>
+              <p:xfrm><a:off x="5" y="6"/><a:ext cx="70" cy="80"/></p:xfrm>
+              <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart">
+              <c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" r:id="rId7"/></a:graphicData></a:graphic></p:graphicFrame>"#,
+        ),
+        (
+            "mc:AlternateContent + math",
+            r#"<mc:AlternateContent><mc:Choice Requires="a14"><p:sp><p:spPr><a:xfrm><a:off x="1" y="2"/><a:ext cx="3" cy="4"/></a:xfrm>
+              <a:solidFill><a:srgbClr val="123456"/></a:solidFill></p:spPr><p:txBody><a:bodyPr/><a:p><a:pPr algn="l"/><a14:m><m:oMathPara><m:oMath>
+              <m:f><m:fPr><m:ctrlPr/></m:fPr><m:num><m:r><m:t>1</m:t></m:r></m:num><m:den><m:r><m:t>2</m:t></m:r></m:den></m:f>
+              </m:oMath></m:oMathPara></a14:m></a:p></p:txBody></p:sp></mc:Choice><mc:Fallback><p:sp/></mc:Fallback></mc:AlternateContent>"#,
+        ),
+    ];
+    let bad: Vec<String> = cases
+        .iter()
+        .filter_map(|(label, xml)| same_when_expanded(label, xml).err())
+        .collect();
+    assert!(bad.is_empty(), "{bad:#?}");
+}
+
+/// 背景与颜色映射(`p:bg` / `p:clrMapOvr`)的叶子元素同样不受写法影响。
+#[test]
+fn expanded_background_and_clr_map_parse_like_self_closed() {
+    let slide = |inner: &str| {
+        format!(
+            r#"<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+              xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+              xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" show="0">{inner}</p:sld>"#
+        )
+    };
+    for body in [
+        r#"<p:cSld><p:bg><p:bgPr><a:solidFill><a:srgbClr val="ABCDEF"/></a:solidFill><a:effectLst/></p:bgPr></p:bg><p:spTree/></p:cSld>
+           <p:clrMapOvr><a:overrideClrMapping bg1="dk1" tx1="lt1" bg2="dk2" tx2="lt2" accent1="accent1" accent2="accent2" accent3="accent3" accent4="accent4" accent5="accent5" accent6="accent6" hlink="hlink" folHlink="folHlink"/></p:clrMapOvr>"#,
+        r#"<p:cSld><p:bg><p:bgRef idx="1001"><a:schemeClr val="bg1"><a:lumMod val="50000"/></a:schemeClr></p:bgRef></p:bg><p:spTree/></p:cSld>"#,
+        r#"<p:cSld><p:bg><p:bgPr><a:gradFill><a:gsLst><a:gs pos="0"><a:srgbClr val="FF0000"/></a:gs></a:gsLst><a:lin ang="0"/></a:gradFill></p:bgPr></p:bg><p:spTree/></p:cSld>"#,
+    ] {
+        let parse = |inner: &str| {
+            let pptx = build_pptx_with_slide(&slide(inner));
+            format!(
+                "{:?}",
+                parse_bytes(&pptx).expect("parse").presentation.slides[0]
+            )
+        };
+        let expanded = expand_empty_tags(body);
+        assert_ne!(body, expanded);
+        assert_eq!(parse(body), parse(&expanded), "{body}");
+    }
+}

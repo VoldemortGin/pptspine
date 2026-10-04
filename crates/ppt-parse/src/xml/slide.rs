@@ -855,20 +855,30 @@ fn parse_xfrm<R: std::io::BufRead>(reader: &mut Reader<R>, start: &BytesStart) -
     let mut ext: Option<(Emu, Emu)> = None;
     let mut ch_off: Option<(Emu, Emu)> = None;
     let mut ch_ext: Option<(Emu, Emu)> = None;
+    // 深度计数:`a:off` 等叶子既可自闭合也可写成展开形式(`<a:off ..></a:off>`),展开形式的
+    // 结束标签不能被当成 `a:xfrm` 自己的结束,否则会提前返回、让父级 spPr 的解析位置失步。
+    let mut take = |e: &BytesStart| match local_name(e.name().as_ref()) {
+        b"off" => off = xy_of(e, b"x", b"y"),
+        b"ext" => ext = xy_of(e, b"cx", b"cy"),
+        b"chOff" => ch_off = xy_of(e, b"x", b"y"),
+        b"chExt" => ch_ext = xy_of(e, b"cx", b"cy"),
+        _ => {}
+    };
+    let mut depth = 1usize;
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Empty(e)) | Ok(Event::Start(e)) => {
-                let name = local_name(e.name().as_ref()).to_vec();
-                match name.as_slice() {
-                    b"off" => off = xy_of(&e, b"x", b"y"),
-                    b"ext" => ext = xy_of(&e, b"cx", b"cy"),
-                    b"chOff" => ch_off = xy_of(&e, b"x", b"y"),
-                    b"chExt" => ch_ext = xy_of(&e, b"cx", b"cy"),
-                    _ => {}
+            Ok(Event::Start(e)) => {
+                depth += 1;
+                take(&e);
+            }
+            Ok(Event::Empty(e)) => take(&e),
+            Ok(Event::End(_)) => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
                 }
             }
-            Ok(Event::End(_)) => break,
             Ok(Event::Eof) => break,
             Err(_) => break,
             _ => {}
@@ -1130,12 +1140,13 @@ fn parse_txbody<R: std::io::BufRead>(reader: &mut Reader<R>) -> TxBodyData {
                     _ => skip_element(reader, &name),
                 }
             }
-            Ok(Event::Empty(e)) => {
+            Ok(Event::Empty(e)) => match local_name(e.name().as_ref()) {
                 // `<a:bodyPr .../>` 常见自闭合(占位符缺省形)。
-                if local_name(e.name().as_ref()) == b"bodyPr" {
-                    body.body = body_pr_attrs(&e);
-                }
-            }
+                b"bodyPr" => body.body = body_pr_attrs(&e),
+                // 自闭合空段落 `<a:p/>` 与 `<a:p></a:p>` 等价:保留一个空段落(占一行高度)。
+                b"p" => body.paragraphs.push(Paragraph::default()),
+                _ => {}
+            },
             Ok(Event::End(_)) => break,
             Ok(Event::Eof) => break,
             Err(_) => break,
