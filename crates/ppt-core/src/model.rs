@@ -104,6 +104,27 @@ pub struct Slide {
     pub hidden: bool,
     /// `p:sld@showMasterSp`(缺省 true):为 false 时不画 layout / master 的非占位符形状。
     pub show_master_sp: bool,
+    /// 批注(旧式 `p:cmLst` 与新式线程批注 `p188:cmLst`,文档顺序;审阅元数据,默认不进
+    /// 文本导出,PDF 也不画)。
+    pub comments: Vec<Comment>,
+}
+
+/// 一条幻灯片批注(或线程批注里的一条回复,此时 `replies` 为空)。属性缺失 → `None`。
+/// 作者 / 正文是隐私数据:绝不写进告警 / trace / 日志。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Comment {
+    /// 作者名(经 `authorId` 查 `commentAuthors.xml` / `authors.xml`);查不到为 `None`。
+    pub author: Option<String>,
+    /// 作者缩写。
+    pub initials: Option<String>,
+    /// 时间戳原文(旧式 `@dt` / 新式 `@created`)。
+    pub datetime: Option<String>,
+    /// 批注正文(旧式 `p:text`;新式 `p188:txBody` 各段以 `\n` 连接)。
+    pub text: Option<String>,
+    /// 旧式 `p:pos` 的原始 `(x, y)`(新式批注无此项,为 `None`)。
+    pub position: Option<(i64, i64)>,
+    /// 新式线程批注的回复(`p188:replyLst`),文档顺序。
+    pub replies: Vec<Comment>,
 }
 
 /// 幻灯片背景(`p:bg`,§3.o,B-10)。

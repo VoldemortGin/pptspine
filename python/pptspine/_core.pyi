@@ -44,6 +44,14 @@ class PptXmlError(PptError): ...
 class PptUnsupportedError(PptError): ...
 class PptOcrError(PptError): ...
 
+class CommentDict(TypedDict):
+    author: str | None
+    initials: str | None
+    datetime: str | None
+    text: str | None
+    position: tuple[int, int] | None
+    replies: list[CommentDict]
+
 class Slide:
     """一张幻灯片句柄。"""
 
@@ -60,6 +68,7 @@ class Slide:
     @property
     def hidden(self) -> bool: ...
     def shapes(self) -> list[dict[str, Any]]: ...
+    def comments(self) -> list[CommentDict]: ...
 
 class Presentation:
     """一份已解析的演示文稿句柄。"""

@@ -59,6 +59,7 @@ crates/
     src/charts.rs  图表后处理:占位的 c:chart@r:id 经 slide rels 读 ppt/charts/chartN.xml 回填 chart
     src/diagrams.rs SmartArt 后处理:dgm:relIds@r:dm → data 部件 → drawing 部件(优先,包成 frame 变换的组合)/ 退回 data 文字
     src/xml/       quick-xml walker:presentation.rs(尺寸+顺序) slide.rs(spTree -> Shape)
+                   comments.rs(批注部件 + 作者部件:旧式 p:cmLst / 新式 p188:cmLst 含回复 -> Comment;审阅元数据,不进导出)
                    diagram.rs(SmartArt data 部件:内容点文字 + dataModelExt 的 drawing 关系 id)
                    doc_props.rs(docProps/core.xml + app.xml -> DocProperties)
                    chart.rs(c:chartSpace 缓存 -> Chart:种类/标题/类别/系列,稀疏 pt 补空,不读外部工作簿)
@@ -73,7 +74,7 @@ crates/
     src/shapes/line_ends.rs 线端装饰 headEnd/tailEnd(triangle/stealth/diamond/oval/arrow)
     src/transform.rs 组合仿射(chOff/chExt 重映射,B-5)
   py-bindings/ PyO3 _core 扩展。唯一用 unsafe(经 PyO3)的 crate。#![deny(unsafe_op_in_unsafe_fn)]
-    src/lib.rs     open -> Presentation handle;Slide.shapes() -> list[dict];ocr_image;异常层级
+    src/lib.rs     open -> Presentation handle;Slide.shapes() / Slide.comments() -> list[dict];ocr_image;异常层级
 ```
 
 ## 跑(始终从包根)

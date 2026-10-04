@@ -347,6 +347,7 @@ mod tests {
             background: None,
             hidden: false,
             show_master_sp: true,
+            comments: Vec::new(),
         }
     }
 

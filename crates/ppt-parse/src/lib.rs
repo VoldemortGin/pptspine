@@ -14,7 +14,9 @@ mod zip_pkg;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use ppt_core::model::{Background, DocProperties, Presentation, Section, Shape, Slide, TableStyle};
+use ppt_core::model::{
+    Background, Comment, DocProperties, Presentation, Section, Shape, Slide, TableStyle,
+};
 use ppt_core::style::{TextStyleLevels, TxStyles};
 use ppt_core::theme::{ClrMap, Theme};
 use ppt_core::{PptError, Result};
@@ -114,6 +116,8 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
     // 4) 按 presentation.xml 的 r:id 顺序确定 slide 部件;拿不到关系时回退到 slideN 数字序。
     let ordered_parts = resolve_slide_order(&meta.slide_rids, &pres_rels, &pkg, limits)?;
 
+    let comment_authors = collect_comment_authors(&pkg, &pres_rels);
+
     // 5) 逐张解析 slide(`slide_parts[i]` = `slides[i]` 的部件路径与 rels,供链接后处理)。
     let mut slides = Vec::with_capacity(ordered_parts.len());
     let mut slide_parts: Vec<(&str, BTreeMap<String, xml::Relationship>)> = Vec::new();
@@ -150,6 +154,7 @@ pub fn parse_bytes_with_limits(bytes: &[u8], limits: &ZipLimits) -> Result<Parse
             background: data.background,
             hidden: data.hidden,
             show_master_sp: data.show_master_sp.unwrap_or(true),
+            comments: collect_comments(&pkg, part, rels_xml.as_deref(), &comment_authors),
         });
     }
 
@@ -278,6 +283,44 @@ fn collect_inheritance(
         }
     }
     inherit
+}
+
+/// 批注作者表:经 presentation rels 的 `commentAuthors`(旧式)/ `authors`(新式线程批注)
+/// 关系定位(无关系时回退惯例路径);部件缺失 / 畸形 → 空表(批注作者为 `None`)。
+fn collect_comment_authors(
+    pkg: &Package,
+    pres_rels: &BTreeMap<String, xml::Relationship>,
+) -> BTreeMap<String, xml::comments::Author> {
+    let mut parts: Vec<String> = pres_rels
+        .values()
+        .filter(|r| r.rel_type.ends_with("/commentAuthors") || r.rel_type.ends_with("/authors"))
+        .map(|r| xml::normalize_target(&r.target))
+        .collect();
+    if parts.is_empty() {
+        parts = vec!["ppt/commentAuthors.xml".into(), "ppt/authors.xml".into()];
+    }
+    let mut map = BTreeMap::new();
+    for part in parts {
+        if let Some(x) = pkg.part_str(&part) {
+            map.extend(xml::comments::parse_authors(&x));
+        }
+    }
+    map
+}
+
+/// 一张 slide 的批注:其 rels 里所有 `comments` 关系(旧式 / 新式)指向的部件,按 rId 序拼接。
+fn collect_comments(
+    pkg: &Package,
+    slide_part: &str,
+    slide_rels_xml: Option<&str>,
+    authors: &BTreeMap<String, xml::comments::Author>,
+) -> Vec<Comment> {
+    let rels = slide_rels_xml.map(xml::parse_rels).unwrap_or_default();
+    rels.values()
+        .filter(|r| r.rel_type.ends_with("/comments"))
+        .filter_map(|r| pkg.part_str(&links::resolve_part_path(slide_part, &r.target)))
+        .flat_map(|x| xml::comments::parse_comments(&x, authors))
+        .collect()
 }
 
 /// 表格样式部件:经 presentation rels 的 `tableStyles` 关系定位(缺失回退到惯例路径

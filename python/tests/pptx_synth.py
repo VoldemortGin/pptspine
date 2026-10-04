@@ -38,10 +38,11 @@ def build_pptx(
     parts: dict[str, str | bytes] | None = None,
     pres_attrs: str = "",
     size: tuple[int, int] = (9144000, 6858000),
+    pres_rels: list[tuple[str, str, str]] | None = None,
 ) -> bytes:
-    """合成 ``.pptx`` 字节串;``parts`` 是额外部件(路径 → 文本 / 字节)。"""
+    """合成 ``.pptx`` 字节串;``parts`` 是额外部件(路径 → 文本 / 字节),``pres_rels`` 是追加的 presentation 关系。"""
     ids = "".join(f'<p:sldId id="{256 + i}" r:id="rId{i + 1}"/>' for i in range(len(slides)))
-    pres_rels = [(f"rId{i + 1}", f"{REL_BASE}/slide", f"slides/slide{i + 1}.xml") for i in range(len(slides))]
+    all_pres_rels = [(f"rId{i + 1}", f"{REL_BASE}/slide", f"slides/slide{i + 1}.xml") for i in range(len(slides))]
     files: dict[str, str | bytes] = {
         "[Content_Types].xml": '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>',
         "_rels/.rels": rels_xml([("rId1", f"{REL_BASE}/officeDocument", "ppt/presentation.xml")]),
@@ -49,7 +50,7 @@ def build_pptx(
             f"<p:presentation {NS}{pres_attrs}><p:sldIdLst>{ids}</p:sldIdLst>"
             f'<p:sldSz cx="{size[0]}" cy="{size[1]}"/></p:presentation>'
         ),
-        "ppt/_rels/presentation.xml.rels": rels_xml(pres_rels),
+        "ppt/_rels/presentation.xml.rels": rels_xml(all_pres_rels + (pres_rels or [])),
     }
     for i, s in enumerate(slides, start=1):
         files[f"ppt/slides/slide{i}.xml"] = (

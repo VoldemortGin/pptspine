@@ -22,9 +22,9 @@ use ppt_core::export::{
 };
 use ppt_core::geom::emu_to_points;
 use ppt_core::model::{
-    AutoShape, Cell, Chart, Color, Connector, Fill, GraphicPlaceholder, Hyperlink, Paragraph,
-    Picture, Presentation as CorePresentation, Row, RunKind, Shape, Slide as CoreSlide, Stroke,
-    Table, TextFrame, TextRun,
+    AutoShape, Cell, Chart, Color, Comment, Connector, Fill, GraphicPlaceholder, Hyperlink,
+    Paragraph, Picture, Presentation as CorePresentation, Row, RunKind, Shape, Slide as CoreSlide,
+    Stroke, Table, TextFrame, TextRun,
 };
 use ppt_core::resolved::ResolvedPresentation;
 use ppt_core::style::{Caps, PlaceholderRef};
@@ -418,6 +418,22 @@ fn chart_dict<'py>(py: Python<'py>, c: &Chart) -> PyResult<Bound<'py, PyDict>> {
     Ok(d)
 }
 
+/// 一条批注 / 回复 [`Comment`] -> dict。
+fn comment_dict<'py>(py: Python<'py>, c: &Comment) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("author", c.author.as_deref())?;
+    d.set_item("initials", c.initials.as_deref())?;
+    d.set_item("datetime", c.datetime.as_deref())?;
+    d.set_item("text", c.text.as_deref())?;
+    d.set_item("position", c.position)?;
+    let replies = PyList::empty(py);
+    for r in &c.replies {
+        replies.append(comment_dict(py, r)?)?;
+    }
+    d.set_item("replies", replies)?;
+    Ok(d)
+}
+
 /// 一个 [`Shape`] -> dict(组合递归到 `children`)。
 fn shape_dict<'py>(py: Python<'py>, shape: &Shape) -> PyResult<Bound<'py, PyDict>> {
     match shape {
@@ -759,6 +775,17 @@ impl PySlide {
         let list = PyList::empty(py);
         for sh in &self.core().shapes {
             list.append(shape_dict(py, sh)?)?;
+        }
+        Ok(list)
+    }
+
+    /// 批注(审阅元数据,不进 `text` / `to_text()` / `to_markdown()` / PDF),作为 `list[dict]`:
+    /// `author` / `initials` / `datetime` / `text` / `position`(旧式 `p:pos` 原始 `(x, y)`)/
+    /// `replies`(新式线程回复,同样的键,`replies` 恒为空)。属性缺失为 `None`。
+    fn comments<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        let list = PyList::empty(py);
+        for c in &self.core().comments {
+            list.append(comment_dict(py, c)?)?;
         }
         Ok(list)
     }

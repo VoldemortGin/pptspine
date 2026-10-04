@@ -2,6 +2,7 @@
 //! - [`presentation`]:解析 `presentation.xml`(画布尺寸 + 幻灯片顺序)。
 //! - [`slide`]:解析单张幻灯片 -> `Vec<Shape>`。
 //! - [`chart`]:解析图表部件 `c:chartSpace` -> `Chart`(只读缓存数据)。
+//! - [`comments`]:解析批注部件(旧式 `p:cmLst` / 新式 `p188:cmLst`)与作者部件。
 //! - [`diagram`]:解析 SmartArt data 部件 `dgm:dataModel` -> 内容点文字 + drawing 关系 id。
 //! - [`table_style`]:解析 `ppt/tableStyles.xml` -> `styleId -> TableStyle`。
 //!
@@ -9,6 +10,7 @@
 //! 未知元素跳过、缺失属性 → `None`、**绝不 panic**。
 
 pub mod chart;
+pub mod comments;
 pub mod diagram;
 pub mod doc_props;
 pub mod notes;
