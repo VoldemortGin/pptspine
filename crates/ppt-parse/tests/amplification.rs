@@ -216,6 +216,35 @@ fn comment_fan_out_is_bounded_by_dedup_cache_and_the_default_budget() {
         .all(|s| s.comments.len() <= 1_000));
 }
 
+/// 批注部件只**解析**一次(缓存):嵌套超限诊断是解析期产生的,被 120 张幻灯片共享的部件只该记一次。
+/// (没有缓存时输出的批注条数不变,只有这类"每次解析都会记一遍"的副作用能暴露它。)
+#[test]
+fn shared_comment_part_is_parsed_once_across_slides() {
+    let mut inner = "<m:r><m:t>X</m:t></m:r>".to_string();
+    for _ in 0..70 {
+        inner =
+            format!("<m:sSup><m:e>{inner}</m:e><m:sup><m:r><m:t>2</m:t></m:r></m:sup></m:sSup>");
+    }
+    let cm = format!(
+        r#"<p188:cmLst xmlns:p188="urn:p188" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><p188:cm><p188:txBody><a:bodyPr/><a:p><a14:m xmlns:a14="http://schemas.microsoft.com/office/drawing/2010/main"><m:oMathPara><m:oMath>{inner}</m:oMath></m:oMathPara></a14:m></a:p></p188:txBody></p188:cm></p188:cmLst>"#
+    );
+    let srels = vec![rel(
+        "rId0",
+        &format!("{REL}/comments"),
+        "../comments/comment1.xml",
+    )];
+    let slides: Vec<_> = (0..120).map(|_| (String::new(), srels.clone())).collect();
+    let p = parse_bytes(&build(&slides, &[("ppt/comments/comment1.xml", cm)])).unwrap();
+    assert_eq!(
+        diag_at(
+            &p,
+            DiagnosticKind::NestingTooDeep,
+            "ppt/comments/comment1.xml"
+        ),
+        1
+    );
+}
+
 /// 诊断:5 000 个 frame 各指向一个不同名的不存在部件 => 诊断条数与目标数无关,
 /// `part` 里不出现文件作者写的任意 Target 字符串,总计数不丢。
 #[test]

@@ -1803,6 +1803,7 @@ mod tests {
         let entries = legend_entries(&c);
         assert_eq!(entries.len(), MAX_LEGEND_ENTRIES);
         assert_eq!(entries[0].0, "c0", "超出部分从尾部省略");
+        assert!(entries.len() <= 100, "上限不能被悄悄调大:{}", entries.len());
         let many: Vec<ChartSeries> = (0..5_000)
             .map(|i| series(Some(&format!("s{i}")), &[]))
             .collect();
