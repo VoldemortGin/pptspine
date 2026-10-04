@@ -272,7 +272,7 @@ fn shape_ops(
     match shape {
         ResolvedShape::TextBox(tf) => text_ops(ts, ctx, tf.rect, tf, flat, ops),
         ResolvedShape::Auto(auto) => {
-            shapes::auto_shape_ops(ctx, auto, flat, ops);
+            shapes::auto_shape_ops(ts, ctx, auto, flat, ops);
             if let Some(tf) = &auto.text {
                 text_ops(ts, ctx, tf.rect.or(auto.rect), tf, flat, ops);
             }
@@ -641,6 +641,7 @@ mod tests {
             geometry: Some(geometry.into()),
             adjusts,
             fill: Some(ResolvedFill::Solid(ResolvedColor::opaque([255, 0, 0]))),
+            blip_fill: None,
             stroke: None,
             text: None,
             custom_geometry: false,
@@ -1352,6 +1353,7 @@ mod tests {
             geometry: Some("rect".into()),
             adjusts: vec![],
             fill: Some(ResolvedFill::Gradient(ResolvedColor::opaque([0, 0, 255]))),
+            blip_fill: None,
             stroke: None,
             text: None,
             custom_geometry: false,
@@ -1400,6 +1402,151 @@ mod tests {
         );
         assert!(!String::from_utf8_lossy(&plain.pdf).contains("W n"));
         assert!(plain.warnings.is_empty() && cropped.warnings.is_empty());
+    }
+
+    // ---- 形状图片 / 图案填充 ---------------------------------------------------
+
+    fn blip(src_rect: Option<ppt_core::model::RelRect>, tile: bool) -> ppt_core::model::BlipFill {
+        ppt_core::model::BlipFill {
+            rel_id: "rId1".into(),
+            media_name: Some("tiny.png".into()),
+            src_rect,
+            fill_rect: None,
+            tile,
+        }
+    }
+
+    fn blip_shape(geometry: &str, b: ppt_core::model::BlipFill) -> ResolvedShape {
+        ResolvedShape::Auto(ResolvedAutoShape {
+            rect: Some(Rect::new(914_400, 914_400, 1_828_800, 1_828_800)),
+            xfrm: Xfrm::default(),
+            geometry: Some(geometry.into()),
+            adjusts: vec![],
+            fill: None,
+            blip_fill: Some(b),
+            stroke: None,
+            text: None,
+            custom_geometry: false,
+        })
+    }
+
+    fn tiny_media() -> BTreeMap<String, Vec<u8>> {
+        [("tiny.png".to_string(), TINY_PNG.to_vec())].into()
+    }
+
+    fn render_media(p: &ResolvedPresentation) -> ExportResult {
+        render_pdf(p, &tiny_media(), &RenderOptions::default()).expect("render")
+    }
+
+    fn image_objects(out: &ExportResult) -> usize {
+        String::from_utf8_lossy(&out.pdf)
+            .matches("/Subtype /Image")
+            .count()
+    }
+
+    /// 矩形的图片填充:画出图片并按几何裁剪(`W n`),无降级告警。
+    #[test]
+    fn blip_fill_rect_draws_image_clipped_to_geometry() {
+        let out = render_media(&one_slide(vec![blip_shape("rect", blip(None, false))]));
+        let hay = String::from_utf8_lossy(&out.pdf);
+        assert_eq!(image_objects(&out), 1);
+        assert!(hay.contains("W n"), "image must be clipped to the shape");
+        assert!(hay.contains(" Do"), "image must be painted");
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    }
+
+    /// 椭圆的图片填充:裁剪路径是椭圆(含贝塞尔曲线),不是外接矩形;无告警。
+    #[test]
+    fn blip_fill_ellipse_clips_with_curves_not_the_bounding_box() {
+        let ell = render_media(&one_slide(vec![blip_shape("ellipse", blip(None, false))]));
+        let rect = render_media(&one_slide(vec![blip_shape("rect", blip(None, false))]));
+        let (e, r) = (
+            String::from_utf8_lossy(&ell.pdf).into_owned(),
+            String::from_utf8_lossy(&rect.pdf).into_owned(),
+        );
+        assert!(
+            e.contains("W n") && e.contains(" c\n"),
+            "ellipse clip needs curves"
+        );
+        assert!(!r.contains(" c\n"));
+        assert!(ell.warnings.is_empty(), "{:?}", ell.warnings);
+    }
+
+    /// 带 `srcRect`:整图放大 + 嵌套剪裁(裁剪外再套形状剪裁),宽度翻倍。
+    #[test]
+    fn blip_fill_src_rect_enlarges_the_placement() {
+        let sr = ppt_core::model::RelRect {
+            l: 0,
+            t: 0,
+            r: 50_000,
+            b: 0,
+        };
+        let out = render_media(&one_slide(vec![blip_shape("rect", blip(Some(sr), false))]));
+        let hay = String::from_utf8_lossy(&out.pdf);
+        assert!(hay.contains("288 0 0 144"), "width must double");
+        assert!(out.warnings.is_empty(), "{:?}", out.warnings);
+    }
+
+    /// 同一图片被形状填充与 `p:pic` 同时引用:只嵌入一次。
+    #[test]
+    fn blip_fill_and_picture_share_one_embedded_image() {
+        let pic = ResolvedShape::Picture(ppt_core::model::Picture {
+            rect: Some(Rect::new(0, 0, 914_400, 914_400)),
+            rel_id: "rId1".into(),
+            media_name: Some("tiny.png".into()),
+            image_bytes_len: TINY_PNG.len(),
+            ..Default::default()
+        });
+        let both = render_media(&one_slide(vec![
+            pic,
+            blip_shape("ellipse", blip(None, false)),
+        ]));
+        assert_eq!(image_objects(&both), 1);
+        let hay = String::from_utf8_lossy(&both.pdf);
+        assert_eq!(
+            hay.matches(" Do").count(),
+            2,
+            "painted twice, embedded once"
+        );
+    }
+
+    /// 平铺按拉伸画并告警;图片缺失 → `ImageDropped`,形状不崩。
+    #[test]
+    fn blip_fill_tile_and_missing_media_degrade_with_warnings() {
+        let tiled = render_media(&one_slide(vec![blip_shape("rect", blip(None, true))]));
+        assert_eq!(image_objects(&tiled), 1);
+        assert!(
+            has_custom_warning(&tiled, "blip-fill-tiled"),
+            "{:?}",
+            tiled.warnings
+        );
+        let missing = render(&one_slide(vec![blip_shape("rect", blip(None, false))]));
+        assert!(missing
+            .warnings
+            .iter()
+            .any(|w| matches!(w, ExportWarning::ImageDropped { .. })));
+    }
+
+    /// 图案填充按平均色纯色画 + `pattern-fill-degraded` 告警(不是无填充)。
+    #[test]
+    fn pattern_fill_paints_flat_color_with_warning() {
+        let out = render(&one_slide(vec![ResolvedShape::Auto(ResolvedAutoShape {
+            rect: Some(Rect::new(0, 0, 914_400, 914_400)),
+            xfrm: Xfrm::default(),
+            geometry: Some("rect".into()),
+            adjusts: vec![],
+            fill: Some(ResolvedFill::Pattern(ResolvedColor::opaque([0, 0, 255]))),
+            blip_fill: None,
+            stroke: None,
+            text: None,
+            custom_geometry: false,
+        })]));
+        assert!(String::from_utf8_lossy(&out.pdf).contains("0 0 1 rg"));
+        assert!(
+            has_custom_warning(&out, "pattern-fill-degraded"),
+            "{:?}",
+            out.warnings
+        );
     }
 
     // ---- B-5:组合仿射 ----------------------------------------------------------

@@ -197,6 +197,8 @@ pub struct GroupShape {
     pub child_rect: Option<Rect>,
     /// 组合自身的旋转/翻转。
     pub xfrm: Xfrm,
+    /// 组合自身的填充(`p:grpSpPr` 直接子元素;供子形状的 `a:grpFill` 继承)。
+    pub fill: Option<Fill>,
     /// 子形状,按文档顺序。
     pub children: Vec<Shape>,
 }
@@ -211,8 +213,30 @@ pub enum Fill {
     Solid(ColorSpec),
     /// 渐变(`a:gradFill`):stop 颜色按文档顺序(v1 渲染降级取首个作代表色)。
     Gradient(Vec<ColorSpec>),
-    /// 图片填充(形状级 `a:blipFill`;v1 渲染不涂,信息保留)。
-    Blip,
+    /// 图片填充(形状级 `a:blipFill`):图片按形状几何裁剪后画进外框。
+    Blip(BlipFill),
+    /// 图案填充(`a:pattFill`):前景 / 背景色;渲染降级为两色平均色的纯色。
+    Pattern {
+        fg: Option<ColorSpec>,
+        bg: Option<ColorSpec>,
+    },
+    /// 继承所在组合的填充(`a:grpFill`);解析终态时沿父组合向上取第一个非 `grpFill` 的填充。
+    Group,
+}
+
+/// 形状级图片填充(`spPr > a:blipFill`)。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct BlipFill {
+    /// `a:blip@r:embed` 的关系 id。
+    pub rel_id: String,
+    /// 经 `.rels` 解析得到的 `ppt/media/*` 文件名(media map 的键)。
+    pub media_name: Option<String>,
+    /// 源裁剪(`a:srcRect`)。
+    pub src_rect: Option<RelRect>,
+    /// 拉伸目标(`a:stretch > a:fillRect`)。
+    pub fill_rect: Option<RelRect>,
+    /// 平铺(`a:tile`;渲染 v1 按拉伸画并告警)。
+    pub tile: bool,
 }
 
 /// 相对矩形(`a:srcRect` / `a:fillRect`,§3.n):四边偏移,单位千分之一百分点

@@ -1015,7 +1015,7 @@ fn fill_variants_parsed() {
     let Shape::Auto(blip) = &shapes[2] else {
         panic!("expected an autoshape (blipFill)");
     };
-    assert_eq!(blip.fill, Some(Fill::Blip));
+    assert!(matches!(blip.fill, Some(Fill::Blip(_))), "{:?}", blip.fill);
 }
 
 // ---- 线端装饰(`a:ln > a:headEnd / a:tailEnd`)+ `a:custGeom` 分类 -----------------

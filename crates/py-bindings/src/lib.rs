@@ -85,12 +85,14 @@ fn spec_hex(spec: &ColorSpec) -> Option<String> {
 }
 
 /// 把形状级 [`Fill`] 转成 `"RRGGBB"`(与历史 dict 输出保持兼容):纯色取基色,
-/// 渐变取首个 stop 作代表色;`noFill` / 图片填充 → `None`。
+/// 渐变取首个 stop、图案取前景色(缺失取背景色)作代表色;`noFill` / 图片填充 /
+/// `grpFill`(继承在终态 IR 才解)→ `None`。
 fn fill_hex(fill: &Fill) -> Option<String> {
     match fill {
         Fill::Solid(spec) => spec_hex(spec),
         Fill::Gradient(stops) => stops.first().and_then(spec_hex),
-        Fill::None | Fill::Blip => None,
+        Fill::Pattern { fg, bg } => fg.as_ref().or(bg.as_ref()).and_then(spec_hex),
+        Fill::None | Fill::Blip(_) | Fill::Group => None,
     }
 }
 

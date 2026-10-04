@@ -6,7 +6,7 @@
 use crate::color::ResolvedColor;
 use crate::geom::{Emu, Rect};
 use crate::model::LineEnd;
-use crate::model::{GraphicPlaceholder, Picture, RunKind, Xfrm};
+use crate::model::{BlipFill, GraphicPlaceholder, Picture, RunKind, Xfrm};
 use crate::style::{Caps, Spacing};
 
 /// 继承链全无字号时的兜底字号(PowerPoint 默认 18 磅)。
@@ -96,6 +96,8 @@ pub enum ResolvedFill {
     Solid(ResolvedColor),
     /// 渐变降级出的代表色(首个 stop;渲染侧记 `GradientDegraded`,PRD §1)。
     Gradient(ResolvedColor),
+    /// 图案填充降级出的纯色(前景 / 背景两色平均;渲染侧记 `pattern-fill-degraded`)。
+    Pattern(ResolvedColor),
 }
 
 impl ResolvedFill {
@@ -103,7 +105,7 @@ impl ResolvedFill {
     #[must_use]
     pub fn color(self) -> ResolvedColor {
         match self {
-            ResolvedFill::Solid(c) | ResolvedFill::Gradient(c) => c,
+            ResolvedFill::Solid(c) | ResolvedFill::Gradient(c) | ResolvedFill::Pattern(c) => c,
         }
     }
 }
@@ -199,6 +201,8 @@ pub struct ResolvedAutoShape {
     /// 预设几何调整值(`a:avLst`,原样透传给 TS-6)。
     pub adjusts: Vec<(String, i64)>,
     pub fill: Option<ResolvedFill>,
+    /// 图片填充(`a:blipFill`;`fill` 此时为 `None`,渲染按形状几何裁剪后画进外框)。
+    pub blip_fill: Option<BlipFill>,
     pub stroke: Option<ResolvedStroke>,
     pub text: Option<ResolvedTextFrame>,
     /// 几何来自 `a:custGeom`(渲染按包围盒矩形降级 + 告警)。

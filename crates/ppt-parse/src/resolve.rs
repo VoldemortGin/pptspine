@@ -118,7 +118,7 @@ fn resolve_slide(slide: &Slide, inherit: &InheritanceParts, first_slide_num: i32
         shapes: slide
             .shapes
             .iter()
-            .map(|sh| resolve_shape(sh, &ctx))
+            .map(|sh| resolve_shape(sh, &ctx, None))
             .collect(),
     }
 }
@@ -142,7 +142,7 @@ fn resolve_inherited(slide: &Slide, layout: Option<&LayoutPart>, ctx: &Ctx) -> V
         .iter()
         .chain(ctx.layout_shapes)
         .filter(|sh| ph_of(sh).is_none())
-        .map(|sh| resolve_shape(sh, ctx))
+        .map(|sh| resolve_shape(sh, ctx, None))
         .collect()
 }
 
@@ -212,11 +212,12 @@ fn to_resolved_body(b: &BodyProps) -> ResolvedBodyProps {
     }
 }
 
-fn resolve_shape(shape: &Shape, ctx: &Ctx) -> ResolvedShape {
+/// `inherited` = 所在组合经 `a:grpFill` 链解出的填充(顶层为 `None`),只供 `Fill::Group` 取用。
+fn resolve_shape(shape: &Shape, ctx: &Ctx, inherited: Option<&Fill>) -> ResolvedShape {
     match shape {
         Shape::TextBox(tf) => ResolvedShape::TextBox(resolve_text_box(tf, ctx)),
-        Shape::Auto(a) => ResolvedShape::Auto(resolve_auto(a, ctx)),
-        Shape::Connector(c) => ResolvedShape::Connector(resolve_connector(c, ctx)),
+        Shape::Auto(a) => ResolvedShape::Auto(resolve_auto(a, ctx, inherited)),
+        Shape::Connector(c) => ResolvedShape::Connector(resolve_connector(c, ctx, inherited)),
         Shape::Table(t) => ResolvedShape::Table(resolve_table(t, ctx)),
         Shape::Picture(p) => {
             // 占位符几何物化;其余原样(裁剪 / 拉伸属 B-4)。
@@ -231,11 +232,20 @@ fn resolve_shape(shape: &Shape, ctx: &Ctx) -> ResolvedShape {
         }
         Shape::Group(g) => {
             // 变换与子坐标空间原样透传;仿射累积交渲染侧(B-5)。
+            // 组合自身的填充是 `grpFill` / 未设置时,子形状继续沿用更外层的填充。
+            let own = match g.fill.as_ref() {
+                Some(Fill::Group) | None => inherited,
+                some => some,
+            };
             ResolvedShape::Group(ResolvedGroup {
                 rect: g.rect,
                 child_rect: g.child_rect,
                 xfrm: g.xfrm,
-                children: g.children.iter().map(|c| resolve_shape(c, ctx)).collect(),
+                children: g
+                    .children
+                    .iter()
+                    .map(|c| resolve_shape(c, ctx, own))
+                    .collect(),
             })
         }
         Shape::Placeholder(gp) => ResolvedShape::Placeholder(resolve_graphic(gp, ctx)),
@@ -411,7 +421,16 @@ fn resolve_run(
 
 // ---- 形状 -----------------------------------------------------------------
 
-fn resolve_auto(a: &AutoShape, ctx: &Ctx) -> ResolvedAutoShape {
+/// `a:grpFill` 取所在组合的填充;组合链上没有任何真实填充 → 无填充(不落 `fillRef`)。
+fn effective_fill<'a>(own: Option<&'a Fill>, inherited: Option<&'a Fill>) -> Option<&'a Fill> {
+    match own {
+        Some(Fill::Group) => Some(inherited.unwrap_or(&Fill::None)),
+        other => other,
+    }
+}
+
+fn resolve_auto(a: &AutoShape, ctx: &Ctx, inherited: Option<&Fill>) -> ResolvedAutoShape {
+    let fill = effective_fill(a.fill.as_ref(), inherited);
     let ph = a.placeholder.as_ref();
     let (layout_ph, master_ph) = find_chain(ctx, ph);
     let rect = a
@@ -438,20 +457,28 @@ fn resolve_auto(a: &AutoShape, ctx: &Ctx) -> ResolvedAutoShape {
         xfrm: a.xfrm,
         geometry: a.geometry.clone(),
         adjusts: a.adjusts.clone(),
-        fill: resolve_fill(ctx, a.fill.as_ref(), a.style.as_ref()),
+        fill: resolve_fill(ctx, fill, a.style.as_ref()),
+        blip_fill: match fill {
+            Some(Fill::Blip(b)) => Some(b.clone()),
+            _ => None,
+        },
         stroke: resolve_stroke(ctx, a.stroke.as_ref(), a.style.as_ref()),
         text,
         custom_geometry: a.custom_geometry,
     }
 }
 
-fn resolve_connector(c: &Connector, ctx: &Ctx) -> ResolvedConnector {
+fn resolve_connector(c: &Connector, ctx: &Ctx, inherited: Option<&Fill>) -> ResolvedConnector {
     ResolvedConnector {
         rect: c.rect,
         xfrm: c.xfrm,
         geometry: c.geometry.clone(),
         adjusts: c.adjusts.clone(),
-        fill: resolve_fill(ctx, c.fill.as_ref(), c.style.as_ref()),
+        fill: resolve_fill(
+            ctx,
+            effective_fill(c.fill.as_ref(), inherited),
+            c.style.as_ref(),
+        ),
         stroke: resolve_stroke(ctx, c.stroke.as_ref(), c.style.as_ref()),
         no_line: c.stroke.as_ref().is_some_and(|s| s.no_fill),
         custom_geometry: c.custom_geometry,
@@ -704,7 +731,7 @@ fn resolve_cell(
 
 /// 填充解析:显式 `spPr` 填充获胜(`noFill` 也是显式——直接无填充,不落
 /// `fillRef`;渐变降级为首个 stop 的代表色,渲染侧据 [`ResolvedFill::Gradient`]
-/// 记 `GradientDegraded`;形状级图片填充 v1 不涂)。未设置时经 `fillRef` 查主题
+/// 记 `GradientDegraded`;图案填充降级为平均色,见 [`ResolvedFill::Pattern`])。未设置时经 `fillRef` 查主题
 /// `fillStyleLst`(`phClr` 以引用色替换;非纯色 / 越界项降级为引用色本身 = 代表色)。
 fn resolve_fill(
     ctx: &Ctx,
@@ -721,7 +748,24 @@ fn resolve_fill(
                 .first()
                 .map(|s| ResolvedFill::Gradient(resolve_color(ctx, s, None)));
         }
-        Some(Fill::Blip) => return None,
+        // 图片填充走 `ResolvedAutoShape.blip_fill`(渲染按几何裁剪画图),不是纯色。
+        Some(Fill::Blip(_)) => return None,
+        // 图案填充降级为前景 / 背景两色的平均色(取平均而非单取前景:前景常是稀疏线 / 点,
+        // 单取前景会比实际视觉重得多;平均色最接近图案铺开后的整体明度)。缺省前景黑 / 背景白。
+        Some(Fill::Pattern { fg, bg }) => {
+            let c = |s: &Option<ColorSpec>, dflt: [u8; 3]| {
+                s.as_ref().map_or(dflt, |s| resolve_color(ctx, s, None).rgb)
+            };
+            let (f, b) = (c(fg, [0, 0, 0]), c(bg, [255, 255, 255]));
+            let mean = |i: usize| (u16::from(f[i]) + u16::from(b[i])).div_ceil(2) as u8;
+            return Some(ResolvedFill::Pattern(ResolvedColor::opaque([
+                mean(0),
+                mean(1),
+                mean(2),
+            ])));
+        }
+        // 未经组合继承解出的 `grpFill`(顶层 / 无组合填充)= 无填充。
+        Some(Fill::Group) => return None,
         None => {}
     }
     let fr = style?.fill_ref.as_ref().filter(|r| r.idx >= 1)?;

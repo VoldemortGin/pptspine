@@ -20,7 +20,7 @@ mod line_ends;
 
 use ppt_core::color::ResolvedColor;
 use ppt_core::geom::emu_to_points;
-use ppt_core::model::{GraphicPlaceholder, LineEnd, Picture, RelRect, Xfrm};
+use ppt_core::model::{BlipFill, GraphicPlaceholder, LineEnd, Picture, RelRect, Xfrm};
 use ppt_core::resolved::{ResolvedAutoShape, ResolvedConnector, ResolvedFill, ResolvedStroke};
 
 use pdf_typeset::preset::preset_outline;
@@ -47,10 +47,15 @@ const PLACEHOLDER_STROKE: Rgb = Rgb {
 
 /// 终态填充 → 引擎填充(带常数 alpha);渐变降级记 [`ExportWarning::GradientDegraded`]。
 fn fill_of(ctx: &mut RenderCtx<'_>, f: ResolvedFill) -> Fill {
-    if matches!(f, ResolvedFill::Gradient(_)) {
-        ctx.warnings.push(ExportWarning::GradientDegraded {
+    match f {
+        ResolvedFill::Gradient(_) => ctx.warnings.push(ExportWarning::GradientDegraded {
             kind: "gradFill".to_string(),
-        });
+        }),
+        ResolvedFill::Pattern(_) => ctx.warnings.push(ExportWarning::Custom {
+            kind: PATTERN_FILL_KIND.to_string(),
+            detail: "图案填充(pattFill)v1 降级为前景 / 背景平均色的纯色".to_string(),
+        }),
+        ResolvedFill::Solid(_) => {}
     }
     let c = f.color();
     Fill {
@@ -101,6 +106,10 @@ fn rect_segs(r: Rect) -> Vec<PathSeg> {
     ]
 }
 
+/// 降级告警种类:图案填充按两色平均色的纯色画。
+const PATTERN_FILL_KIND: &str = "pattern-fill-degraded";
+/// 降级告警种类:图片填充的 `a:tile` 平铺按拉伸画。
+const BLIP_TILED_KIND: &str = "blip-fill-tiled";
 /// 降级告警种类:`a:custGeom` 按包围盒 / 缺省直线近似。
 const CUSTOM_GEOMETRY_KIND: &str = "custom-geometry-approximated";
 /// 降级告警种类:线端装饰画不出(规范外 type / 轮廓降级后无开放端点)。
@@ -231,6 +240,7 @@ fn outline_op(
 
 /// 自选图形的形状底(文字由调用方在其上叠加)。
 pub(crate) fn auto_shape_ops(
+    ts: &mut Typesetter,
     ctx: &mut RenderCtx<'_>,
     auto: &ResolvedAutoShape,
     flat: Flatten,
@@ -239,6 +249,9 @@ pub(crate) fn auto_shape_ops(
     let Some(rect) = auto.rect else {
         return;
     };
+    if let Some(b) = &auto.blip_fill {
+        blip_fill_ops(ts, ctx, auto, b, flat.map_emu_rect(rect), ops);
+    }
     let fill = auto.fill.map(|f| fill_of(ctx, f));
     let stroke = auto.stroke.as_ref().map(|s| stroke_of(s, flat.s));
     outline_op(
@@ -255,6 +268,55 @@ pub(crate) fn auto_shape_ops(
         flat.s,
         ops,
     );
+}
+
+/// 形状的图片填充:图片按 `fillRect` / `srcRect` 放置(与 `p:pic` 同一套 [`placed_image_op`]、
+/// 同一份 embed 缓存),再以**形状几何轮廓**为剪裁路径(引擎 `Op::Group.clip` 接受任意路径),
+/// 铺在描边 / 文字之下。`a:tile` 平铺 v1 按拉伸画并告警;图片缺失记 `ImageDropped`。
+fn blip_fill_ops(
+    ts: &mut Typesetter,
+    ctx: &mut RenderCtx<'_>,
+    auto: &ResolvedAutoShape,
+    b: &BlipFill,
+    r: Rect,
+    ops: &mut Vec<Op>,
+) {
+    let key = b.media_name.clone().unwrap_or_else(|| b.rel_id.clone());
+    let Some(id) = embed_image(ts, ctx, b.media_name.as_deref(), &key, r) else {
+        return;
+    };
+    if b.tile {
+        ctx.warnings.push(ExportWarning::Custom {
+            kind: BLIP_TILED_KIND.to_string(),
+            detail: "图片填充 a:tile 平铺 v1 按拉伸画".to_string(),
+        });
+    }
+    let name = auto.geometry.as_deref().unwrap_or("rect");
+    #[allow(clippy::cast_precision_loss)]
+    let adj: Vec<(&str, f64)> = auto
+        .adjusts
+        .iter()
+        .map(|(n, v)| (n.as_str(), *v as f64))
+        .collect();
+    let outline = preset_outline(name, r, &adj);
+    // 无描边时 `outline_op` 不会跑(fill 为空),几何降级的告警在此补发,避免静默。
+    if auto.stroke.is_none() {
+        if outline.degraded {
+            ctx.warnings.push(ExportWarning::PresetDegraded {
+                preset: name.to_string(),
+            });
+        }
+        if auto.custom_geometry {
+            custom_geometry_warning(ctx, "包围盒矩形");
+        }
+    }
+    let image = placed_image_op(id, r, b.fill_rect, b.src_rect);
+    let clipped = Op::Group {
+        transform: None,
+        clip: Some(outline.segs),
+        ops: vec![image],
+    };
+    with_shape_transform(auto.xfrm, r, clipped, ops);
 }
 
 /// 连接线:仅描边(无描边解析结果时以缺省黑线兜底,保证可见);
@@ -327,6 +389,61 @@ fn crop_placement(dest: Rect, sr: RelRect) -> Option<Rect> {
     Some(Rect::new(x, y, x + w, y + h))
 }
 
+/// 把一张图片 embed 进引擎(按 `key` 缓存 id:同图多次放置只 embed 一份);media 缺失记
+/// `ImageDropped` 并缓存失败结果。`size` 仅作 `ImageSpec` 的初始显示尺寸。
+fn embed_image(
+    ts: &mut Typesetter,
+    ctx: &mut RenderCtx<'_>,
+    media_name: Option<&str>,
+    key: &str,
+    size: Rect,
+) -> Option<usize> {
+    if let Some(&cached) = ctx.image_ids.get(key) {
+        return cached;
+    }
+    let id = match media_name.and_then(|n| ctx.media.get(n)) {
+        Some(bytes) => ts.add_image(&pdf_typeset::ImageSpec::new(
+            bytes.clone(),
+            size.x1 - size.x0,
+            size.y1 - size.y0,
+        )),
+        None => {
+            ctx.warnings.push(ExportWarning::ImageDropped {
+                reason: format!("media '{key}' not found in package"),
+            });
+            None
+        }
+    };
+    ctx.image_ids.insert(key.to_string(), id);
+    id
+}
+
+/// 图片在 `r` 内的放置 op:`fillRect` 定显示矩形,`srcRect` 以整图放大 + 显示矩形剪裁
+/// 实现源裁剪(图片 `p:pic` 与形状图片填充共用)。
+fn placed_image_op(
+    id: usize,
+    r: Rect,
+    fill_rect: Option<RelRect>,
+    src_rect: Option<RelRect>,
+) -> Op {
+    let dest = fill_rect.map_or(r, |fr| apply_fill_rect(r, fr));
+    let image_at = |p: Rect| Op::Image {
+        id,
+        x: p.x0,
+        y: p.y0,
+        w: p.x1 - p.x0,
+        h: p.y1 - p.y0,
+    };
+    match src_rect.and_then(|sr| crop_placement(dest, sr)) {
+        Some(full) => Op::Group {
+            transform: None,
+            clip: Some(rect_segs(dest)),
+            ops: vec![image_at(full)],
+        },
+        None => image_at(dest),
+    }
+}
+
 /// 图片放置:embed 一次(按 media 裸名 / rel id 缓存 id),多次放置复用同一 id;
 /// `fillRect` 定显示矩形、`srcRect` 以放大 + 剪裁实现源裁剪、rot/flip 绕形状
 /// 矩形中心生效(翻转对图片是真镜像)。
@@ -342,45 +459,10 @@ pub(crate) fn picture_ops(
     };
     let r = flat.map_emu_rect(rect);
     let key = pic.media_name.clone().unwrap_or_else(|| pic.rel_id.clone());
-    let id = if let Some(&cached) = ctx.image_ids.get(&key) {
-        cached
-    } else {
-        let id = match pic.media_name.as_deref().and_then(|n| ctx.media.get(n)) {
-            Some(bytes) => ts.add_image(&pdf_typeset::ImageSpec::new(
-                bytes.clone(),
-                r.x1 - r.x0,
-                r.y1 - r.y0,
-            )),
-            None => {
-                ctx.warnings.push(ExportWarning::ImageDropped {
-                    reason: format!("media '{key}' not found in package"),
-                });
-                None
-            }
-        };
-        ctx.image_ids.insert(key, id);
-        id
-    };
-    let Some(id) = id else {
+    let Some(id) = embed_image(ts, ctx, pic.media_name.as_deref(), &key, r) else {
         return;
     };
-
-    let dest = pic.fill_rect.map_or(r, |fr| apply_fill_rect(r, fr));
-    let image_at = |p: Rect| Op::Image {
-        id,
-        x: p.x0,
-        y: p.y0,
-        w: p.x1 - p.x0,
-        h: p.y1 - p.y0,
-    };
-    let base = match pic.src_rect.and_then(|sr| crop_placement(dest, sr)) {
-        Some(full) => Op::Group {
-            transform: None,
-            clip: Some(rect_segs(dest)),
-            ops: vec![image_at(full)],
-        },
-        None => image_at(dest),
-    };
+    let base = placed_image_op(id, r, pic.fill_rect, pic.src_rect);
     with_shape_transform(pic.xfrm, r, base, ops);
 }
 
