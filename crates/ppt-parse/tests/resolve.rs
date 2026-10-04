@@ -1606,6 +1606,47 @@ fn explicit_tcpr_overrides_table_style() {
     assert_eq!(cell_fill(&t, 1, 0), Some(whole_tbl_fill()));
 }
 
+/// 显式无边框 `a:lnX > a:noFill`(带 / 不带线宽)= 该边不画,且作为显式属性压制表格样式的边;
+/// 无样式表格里同样不画(不能退化成只有线宽的缺省黑线)。
+#[test]
+fn explicit_no_fill_cell_border_is_not_drawn() {
+    let rows = r#"<a:tr h="100">
+        <a:tc>
+          <a:txBody><a:p><a:r><a:t>x</a:t></a:r></a:p></a:txBody>
+          <a:tcPr>
+            <a:lnL w="12700"><a:noFill/></a:lnL>
+            <a:lnR w="12700" cap="flat"><a:noFill/></a:lnR>
+            <a:lnT><a:noFill/></a:lnT>
+            <a:lnB w="12700"><a:noFill/><a:prstDash val="solid"/></a:lnB>
+          </a:tcPr>
+        </a:tc>
+      </a:tr>"#;
+    for tbl_pr in [
+        r#"<a:tblPr><a:tableStyleId>{TEST-STYLE}</a:tableStyleId></a:tblPr>"#,
+        r#"<a:tblPr/>"#,
+    ] {
+        let xml = styled_table_slide(tbl_pr, 1, &format!("{rows}{}", plain_rows(1, 1)));
+        let t = resolve_styled_table(&xml, Some(TABLE_STYLES));
+        let b = &t.rows[0].cells[0].borders;
+        assert!(
+            b.left.is_none(),
+            "{tbl_pr}: 显式 noFill 左边不画: {:?}",
+            b.left
+        );
+        assert!(b.right.is_none(), "{tbl_pr}: 显式 noFill 右边不画");
+        assert!(b.top.is_none(), "{tbl_pr}: 显式 noFill 上边不画");
+        assert!(b.bottom.is_none(), "{tbl_pr}: 显式 noFill 下边不画");
+    }
+    // 对照:同表下一行未显式的边仍取样式(wholeTbl 左外沿 111111)。
+    let xml = styled_table_slide(
+        r#"<a:tblPr><a:tableStyleId>{TEST-STYLE}</a:tableStyleId></a:tblPr>"#,
+        1,
+        &format!("{rows}{}", plain_rows(1, 1)),
+    );
+    let t = resolve_styled_table(&xml, Some(TABLE_STYLES));
+    assert_eq!(edge_rgb(&t.rows[1].cells[0].borders.left), Some([0x11; 3]));
+}
+
 /// styleId 找不到 / `tableStyles.xml` 缺失:退回旧行为(只用显式属性),标记未解析。
 #[test]
 fn table_style_missing_falls_back_to_explicit_only() {

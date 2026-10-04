@@ -1632,10 +1632,16 @@ fn parse_tcpr_children<R: std::io::BufRead>(reader: &mut Reader<R>, t: &mut TcPr
                 let name = local_name(e.name().as_ref()).to_vec();
                 match name.as_slice() {
                     b"solidFill" => t.fill = parse_solid_fill(reader).or(t.fill.take()),
-                    b"lnL" => t.borders.left = parse_ln(reader, &e),
-                    b"lnR" => t.borders.right = parse_ln(reader, &e),
-                    b"lnT" => t.borders.top = parse_ln(reader, &e),
-                    b"lnB" => t.borders.bottom = parse_ln(reader, &e),
+                    b"lnL" => {
+                        (t.borders.left, t.borders.no_left) = cell_edge(reader, &e);
+                    }
+                    b"lnR" => {
+                        (t.borders.right, t.borders.no_right) = cell_edge(reader, &e);
+                    }
+                    b"lnT" => (t.borders.top, t.borders.no_top) = cell_edge(reader, &e),
+                    b"lnB" => {
+                        (t.borders.bottom, t.borders.no_bottom) = cell_edge(reader, &e);
+                    }
                     b"noFill" => {
                         t.no_fill = true;
                         skip_element(reader, &name);
@@ -1661,6 +1667,18 @@ fn parse_tcpr_children<R: std::io::BufRead>(reader: &mut Reader<R>, t: &mut TcPr
             _ => {}
         }
         buf.clear();
+    }
+}
+
+/// 一条单元格边 `a:lnL` 等(非自闭合):含 `a:noFill` → `(None, true)` 显式无线
+/// (否则只剩线宽会被画成缺省黑线);其余同 [`parse_ln`]。
+fn cell_edge<R: std::io::BufRead>(
+    reader: &mut Reader<R>,
+    start: &BytesStart,
+) -> (Option<Stroke>, bool) {
+    match parse_ln_no_fill(reader, start) {
+        (_, true) => (None, true),
+        (stroke, false) => (stroke, false),
     }
 }
 

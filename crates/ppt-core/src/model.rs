@@ -426,6 +426,12 @@ pub struct CellBorders {
     pub right: Option<Stroke>,
     pub top: Option<Stroke>,
     pub bottom: Option<Stroke>,
+    /// 显式无线(`a:lnL/lnR/lnT/lnB > a:noFill`):该边不画,并压制表格样式的对应边
+    /// (此时对应的 `left`/`right`/`top`/`bottom` 为 `None`)。
+    pub no_left: bool,
+    pub no_right: bool,
+    pub no_top: bool,
+    pub no_bottom: bool,
 }
 
 /// 表格单元格(`a:tc`)。

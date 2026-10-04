@@ -612,7 +612,11 @@ fn resolve_cell(
     ctx: &Ctx,
 ) -> ResolvedCell {
     // 显式 `tcPr` 逐边 / 填充获胜;缺失时取表格样式(显式 `noFill` 压制样式填充)。
-    let border = |explicit: Option<&Stroke>, styled: Option<&Stroke>| {
+    // 显式 `noFill` 边(`hidden`)不画,也不回落到样式边。
+    let border = |explicit: Option<&Stroke>, hidden: bool, styled: Option<&Stroke>| {
+        if hidden {
+            return None;
+        }
         resolve_stroke(ctx, explicit.or(styled), None)
     };
     let styled_fill = style
@@ -645,18 +649,22 @@ fn resolve_cell(
         borders: ResolvedCellBorders {
             left: border(
                 cell.borders.left.as_ref(),
+                cell.borders.no_left,
                 style.and_then(|s| s.left.as_ref()),
             ),
             right: border(
                 cell.borders.right.as_ref(),
+                cell.borders.no_right,
                 style.and_then(|s| s.right.as_ref()),
             ),
             top: border(
                 cell.borders.top.as_ref(),
+                cell.borders.no_top,
                 style.and_then(|s| s.top.as_ref()),
             ),
             bottom: border(
                 cell.borders.bottom.as_ref(),
+                cell.borders.no_bottom,
                 style.and_then(|s| s.bottom.as_ref()),
             ),
         },
