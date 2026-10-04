@@ -1782,6 +1782,18 @@ mod tests {
         assert_eq!(layout(&c, frame()), Err(Unsupported::TooManyPoints(n)));
     }
 
+    /// 放大攻击(审查探针原规模):`ptCount` 声明 25.6 万、没有任何 `c:pt` 的饼图。
+    /// 布局必须在不做规模相关工作的情况下直接降级,图例输入条目数被钳在 [`MAX_LEGEND_ENTRIES`]。
+    #[test]
+    fn amplification_pie_declaring_256k_points_degrades_immediately_with_bounded_legend() {
+        let n = 256_000;
+        let mut c = chart(ChartKind::Pie, &[], vec![series(None, &vec![None; n])]);
+        c.categories = vec![String::new(); n];
+        assert_eq!(layout(&c, frame()), Err(Unsupported::TooManyPoints(n)));
+        assert!(legend_entries(&c).len() <= MAX_LEGEND_ENTRIES);
+        assert_eq!(mark_count(&c), n);
+    }
+
     #[test]
     fn legend_entries_are_capped_deterministically() {
         let cats: Vec<String> = (0..5_000).map(|i| format!("c{i}")).collect();

@@ -65,6 +65,18 @@ const TREES: &[(&str, &str)] = &[
 </p:grpSp>"#,
     ),
     (
+        "alt_content_empty_group_choice",
+        r#"<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:p14="http://schemas.microsoft.com/office/powerpoint/2010/main">
+<mc:Choice Requires="p14"><p:grpSp><p:nvGrpSpPr><p:cNvPr id="2" name="ink"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p14:contentPart r:id="rId5"/></p:grpSp></mc:Choice>
+<mc:Fallback><p:sp><p:nvSpPr><p:cNvPr id="3" name="t"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr/><p:txBody><a:bodyPr/><a:p><a:r><a:t>FALLBACK TEXT</a:t></a:r></a:p></p:txBody></p:sp></mc:Fallback>
+</mc:AlternateContent>"#,
+    ),
+    (
+        "smartart_many_frames",
+        r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="13" name="D"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x="0" y="0"/><a:ext cx="100" cy="100"/></p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram"><dgm:relIds xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" r:dm="rId9"/></a:graphicData></a:graphic></p:graphicFrame>
+<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="14" name="D2"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x="0" y="0"/><a:ext cx="100" cy="100"/></p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/diagram"><dgm:relIds xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" r:dm="rId9"/></a:graphicData></a:graphic></p:graphicFrame>"#,
+    ),
+    (
         "link_chart_placeholder",
         r#"<p:sp><p:nvSpPr><p:cNvPr id="11" name="Link"><a:hlinkClick r:id="rId3" tooltip="tip"/></p:cNvPr><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr>
 <p:spPr><a:xfrm><a:off x="838200" y="365125"/><a:ext cx="3000000" cy="500000"/></a:xfrm></p:spPr>

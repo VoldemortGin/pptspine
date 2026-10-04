@@ -195,3 +195,16 @@ fn deeply_nested_groups_and_alternate_content_are_bounded() {
     );
     let _ = run_one(&alt);
 }
+
+/// 审查发现:`mc:Choice` 里只有一个子元素全不认识的空组合(组合墨迹)时,曾挡住带文字的 Fallback。
+#[test]
+fn alternate_content_with_an_empty_group_choice_keeps_the_fallback_text() {
+    let parsed = run_one(
+        r#"<mc:AlternateContent xmlns:p14="http://schemas.microsoft.com/office/powerpoint/2010/main">
+<mc:Choice Requires="p14"><p:grpSp><p:nvGrpSpPr><p:cNvPr id="2" name="g"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/><p14:contentPart r:id="rId5"/></p:grpSp></mc:Choice>
+<mc:Fallback><p:sp><p:txBody><a:p><a:r><a:t>FALLBACK-TEXT</a:t></a:r></a:p></p:txBody></p:sp></mc:Fallback></mc:AlternateContent>"#,
+    );
+    let shapes = &parsed.presentation.slides[0].shapes;
+    assert_eq!(shapes.len(), 1, "{shapes:?}");
+    assert_eq!(text_of(&shapes[0]), "FALLBACK-TEXT");
+}
