@@ -707,7 +707,8 @@ pub struct ChartSeries {
     /// 系列自带的颜色:柱 / 条 / 面积取 `c:spPr > a:solidFill`,折线取 `c:spPr > a:ln > a:solidFill`;
     /// 缺失 / 渐变 / 图案填充为 `None`(渲染回落主题 accent 循环)。
     pub color: Option<ColorSpec>,
-    /// 逐点颜色(`c:dPt@idx` + `c:spPr > a:solidFill`),按文档顺序;饼图的扇区色即来自这里。
+    /// 逐点颜色(`c:dPt@idx` + `c:spPr > a:solidFill`);饼图的扇区色即来自这里。解析器保证按 idx
+    /// 升序且唯一(同一 idx 重复时取文档顺序第一个),渲染侧据此二分查找。
     pub point_colors: Vec<(usize, ColorSpec)>,
     /// 生效的数据标签设置(系列级 `c:dLbls` 覆盖图表类型级 `c:dLbls`);都没有为 `None`。
     pub labels: Option<DataLabels>,

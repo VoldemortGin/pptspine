@@ -185,7 +185,13 @@ fn parse_chart_el<R: std::io::BufRead>(reader: &mut Reader<R>, chart: &mut Chart
             } else {
                 rs.fill
             },
-            point_colors: rs.point_colors,
+            point_colors: {
+                // 同一 idx 重复时取文档顺序第一个(稳定排序 + 去重保留首个),结果升序唯一。
+                let mut pc = rs.point_colors;
+                pc.sort_by_key(|(i, _)| *i);
+                pc.dedup_by_key(|(i, _)| *i);
+                pc
+            },
             labels: rs
                 .labels
                 .filter(|l| l.show_val || l.show_cat_name || l.show_percent),
@@ -940,6 +946,35 @@ mod tests {
             vec![
                 (0, ColorSpec::srgb([0x11, 0x22, 0x33])),
                 (3, ColorSpec::srgb([0x44, 0x55, 0x66]))
+            ]
+        );
+    }
+
+    /// `c:dPt@idx` 重复:取文档顺序第一个,且结果按 idx 升序、唯一(渲染与 Python 绑定共用这条规则)。
+    #[test]
+    fn duplicate_point_color_idx_keeps_first_and_sorts() {
+        use ppt_core::color::ColorSpec;
+        let dpt = |idx: u32, rgb: &str| {
+            format!(
+                r#"<c:dPt><c:idx val="{idx}"/><c:spPr><a:solidFill><a:srgbClr val="{rgb}"/></a:solidFill></c:spPr></c:dPt>"#
+            )
+        };
+        let val = r#"<c:val><c:numLit><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val>"#;
+        let c = parse(&space(
+            &format!(
+                "<c:pieChart><c:ser>{val}{}{}{}{}</c:ser></c:pieChart>",
+                dpt(3, "030303"),
+                dpt(1, "111111"),
+                dpt(1, "222222"),
+                dpt(3, "333333")
+            ),
+            "",
+        ));
+        assert_eq!(
+            c.series[0].point_colors,
+            vec![
+                (1, ColorSpec::srgb([0x11, 0x11, 0x11])),
+                (3, ColorSpec::srgb([0x03, 0x03, 0x03]))
             ]
         );
     }

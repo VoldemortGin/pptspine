@@ -148,3 +148,32 @@ def test_styled_charts_render_vectors_and_of_pie_degrades(styled_chart_pptx_byte
         pdf = pptspine.open_bytes(styled_chart_pptx_bytes).to_pdf()
     assert pdf.startswith(b"%PDF")
     assert sum("chart-degraded" in str(w.message) for w in caught) == 1
+
+
+def test_duplicate_point_color_idx_uses_first_in_document_order():
+    # 同一 c:dPt idx 出现两次:渲染与 dict 都取文档顺序第一个。
+    from pptx_synth import REL_BASE, SlideSpec, build_pptx
+
+    c_ns = "http://schemas.openxmlformats.org/drawingml/2006/chart"
+    a_ns = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    dpt = lambda rgb: (  # noqa: E731
+        f'<c:dPt><c:idx val="1"/><c:spPr><a:solidFill><a:srgbClr val="{rgb}"/></a:solidFill></c:spPr></c:dPt>'
+    )
+    chart = (
+        f'<c:chartSpace xmlns:c="{c_ns}" xmlns:a="{a_ns}"><c:chart><c:plotArea><c:pieChart><c:ser>'
+        f'{dpt("111111")}{dpt("222222")}'
+        '<c:val><c:numLit><c:ptCount val="2"/><c:pt idx="0"><c:v>1</c:v></c:pt>'
+        '<c:pt idx="1"><c:v>2</c:v></c:pt></c:numLit></c:val></c:ser></c:pieChart></c:plotArea></c:chart></c:chartSpace>'
+    )
+    frame = (
+        '<p:graphicFrame><p:xfrm><a:off x="0" y="0"/><a:ext cx="4000000" cy="3000000"/></p:xfrm>'
+        f'<a:graphic><a:graphicData uri="{c_ns}"><c:chart xmlns:c="{c_ns}" r:id="rId9"/>'
+        "</a:graphicData></a:graphic></p:graphicFrame>"
+    )
+    data = build_pptx(
+        [SlideSpec(frame, rels=[("rId9", f"{REL_BASE}/chart", "../charts/chart1.xml")])],
+        parts={"ppt/charts/chart1.xml": chart},
+    )
+    pres = pptspine.open_bytes(data)
+    (ph,) = [s for s in pres.slide(0).shapes() if s["kind"] == "placeholder"]
+    assert ph["chart"]["series"][0]["point_colors"] == {1: "111111"}

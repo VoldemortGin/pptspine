@@ -318,12 +318,13 @@ fn series_rgb(s: &ChartSeries) -> Option<[u8; 3]> {
     s.color.as_ref().and_then(spec_rgb)
 }
 
-/// 第 `i` 点自带色(`c:dPt`)。
+/// 第 `i` 点自带色(`c:dPt`)。`point_colors` 按 idx 升序唯一(解析器保证,重复取第一个),
+/// 二分查找:逐点调用不会随 `c:dPt` 数二次复杂度。
 fn point_rgb(s: &ChartSeries, i: usize) -> Option<[u8; 3]> {
     s.point_colors
-        .iter()
-        .find(|(k, _)| *k == i)
-        .and_then(|(_, c)| spec_rgb(c))
+        .binary_search_by_key(&i, |(k, _)| *k)
+        .ok()
+        .and_then(|j| spec_rgb(&s.point_colors[j].1))
 }
 
 /// 饼图取数的系列:首个含非零有限值的系列。
