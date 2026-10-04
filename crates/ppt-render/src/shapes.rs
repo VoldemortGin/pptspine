@@ -118,6 +118,8 @@ fn rect_segs(r: Rect) -> Vec<PathSeg> {
 const PATTERN_FILL_KIND: &str = "pattern-fill-degraded";
 /// 降级告警种类:图片填充的 `a:tile` 平铺按拉伸画。
 const BLIP_TILED_KIND: &str = "blip-fill-tiled";
+/// 降级告警种类:`a:grpFill` 继承的图片填充按子形状自己的矩形拉伸(PowerPoint 按组合范围铺图)。
+const GROUP_BLIP_KIND: &str = "group-blip-fill-stretched";
 /// 降级告警种类:`a:custGeom` 按包围盒 / 缺省直线近似。
 const CUSTOM_GEOMETRY_KIND: &str = "custom-geometry-approximated";
 /// 降级告警种类:线端装饰画不出(规范外 type / 轮廓降级后无开放端点)。
@@ -358,6 +360,13 @@ fn blip_fill_ops(
     let Some(id) = embed_image(ts, ctx, b.media_name.as_deref(), &key, r) else {
         return;
     };
+    if auto.blip_from_group {
+        ctx.warnings.push(ExportWarning::Custom {
+            kind: GROUP_BLIP_KIND.to_string(),
+            detail: "组合 a:grpFill 图片填充 v1 按子形状矩形拉伸(PowerPoint 按组合范围铺图)"
+                .to_string(),
+        });
+    }
     if b.tile {
         ctx.warnings.push(ExportWarning::Custom {
             kind: BLIP_TILED_KIND.to_string(),

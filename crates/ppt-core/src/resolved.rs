@@ -204,6 +204,9 @@ pub struct ResolvedAutoShape {
     pub fill: Option<ResolvedFill>,
     /// 图片填充(`a:blipFill`;`fill` 此时为 `None`,渲染按形状几何裁剪后画进外框)。
     pub blip_fill: Option<BlipFill>,
+    /// `blip_fill` 来自 `a:grpFill` 继承所在组合的图片填充。PowerPoint 按**组合范围**铺图、
+    /// 子形状只露出对应那一块;v1 仍按子形状自己的矩形拉伸整张图,渲染侧据此发降级告警。
+    pub blip_from_group: bool,
     pub stroke: Option<ResolvedStroke>,
     pub text: Option<ResolvedTextFrame>,
     /// 几何来自 `a:custGeom`(`cust_geom` 为空或求值失败时渲染按包围盒矩形降级 + 告警)。

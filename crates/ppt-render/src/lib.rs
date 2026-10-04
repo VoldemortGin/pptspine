@@ -647,6 +647,7 @@ mod tests {
             adjusts,
             fill: Some(ResolvedFill::Solid(ResolvedColor::opaque([255, 0, 0]))),
             blip_fill: None,
+            blip_from_group: false,
             stroke: None,
             text: None,
             custom_geometry: false,
@@ -1527,6 +1528,7 @@ mod tests {
             adjusts: vec![],
             fill: Some(ResolvedFill::Gradient(ResolvedColor::opaque([0, 0, 255]))),
             blip_fill: None,
+            blip_from_group: false,
             stroke: None,
             text: None,
             custom_geometry: false,
@@ -1598,6 +1600,7 @@ mod tests {
             adjusts: vec![],
             fill: None,
             blip_fill: Some(b),
+            blip_from_group: false,
             stroke: None,
             text: None,
             custom_geometry: false,
@@ -1702,6 +1705,25 @@ mod tests {
             .any(|w| matches!(w, ExportWarning::ImageDropped { .. })));
     }
 
+    /// 继承自组合的图片填充:仍按子形状矩形拉伸,并发 `group-blip-fill-stretched` 告警;
+    /// 形状自己的图片填充不发。
+    #[test]
+    fn group_inherited_blip_fill_warns_that_it_is_stretched_per_child() {
+        let mut inherited = blip_shape("rect", blip(None, false));
+        if let ResolvedShape::Auto(a) = &mut inherited {
+            a.blip_from_group = true;
+        }
+        let out = render_media(&one_slide(vec![inherited]));
+        assert_eq!(image_objects(&out), 1, "图仍然画出");
+        assert!(
+            has_custom_warning(&out, "group-blip-fill-stretched"),
+            "{:?}",
+            out.warnings
+        );
+        let own = render_media(&one_slide(vec![blip_shape("rect", blip(None, false))]));
+        assert!(!has_custom_warning(&own, "group-blip-fill-stretched"));
+    }
+
     /// 图案填充按平均色纯色画 + `pattern-fill-degraded` 告警(不是无填充)。
     #[test]
     fn pattern_fill_paints_flat_color_with_warning() {
@@ -1712,6 +1734,7 @@ mod tests {
             adjusts: vec![],
             fill: Some(ResolvedFill::Pattern(ResolvedColor::opaque([0, 0, 255]))),
             blip_fill: None,
+            blip_from_group: false,
             stroke: None,
             text: None,
             custom_geometry: false,

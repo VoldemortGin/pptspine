@@ -232,3 +232,19 @@ fn background_blip_fill_resolves_to_a_picture() {
         resolved.slides[0].background
     );
 }
+
+/// 子形状 `a:grpFill` 继承组合的图片填充:v1 仍按子形状自己的矩形拉伸(PowerPoint 按组合范围铺图),
+/// 解析层标 `blip_from_group` 让渲染侧告警;自己带 `a:blipFill` 的不标。
+#[test]
+fn grp_fill_inheriting_a_picture_is_flagged() {
+    let a = resolved_leaf(&deck(&grp(BLIP, &sp("rect", GRP_FILL))));
+    assert_eq!(
+        a.blip_fill.as_ref().and_then(|b| b.media_name.as_deref()),
+        Some("image1.png")
+    );
+    assert!(a.blip_from_group);
+    let own = resolved_leaf(&deck(&grp(BLIP, &sp("rect", BLIP))));
+    assert!(own.blip_fill.is_some() && !own.blip_from_group);
+    let solid = resolved_leaf(&deck(&grp(SOLID_GREEN, &sp("rect", GRP_FILL))));
+    assert!(solid.blip_fill.is_none() && !solid.blip_from_group);
+}

@@ -462,6 +462,7 @@ fn resolve_auto(a: &AutoShape, ctx: &Ctx, inherited: Option<&Fill>) -> ResolvedA
             Some(Fill::Blip(b)) => Some(b.clone()),
             _ => None,
         },
+        blip_from_group: matches!(a.fill, Some(Fill::Group)) && matches!(fill, Some(Fill::Blip(_))),
         stroke: resolve_stroke(ctx, a.stroke.as_ref(), a.style.as_ref()),
         text,
         custom_geometry: a.custom_geometry,
