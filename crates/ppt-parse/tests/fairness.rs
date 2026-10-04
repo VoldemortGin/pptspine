@@ -291,3 +291,29 @@ fn clean_parse_reports_usage_without_truncation() {
         ppt_parse::estimated_model_bytes(&p).max(r.model_bytes)
     );
 }
+
+/// `mc:AlternateContent` 落选分支消耗的预算退还:Choice 里 51 个空形状(信息量 0)落选给
+/// Fallback 的文字后,不再占着形状预算,其后的形状照常解析、没有截断诊断。
+#[test]
+fn losing_alternate_content_branch_refunds_its_budget() {
+    let choice = format!(
+        r#"<p:grpSp><p:grpSpPr/>{}</p:grpSp>"#,
+        "<p:sp><p:spPr/></p:sp>".repeat(50)
+    );
+    let tree = format!(
+        r#"<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Choice Requires="p14">{choice}</mc:Choice><mc:Fallback><p:sp><p:txBody><a:p><a:r><a:t>FALLBACK</a:t></a:r></a:p></p:txBody></p:sp></mc:Fallback></mc:AlternateContent>{}"#,
+        title("AFTER")
+    );
+    let limits = ZipLimits {
+        max_part_shapes: 52,
+        ..ZipLimits::default()
+    };
+    let p = parse_bytes_with_limits(&pack(&[(tree, vec![])], &[]), &limits).unwrap();
+    let text = ppt_core::export::slide_text(&p.presentation.slides[0]);
+    assert!(
+        text.contains("FALLBACK") && text.contains("AFTER"),
+        "{text}"
+    );
+    assert_eq!(diag_sum(&p, DiagnosticKind::ShapesTruncated), 0);
+    assert_eq!(p.presentation.report.shapes_used, 2);
+}

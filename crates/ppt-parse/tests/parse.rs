@@ -425,6 +425,76 @@ fn alternate_content_group_with_a_real_shape_still_picks_choice() {
     assert_eq!(first_text(&g.children[0]), "CHOICE");
 }
 
+/// 组合包一层(Choice 里常见的写法)。
+fn grp(inner: &str) -> String {
+    format!(
+        r#"<p:grpSp><p:nvGrpSpPr><p:cNvPr id="2" name="g"/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr/>{inner}</p:grpSp>"#
+    )
+}
+
+fn alt_choice(choice: &str) -> String {
+    format!(
+        r#"<mc:AlternateContent><mc:Choice Requires="p14">{choice}</mc:Choice>{FALLBACK_SP}</mc:AlternateContent>"#
+    )
+}
+
+/// 信息量为 0 的 Choice(空文本框 / 无几何无文字的形状 / 无媒体的图片,无论包几层组合)让位给有文字的
+/// Fallback:判定比较两边的信息量,不再是"有没有某类形状"。
+#[test]
+fn alternate_content_weak_choices_yield_to_fallback_text() {
+    let empty_text_box = r#"<p:sp><p:nvSpPr><p:cNvPr id="3" name="e"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="10" cy="10"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:p/></p:txBody></p:sp>"#;
+    let bare_sp = "<p:sp><p:spPr/></p:sp>";
+    let pic_no_media = r#"<p:pic><p:nvPicPr><p:cNvPr id="4" name="p"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill><a:blip/></p:blipFill><p:spPr/></p:pic>"#;
+    for choice in [empty_text_box, bare_sp, pic_no_media] {
+        for wrapped in [grp(choice), grp(&grp(choice)), choice.to_string()] {
+            let shapes = shapes_of(&alt_choice(&wrapped));
+            assert_eq!(shapes.len(), 1, "{wrapped}: {shapes:?}");
+            assert_eq!(first_text(&shapes[0]), "FALLBACK", "{wrapped}");
+        }
+    }
+}
+
+/// 两边都没有信息量时取形状(叶子)多的一边:Choice 是空组合(0 个叶子)、Fallback 是 OLE 占位框
+/// (1 个)→ 保住占位框;叶子数相同 → Choice。
+#[test]
+fn alternate_content_both_weak_prefers_more_leaves_then_choice() {
+    let ole = r#"<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id="7" name="o"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x="0" y="0"/><a:ext cx="1" cy="1"/></p:xfrm><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/presentationml/2006/ole"><p:oleObj r:id="rId8"><p:embed/></p:oleObj></a:graphicData></a:graphic></p:graphicFrame>"#;
+    let ink = r#"<p14:contentPart r:id="rId5"/>"#;
+    let shapes = shapes_of(&format!(
+        r#"<mc:AlternateContent><mc:Choice Requires="p14">{}</mc:Choice><mc:Fallback>{ole}</mc:Fallback></mc:AlternateContent>"#,
+        grp(ink)
+    ));
+    assert!(
+        matches!(shapes.as_slice(), [Shape::Placeholder(p)] if p.kind.as_deref().is_some_and(|k| k.ends_with("/ole"))),
+        "{shapes:?}"
+    );
+    let shapes = shapes_of(&format!(
+        r#"<mc:AlternateContent><mc:Choice Requires="p14">{}</mc:Choice><mc:Fallback>{}</mc:Fallback></mc:AlternateContent>"#,
+        grp("<p:sp><p:spPr/></p:sp>"),
+        "<p:cxnSp><p:spPr/></p:cxnSp>"
+    ));
+    assert!(matches!(shapes.as_slice(), [Shape::Group(_)]), "{shapes:?}");
+}
+
+/// 有信息量的 Choice(嵌套组合深处的文字、有几何的形状)照旧胜出。
+#[test]
+fn alternate_content_substantive_nested_choice_still_wins() {
+    let deep_text = grp(&grp(
+        r#"<p:sp><p:txBody><a:p><a:r><a:t>DEEP</a:t></a:r></a:p></p:txBody></p:sp>"#,
+    ));
+    let shapes = shapes_of(&alt_choice(&deep_text));
+    let Shape::Group(g) = &shapes[0] else {
+        panic!("{shapes:?}");
+    };
+    let Shape::Group(g2) = &g.children[0] else {
+        panic!();
+    };
+    assert_eq!(first_text(&g2.children[0]), "DEEP");
+    let drawn = r#"<p:sp><p:spPr><a:prstGeom prst="rect"/></p:spPr></p:sp>"#;
+    let shapes = shapes_of(&alt_choice(&grp(drawn)));
+    assert!(matches!(shapes.as_slice(), [Shape::Group(_)]), "{shapes:?}");
+}
+
 /// 形状树层面 5000 层嵌套 AlternateContent 不栈溢出、不 panic。
 #[test]
 fn deeply_nested_shape_alternate_content_does_not_overflow() {

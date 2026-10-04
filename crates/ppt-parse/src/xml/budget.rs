@@ -138,6 +138,34 @@ pub(crate) fn note_truncated() {
     update(|st| st.usage.values_truncated = st.usage.values_truncated.saturating_add(1));
 }
 
+/// 当前用量快照(与 [`since`] 配对,量出一段解析的花费)。
+pub(crate) fn usage() -> Usage {
+    STATE.with(|s| s.get().usage)
+}
+
+/// 自快照 `before` 以来的花费。
+pub(crate) fn since(before: Usage) -> Usage {
+    let now = usage();
+    Usage {
+        items_used: now.items_used - before.items_used,
+        items_dropped: now.items_dropped - before.items_dropped,
+        bytes_used: now.bytes_used - before.bytes_used,
+        values_truncated: now.values_truncated - before.values_truncated,
+    }
+}
+
+/// 退还一段解析的花费(落选分支:额度还回去,丢弃 / 截短计数撤回——它们不是真的丢失)。
+pub(crate) fn refund(cost: Usage) {
+    update(|st| {
+        st.items_left = st.items_left.saturating_add(cost.items_used);
+        st.bytes_left = st.bytes_left.saturating_add(cost.bytes_used);
+        st.usage.items_used -= cost.items_used;
+        st.usage.bytes_used -= cost.bytes_used;
+        st.usage.items_dropped -= cost.items_dropped;
+        st.usage.values_truncated -= cost.values_truncated;
+    });
+}
+
 /// 当前剩余的模型字节额度。
 pub(crate) fn bytes_left() -> usize {
     STATE.with(|s| s.get().bytes_left)

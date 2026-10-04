@@ -589,35 +589,112 @@ fn parse_grp_sppr<R: std::io::BufRead>(
     (xfrm, fill)
 }
 
-/// 形状是否有实质内容:裸 OLE 占位框(没有预览图可画的 OLE graphicFrame)与没有任何实质后代的
-/// 组合(含嵌套)都算空壳;其余形状都算实质。组合嵌套深度由解析层限制在 64 层内,递归有界。
-fn has_substance(s: &Shape) -> bool {
+/// `mc:AlternateContent` 分支的信息量(确定性评分):可见文字字符数(非空白字符)为主,外加实质
+/// 对象个数——有媒体的图片、表格、图表、SmartArt、有几何的形状 / 连接线各记 1;空文本框、无媒体
+/// 图片、无几何无文字的形状、裸 OLE 占位框、空组合记 0。组合取后代之和(嵌套深度已由解析层限在
+/// 64 层内,递归有界)。只比较"是否为 0",不比较两边大小。
+fn info_score(s: &Shape) -> usize {
+    fn chars(paras: &[Paragraph]) -> usize {
+        paras
+            .iter()
+            .flat_map(|p| &p.runs)
+            .map(|r| r.text.chars().filter(|c| !c.is_whitespace()).count())
+            .sum()
+    }
     match s {
-        Shape::Group(g) => g.children.iter().any(has_substance),
-        Shape::Placeholder(p) => !p.kind.as_deref().is_some_and(|k| k.ends_with("/ole")),
-        _ => true,
+        Shape::TextBox(t) => chars(&t.paragraphs),
+        Shape::Auto(a) => {
+            a.text.as_ref().map_or(0, |t| chars(&t.paragraphs))
+                + usize::from(a.geometry.is_some() || a.custom_geometry)
+        }
+        Shape::Connector(c) => usize::from(c.geometry.is_some() || c.custom_geometry),
+        Shape::Picture(p) => usize::from(p.image_bytes_len > 0),
+        Shape::Table(t) => {
+            1 + t
+                .rows
+                .iter()
+                .flat_map(|r| &r.cells)
+                .map(|c| chars(&c.paragraphs))
+                .sum::<usize>()
+        }
+        Shape::Placeholder(p) => {
+            usize::from(p.chart_rel_id.is_some() || p.diagram_rel_id.is_some())
+                + p.diagram_text.iter().map(String::len).sum::<usize>()
+        }
+        Shape::Group(g) => g.children.iter().map(info_score).sum(),
     }
 }
 
-/// 解析 `mc:AlternateContent`(Markup Compatibility,ECMA-376 Part 3),与 docspine 同策略:
-/// 按文档顺序把每个 `mc:Choice` 交给形状解析试一遍,第一个**产出非空形状**的被选中;
-/// Choice 里常是本仓不认识的新版元素(`p14:` / `a14:` …),解析为空是预期的,此时回落
-/// `mc:Fallback`。流式 reader 无法回退,故各分支顺序解析、选中后其余丢弃——Choice 与
-/// Fallback 内容绝不同时输出。
+/// 叶子形状数(组合不计,只数后代);两个分支都没有信息量时用它分高下。
+fn leaf_count(s: &Shape) -> usize {
+    match s {
+        Shape::Group(g) => g.children.iter().map(leaf_count).sum(),
+        _ => 1,
+    }
+}
+
+/// 一个分支解析的全部花费(落选时整体退还)。
+#[derive(Clone, Copy, Default)]
+struct BranchCost {
+    usage: super::budget::Usage,
+    shapes_used: usize,
+    shapes_dropped: usize,
+    nest_skipped: usize,
+    custgeom_degraded: usize,
+}
+
+/// 解析一个 `mc:Choice` / `mc:Fallback` 分支的形状,并量出它的花费。
+fn parse_branch<R: std::io::BufRead>(
+    reader: &mut Reader<R>,
+    ctx: &Ctx,
+) -> (Vec<Shape>, BranchCost) {
+    let usage = super::budget::usage();
+    let (left, dropped) = (ctx.shapes_left.get(), ctx.shapes_dropped.get());
+    let nest = NEST_SKIPPED.with(std::cell::Cell::get);
+    let cg = CUSTGEOM_DEGRADED.with(std::cell::Cell::get);
+    let mut shapes = Vec::new();
+    parse_shapes_into(reader, ctx, &mut shapes);
+    let cost = BranchCost {
+        usage: super::budget::since(usage),
+        shapes_used: left - ctx.shapes_left.get(),
+        shapes_dropped: ctx.shapes_dropped.get() - dropped,
+        nest_skipped: NEST_SKIPPED.with(std::cell::Cell::get) - nest,
+        custgeom_degraded: CUSTGEOM_DEGRADED.with(std::cell::Cell::get) - cg,
+    };
+    (shapes, cost)
+}
+
+/// 退还落选分支的花费:形状 / 节点 / 模型字节额度还回去,丢弃与降级计数撤回。
+fn refund_branch(ctx: &Ctx, cost: BranchCost) {
+    super::budget::refund(cost.usage);
+    ctx.shapes_left
+        .set(ctx.shapes_left.get() + cost.shapes_used);
+    ctx.shapes_dropped
+        .set(ctx.shapes_dropped.get() - cost.shapes_dropped);
+    NEST_SKIPPED.with(|c| c.set(c.get() - cost.nest_skipped));
+    CUSTGEOM_DEGRADED.with(|c| c.set(c.get() - cost.custgeom_degraded));
+}
+
+/// 解析 `mc:AlternateContent`(Markup Compatibility,ECMA-376 Part 3)。流式 reader 无法回退,
+/// 各分支按文档顺序解析,按信息量([`info_score`])选一个,其余丢弃并**退还预算**——Choice 与
+/// Fallback 内容绝不同时输出。规则(确定性):
+/// 1. 文档顺序第一个信息量 > 0 的 `mc:Choice` 胜出(之后的 Choice / Fallback 不再解析);
+/// 2. 所有 Choice 信息量都为 0、Fallback > 0 → 取 Fallback;
+/// 3. 两边都为 0 → 取叶子形状多的一边(Choice 之间取先出现的),相同取 Choice——于是空组合
+///    (组合墨迹)让位给 OLE 占位框,两个裸 OLE 占位框保住 Choice 的。
 ///
-/// OLE 例外:PowerPoint 常把整个 graphicFrame 包进来,Choice 里的 `p:oleObj` 只有 `p:embed`
-/// (解析为无预览图的 OLE 占位框,非空但无实质内容),带 `p:pic` 预览图的在 Fallback。
-/// 只含这种"裸 OLE 占位框"的分支算**弱**内容:有实质内容的分支优先,两边都只有弱内容时
-/// 仍取第一个非空分支(保住占位框)。组合递归判定:没有任何实质后代的组合(如 Choice 里
-/// 子元素全不认识的组合墨迹 `p:grpSp`)同样算弱内容,见 [`has_substance`]。已消费起始标签。
+/// Choice 里常是本仓不认识的新版元素(`p14:` / `a14:` …)、空文本框、无媒体图片或只剩外壳的组合,
+/// 它们的信息量为 0,Fallback 的文字 / 预览图因此不会丢。已消费起始标签。
 fn parse_alternate_content<R: std::io::BufRead>(
     reader: &mut Reader<R>,
     ctx: &Ctx,
     out: &mut Vec<Shape>,
 ) {
-    let strong = |v: &Vec<Shape>| v.iter().any(has_substance);
+    let leaves = |v: &[Shape]| v.iter().map(leaf_count).sum::<usize>();
+    let strong = |v: &[Shape]| v.iter().map(info_score).sum::<usize>() > 0;
     let mut chosen: Option<Vec<Shape>> = None;
-    let mut fallback: Option<Vec<Shape>> = None;
+    let mut weak: Option<(Vec<Shape>, BranchCost)> = None;
+    let mut fallback: Option<(Vec<Shape>, BranchCost)> = None;
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {
@@ -625,17 +702,25 @@ fn parse_alternate_content<R: std::io::BufRead>(
                 let name = local_name(e.name().as_ref()).to_vec();
                 match name.as_slice() {
                     b"Choice" if chosen.is_none() => {
-                        let mut shapes = Vec::new();
-                        parse_shapes_into(reader, ctx, &mut shapes);
-                        if !shapes.is_empty() {
+                        let (shapes, cost) = parse_branch(reader, ctx);
+                        if strong(&shapes) {
                             chosen = Some(shapes);
+                            for (_, c) in weak.take().into_iter().chain(fallback.take()) {
+                                refund_branch(ctx, c);
+                            }
+                        } else if weak
+                            .as_ref()
+                            .is_none_or(|(w, _)| leaves(&shapes) > leaves(w))
+                        {
+                            if let Some((_, c)) = weak.replace((shapes, cost)) {
+                                refund_branch(ctx, c);
+                            }
+                        } else {
+                            refund_branch(ctx, cost);
                         }
                     }
-                    // 已有实质内容的 Choice 时不再解析 Fallback。
-                    b"Fallback" if fallback.is_none() && !chosen.as_ref().is_some_and(strong) => {
-                        let mut shapes = Vec::new();
-                        parse_shapes_into(reader, ctx, &mut shapes);
-                        fallback = Some(shapes);
+                    b"Fallback" if chosen.is_none() && fallback.is_none() => {
+                        fallback = Some(parse_branch(reader, ctx));
                     }
                     _ => skip_element(reader, &name),
                 }
@@ -647,11 +732,22 @@ fn parse_alternate_content<R: std::io::BufRead>(
         }
         buf.clear();
     }
-    let picked = match (chosen, fallback) {
-        (Some(c), _) if strong(&c) => c,
-        (_, Some(f)) if strong(&f) => f,
-        (Some(c), _) => c,
-        (None, f) => f.unwrap_or_default(),
+    let picked = match (chosen, weak, fallback) {
+        (Some(c), _, _) => c,
+        (None, w, Some((f, fc))) => {
+            let take_fallback =
+                strong(&f) || w.as_ref().is_none_or(|(w, _)| leaves(&f) > leaves(w));
+            if take_fallback {
+                if let Some((_, c)) = w {
+                    refund_branch(ctx, c);
+                }
+                f
+            } else {
+                refund_branch(ctx, fc);
+                w.map(|(w, _)| w).unwrap_or_default()
+            }
+        }
+        (None, w, None) => w.map(|(w, _)| w).unwrap_or_default(),
     };
     out.extend(picked);
 }
@@ -1574,9 +1670,13 @@ fn parse_alt_runs<R: std::io::BufRead>(reader: &mut Reader<R>, alt_depth: u32) -
                 let name = local_name(e.name().as_ref()).to_vec();
                 match name.as_slice() {
                     b"Choice" if chosen.is_none() => {
+                        let before = super::budget::usage();
                         let runs = parse_run_container(reader, alt_depth);
                         if runs.iter().any(|r| !r.text.is_empty()) {
                             chosen = Some(runs);
+                        } else {
+                            // 落选的 Choice 不占预算(同形状层)。
+                            super::budget::refund(super::budget::since(before));
                         }
                     }
                     b"Fallback" if chosen.is_none() && fallback.is_none() => {
